@@ -1,0 +1,34 @@
+Segment [a] snakes OFF towards [b]      A pixels turn OFF left-to-right
+Segment [a] snakes ON away from [b]     A pixels turn ON right-to-left
+Segment [a] snakes ON towards [b]       A pixels turn ON left-to-right
+
+Segment [b] snakes OFF towards [a]      B pixels turn OFF bottom-to-top
+Segment [b] snakes ON away from [a]     B pixels turn ON top-to-bottom
+Segment [b] snakes ON towards [a]       B pixels turn ON bottom-to-top
+
+Segment [c] snakes OFF towards [b]      C pixels turn OFF bottom-to-top
+Segment [c] snakes ON away from [b]     C pixels turn ON top-to-bottom
+Segment [c] snakes ON towards [b]       C pixels turn ON bottom-to-top
+
+Segment [d] snakes OFF towards [c]      D pixels turn OFF left-to-right
+Segment [d] snakes ON away from [c]     D pixels turn ON right-to-left
+Segment [d] snakes ON towards [c]       D pixels turn ON left-to-right
+
+Segment [e] snakes OFF towards [d]      E pixels turn OFF top-to-bottom
+Segment [e] snakes OFF towards [g]      E pixels turn OFF bottom-to-top
+Segment [e] snakes ON away from [d]     E pixels turn ON bottom-to-top
+Segment [e] snakes ON away from [g]     E pixels turn ON top-to-bottom
+Segment [e] snakes ON towards [f]       E pixels turn ON bottom-to-top
+VERT Segment [e] slides LEFT from [c]   E column moves right-to-left
+VERT Segment [e] slides RIGHT to [c]    E column moves left-to-right
+
+Segment [f] snakes OFF towards [a]      F pixels turn OFF bottom-to-top
+Segment [f] snakes ON away from [a]     F pixels turn ON top-to-bottom
+Segment [f] snakes ON towards [a]       F pixels turn ON bottom-to-top
+Segment [f] snakes ON towards [e]       F pixels turn ON top-to-bottom
+VERT Segment [f] slides LEFT from [b]   F column moves right-to-left
+VERT Segment [f] slides RIGHT to [b]    F column moves left-to-right
+
+Segment [g] snakes OFF towards [b]      G pixels turn OFF left-to-right
+Segment [g] snakes ON away from [b]     G pixels turn ON right-to-left
+Segment [g] snakes ON towards [b]       G pixels turn ON left-to-right
