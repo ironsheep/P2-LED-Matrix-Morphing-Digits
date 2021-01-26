@@ -14,6 +14,25 @@ This project is my nod to **Hari Wiguna**'s [HariFun #165 video](https://www.you
 
 **<= This is a work in progress =>**
 
+## Project Goals
+
+- Evaluate how hard it would be to plan transitions using a Python script
+- Generate animation Tables to be included in spin2 code for use on P2
+- Create a demo using multiple LED Matrix panels driven by our new P2 driver
+
+## The Generator 
+
+### Just the Facts
+
+### Animations
+
+### Encoding the Animations
+
+## Running the Script
+
+## Running the Demo
+
+### Using using this code to make your own display
 
 ----
 
