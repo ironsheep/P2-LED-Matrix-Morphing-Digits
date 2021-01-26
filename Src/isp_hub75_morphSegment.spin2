@@ -1,0 +1,567 @@
+'' =================================================================================================
+''
+''   File....... isp_hub75_morphSegment.spin2
+''   Purpose.... manipulate a single morphing segment
+''   Authors.... Stephen M Moraco
+''               -- Copyright (c) 2020 Iron Sheep Productions, LLC
+''               -- see below for terms of use
+''   E-mail..... stephen@ironsheep.biz
+''   Started.... Jan 2021
+''   Updated.... 21 Jan 2021
+''
+'' =================================================================================================
+
+' There are three types of segments:
+' - 3 horizontal which only snake
+' - 2 right-hand vertical which only snake
+' - 2 left-hand vertical which snake, and move as whole column
+' the background is generally black
+'
+' thedigits 0-9 morph into one another
+'
+'       A
+'     F   B
+'       G
+'     E   C
+'       D
+
+CON { segment states, segment names, orientations and such }
+
+' Segment Orientation Values
+#0, SOR_UNKNOWN, #$40, SOR_TOP_A, #$20, SOR_RIGHT_B, #$10, SOR_RIGHT_C, #$08, SOR_BOTTOM_D, #$04, SOR_LEFT_E, #$02, SOR_LEFT_F, #$01, SOR_MIDDLE_G
+' Segment State values
+#0, STATE_UNKNOWN, STATE_TURNING_OFF, STATE_OFF, STATE_TURNING_ON, STATE_ON
+
+' --------------------------------------------------------------------------------------------------
+' Command Flags %GGG-AAAT where: %GGGx_xxxx = segment, %xxxx_AAAx = style, %xxxx_xxxT = ON/OFF
+'
+#0, MASK_NOTHING, #$01, MASK_ONOFF, #$0E, MASK_STYLE, #$E0, MASK_SEGMENT
+
+' - Segment ID values (used when commanding actions) - %GGGx_xxxx field values
+#0, SEG_UNKNOWN, #$E0, SEG_TOP_A, #$C0, SEG_RIGHT_B, #$A0, SEG_RIGHT_C, #$80, SEG_BOTTOM_D, #$60, SEG_LEFT_E, #$40, SEG_LEFT_F, #$20, SEG_MIDDLE_G
+
+' - turn ON/OFF - %xxxx_xxxT field values
+#0, CMD_TURN_ON, #$01, CMD_TURN_OFF
+
+' STYLE to use to when turning ON/OFF - %xxxx_AAAx field values
+' %00000 CMD_UNKNOWN
+' %00010 CMD_BOTTOM_UP
+' %00100 CMD_TOP_DOWN
+' %00110 CMD_LT_TO_RT
+' %01000 CMD_RT_TO_LT
+' %01010 CMD_COL_TO_RT
+' %01100 CMD_COL_TO_LT
+' %01110 CMD_IMMEDIATE
+#0, CMD_UNKNOWN, #$02, CMD_BOTTOM_UP, #$04, CMD_TOP_DOWN, #$06, CMD_LT_TO_RT, #$08, CMD_RT_TO_LT, #$0A, CMD_COL_TO_RT, #$0C, CMD_COL_TO_LT, #$0E, CMD_IMMEDIATE
+'
+' --------------------------------------------------------------------------------------------------
+
+OBJ
+    screen      : "isp_hub75_screenAccess"
+    pixels      : "isp_hub75_screenUtils"
+    color       : "isp_hub75_color"
+
+VAR
+    ' configuration
+    long    segOrientation
+    ' animation in progress
+    long    animateStyle
+    long    stepCount
+    long    currentState
+    long    nextState
+    long    desiredEndState
+    ' independent of orientation:
+    long    segLength
+    long    segThickness
+    ' based on orientation:
+    long    segHeight
+    long    segWidth
+    ' top-left corner
+    long    segStartX
+    long    segStartY
+    ' color
+    long    segRgbColor    ' TODO add next color for when ea. digit value can be a diff color
+
+
+PUB null()
+    '' This is NOT a top level object
+
+PUB placeSegment(row, column, orientation, segmentWidth, segmentLength, initialState, rgbColor) | nmInitState, nmSeg, bIsHoriz
+    nmInitState := nameOfState(initialState)
+    nmSeg := nameOfSegment(orientation)
+    'debug("mSG:placeSegment rc=(", udec_(row), ",", udec_(column), "), ", zstr_(nmSeg), ", wl=(", udec_(segmentWidth) , ", ", udec_(segmentLength), "), ", zstr_(nmInitState), ", RGB=", uhex_long_(rgbColor))
+    '' Locate a desired segment on our screen. Draw initial segement if state is NOT off
+    ' record settings choices we are given extrapolating some
+    currentState := desiredEndState := nextState := STATE_OFF
+    segStartX :=  0 #> column <# screen.MAX_PHYSICAL_COLUMNS - 1
+    segStartY :=  0 #> row <# screen.MAX_PHYSICAL_ROWS - 1
+    segOrientation := orientation
+    segRgbColor := rgbColor
+    segLength := segmentLength
+    segThickness := segmentWidth
+    stepCount := 0
+    bIsHoriz := FALSE
+    case orientation
+        SOR_TOP_A:
+            bIsHoriz := TRUE
+        SOR_BOTTOM_D:
+            bIsHoriz := TRUE
+        SOR_MIDDLE_G:
+            bIsHoriz := TRUE
+        SOR_RIGHT_B:
+        SOR_RIGHT_C:
+        SOR_LEFT_E:
+        SOR_LEFT_F:
+        OTHER:
+            debug("mSG: BAD segment type!")
+            abort
+    if bIsHoriz
+        ' horiz: short, wide
+        segHeight := segThickness
+        segWidth := segLength
+    else
+        ' vert: tall, narrow
+        segHeight := segLength
+        segWidth := segThickness
+    ' if the segment is initially showing, let's draw it!
+    if initialState <> currentState
+        updateSegmentToState(initialState)
+
+PUB commandSegment(commandBits) | bTurnOn, nmStyle, nmSeg, nmOnOff
+    '' Start the segment moving to _OFF if not already off and NOT busy
+    bTurnOn := (commandBits & MASK_ONOFF) == CMD_TURN_ON
+    animateStyle := (commandBits & MASK_STYLE)
+    nmStyle := nameOfCommand(animateStyle)
+    nmSeg := nameOfSegment(segOrientation)
+    'nmOnOff := nameForOnOff(bTurnOn)
+    'debug("mSG:cmd ", zstr_(nmSeg), ", ", sdec(bTurnOn), ", ", zstr_(nmStyle))
+    if (bTurnOn == TRUE && currentState <> STATE_ON) || (bTurnOn == FALSE && currentState <> STATE_OFF)
+        case animateStyle
+            CMD_BOTTOM_UP:
+                stepCount := segLength
+            CMD_TOP_DOWN:
+                stepCount := segLength
+            CMD_LT_TO_RT:
+                stepCount := segLength
+            CMD_RT_TO_LT:
+                stepCount := segLength
+            CMD_COL_TO_RT:
+                stepCount := segLength - 1
+            CMD_COL_TO_LT:
+                stepCount := segLength - 1
+            CMD_IMMEDIATE:
+                stepCount := 1
+            other:
+                debug("BAD animaStyle")
+        if bTurnOn
+            nextState := STATE_TURNING_ON
+            desiredEndState := STATE_ON
+        else
+            nextState := STATE_TURNING_OFF
+            desiredEndState := STATE_OFF
+        moveSegmentToState(nextState)
+
+PUB hideSegment()
+    '' Start the segment moving to _OFF if not already off and NOT busy
+    if isMovementComplete()
+        if currentState <> STATE_OFF
+            commandSegment(CMD_TURN_OFF | CMD_IMMEDIATE)
+
+PUB showSegment()
+    'debug("mSG:show orient=(", udec_(segOrientation), ")")
+    '' Start the segment moving to _ON if not already on and NOT busy
+    if isMovementComplete()
+        if currentState <> STATE_ON
+            commandSegment(CMD_TURN_ON | CMD_IMMEDIATE)
+
+PUB isMovementComplete() : status
+    '' Return T/F where T means that all movement for this segment is complete
+    status := (desiredEndState == currentState)
+
+PUB animateStep()
+    '' Do one animation step, if one is pending
+    if not isMovementComplete()
+        updateSegmentToState(nextState)
+
+PRI moveSegmentToState(newNextState) | nmEndState, nmNextState
+    '' Start sequence of segment updates to desired state (on/off)
+    nmEndState := nameOfState(desiredEndState)
+    nmNextState := nameOfState(newNextState)
+    'debug("mSG:mov id(segT", udec_(segOrientation), "), ", zstr_(nmNextState), " -> ", zstr_(nmEndState))
+    ' if we are asking to be in a different state then...
+    if desiredEndState <> newNextState
+        ' if we are not yet at an end state (still moving) then abort
+        if currentState <> STATE_OFF && currentState <> STATE_ON
+            'debug("mSG: state still in motion, ignoring request")
+            abort
+        if newNextState <> STATE_TURNING_ON && newNextState <> STATE_TURNING_OFF
+            'debug("mSG: BAD end-state must be TURNING ON or OFF!")
+            abort
+        nextState := newNextState
+        updateSegmentToState(nextState)
+    else
+        debug("  -- already in newNextState?")
+
+PRI updateSegmentToState(newState) | nmCurrState, nmNewState, nmEndState, nmSeg
+    nmCurrState := nameOfState(currentState)
+    nmNewState := nameOfState(newState)
+    nmEndState := nameOfState(desiredEndState)
+    nmSeg := nameOfSegment(segOrientation)
+    'debug("mSG:upd  ", zstr_(nmSeg), ", ", zstr_(nmCurrState), " -> ", zstr_(nmNewState), ", end:", zstr_(nmEndState), ")")
+    ' Draw segment of specific state (marking the new state as current when done)
+    case segOrientation
+        SOR_TOP_A:
+            updateHorizontalSegment(newState)       ' to-left or to-right moves only
+        SOR_MIDDLE_G:
+            updateHorizontalSegment(newState)       ' to-left or to-right moves only
+        SOR_BOTTOM_D:
+            updateHorizontalSegment(newState)       ' to-left or to-right moves only
+        SOR_LEFT_E:
+            updateSpecialVerticalSegment(newState)  ' this does column moves too!
+        SOR_LEFT_F:
+            updateSpecialVerticalSegment(newState)  ' this does column moves too!
+        SOR_RIGHT_B:
+            updateVerticalSegment(newState)         ' NO column moves!
+        SOR_RIGHT_C:
+            updateVerticalSegment(newState)         ' NO column moves!
+    if stepCount > 0
+        stepCount := stepCount - 1
+    if stepCount == 0
+        if newState == STATE_TURNING_OFF
+            currentState := STATE_OFF
+        else
+            currentState := STATE_ON
+        nmCurrState := nameOfState(currentState)
+        'debug("mSG:upd end with ", zstr_(nmCurrState))
+
+PRI updateVerticalSegment(newState) | pixInset, columnIndex, numberPixelsOff, numberPixelsOn, nmNewState, nmStyle, nmSeg
+    nmNewState := nameOfState(newState)
+    nmStyle := nameOfCommand(animateStyle)
+    nmSeg := nameOfSegment(segOrientation)
+    'debug("mSG:UvSg ", zstr_(nmSeg), " - ", zstr_(nmNewState), ": ", zstr_(nmStyle), udec(stepCount))
+    ' row,col points to upper-left of WIDTH columns by LENGTH rows
+    if segOrientation == SOR_RIGHT_B || segOrientation == SOR_RIGHT_C
+        ' pointing left
+        if newState <> STATE_ON
+            ' clear the vertical segment
+            drawLine(segStartY, segStartX, segStartY + segHeight - 1, segStartX, color.cBlack)
+        ' now draw pixels that are showing
+        case newState
+            STATE_TURNING_ON:   ' showing more pixels every time thru here
+                numberPixelsOn := segHeight - (stepCount - 1)
+                numberPixelsOff := segHeight - numberPixelsOn
+                'debug("- ON pxON=", udec_(numberPixelsOn), ", pxOFF=", udec_(numberPixelsOff))
+                case animateStyle
+                    ' paint newly ON pixels
+                    CMD_BOTTOM_UP:
+                        ' pixels at BOTTOM are being lit
+                            drawLine(segStartY + numberPixelsOff, segStartX, segStartY + segHeight - 1, segStartX, segRgbColor)
+                    CMD_TOP_DOWN:
+                        ' pixels at TOP are being lit
+                        drawLine(segStartY, segStartX, segStartY + numberPixelsOn - 1, segStartX, segRgbColor)
+                    CMD_IMMEDIATE:
+                        drawLine(segStartY, segStartX, segStartY + segHeight - 1, segStartX, segRgbColor)
+                    other:
+                        'debug("STYLE:(vrtR) bad ON animation (", udec_(animateStyle), ")")
+                        abort
+            STATE_ON:   ' full line showing
+                drawLine(segStartY, segStartX, segStartY + segHeight - 1, segStartX, segRgbColor)
+            STATE_TURNING_OFF:  ' showing fewer pixels every time thru here
+                numberPixelsOff := segHeight - (stepCount - 1)
+                numberPixelsOn := segHeight - numberPixelsOff
+                'debug("- OFF pxON=", udec_(numberPixelsOn), ", pxOFF=", udec_(numberPixelsOff))
+                case animateStyle
+                    ' paint remaining ON pixels
+                    CMD_BOTTOM_UP:
+                        ' pixels at TOP are still lit
+                        if numberPixelsOff <> segHeight
+                            drawLine(segStartY, segStartX, segStartY + numberPixelsOn - 1, segStartX, segRgbColor)
+                    CMD_TOP_DOWN:
+                        ' pixels at bottom are still lit
+                        if numberPixelsOff <> segHeight
+                            drawLine(segStartY + numberPixelsOff, segStartX, segStartY + segHeight - 1, segStartX, segRgbColor)
+                    CMD_IMMEDIATE:
+                        drawLine(segStartY, segStartX, segStartY + segHeight - 1, segStartX, segRgbColor)
+                    other:
+                        'debug("STYLE:(vrtR) bad OFF animation (", udec_(animateStyle), ")")
+                        abort
+            STATE_OFF:  ' nothing to do since we clear segment first
+            OTHER:
+                'debug("STATE(vrtR) not imple (", udec_(newstate), ")")
+    else
+        debug("- BAD seg!")
+
+PRI updateHorizontalSegment(newState) | pixInset, rowIndex, numberPixelsOff, numberPixelsOn, nmNewState, nmStyle, nmSeg
+    nmNewState := nameOfState(newState)
+    nmStyle := nameOfCommand(animateStyle)
+    nmSeg := nameOfSegment(segOrientation)
+    'debug("mSG:UhSg ", zstr_(nmSeg), " - ", zstr_(nmNewState), ": ", zstr_(nmStyle), udec(stepCount))
+    ' row,col points to upper-left of LENGTH columns by WIDTH rows
+    if segOrientation == SOR_BOTTOM_D || segOrientation == SOR_TOP_A || segOrientation == SOR_MIDDLE_G
+        ' pointing down
+        if newState <> STATE_ON
+            ' clear the segment
+            drawLine(segStartY, segStartX, segStartY, segStartX + segWidth - 1, color.cBlack)
+        case newState
+            STATE_TURNING_ON:   ' showing more pixels every time thru here
+                numberPixelsOn := segWidth - (stepCount - 1)
+                numberPixelsOff := segWidth - numberPixelsOn
+                'debug("- ON pxON=", udec_(numberPixelsOn), ", pxOFF=", udec_(numberPixelsOff))
+                case animateStyle
+                    CMD_LT_TO_RT:
+                        drawLine(segStartY, segStartX, segStartY, segStartX + numberPixelsOn - 1, segRgbColor)
+                    CMD_RT_TO_LT:
+                        drawLine(segStartY, segStartX + numberPixelsOff, segStartY, segStartX + segWidth - 1, segRgbColor)
+                    CMD_IMMEDIATE:
+                        drawLine(segStartY, segStartX, segStartY, segStartX + segWidth - 1, segRgbColor)
+                    other:
+                        'debug("STYLE:(hrz) bad ON animation (", udec_(animateStyle), ")")
+                        abort
+            STATE_ON:   ' full line showing
+                drawLine(segStartY, segStartX, segStartY, segStartX + segWidth - 1, segRgbColor)
+            STATE_TURNING_OFF:  ' showing less pixels every time thru here
+                numberPixelsOff := segWidth - (stepCount - 1)
+                numberPixelsOn := segWidth - numberPixelsOff
+                'debug("- OFF pxON=", udec_(numberPixelsOn), ", pxOFF=", udec_(numberPixelsOff))
+                case animateStyle
+                    CMD_LT_TO_RT:
+                        if numberPixelsOn > 0
+                            drawLine(segStartY, segStartX + numberPixelsOff, segStartY, segStartX + segWidth - 1, segRgbColor)
+                    CMD_RT_TO_LT:
+                        if numberPixelsOn > 0
+                            drawLine(segStartY, segStartX, segStartY, segStartX + numberPixelsOn - 1, segRgbColor)
+                    CMD_IMMEDIATE:
+                        drawLine(segStartY, segStartX, segStartY, segStartX + segWidth - 1, segRgbColor)
+                    other:
+                        'debug("STYLE:(hrz) bad OFF animation (", udec_(animateStyle), ")")
+                        abort
+            STATE_OFF:  ' nothing to do since we clear segment first
+            OTHER:
+                debug("STATE(hrzT) not yet implemented (", udec_(newstate), ")")
+    else
+        debug("- BAD seg!")
+
+PRI updateSpecialVerticalSegment(newState) | pixInset, rowIndex, numberPixelsOff, numberPixelsOn, colOffset, nmNewState, nmStyle, nmSeg, xOffset
+    nmNewState := nameOfState(newState)
+    nmStyle := nameOfCommand(animateStyle)
+    nmSeg := nameOfSegment(segOrientation)
+    'debug("mSG:UsvSg ", zstr_(nmSeg), " - ", zstr_(nmNewState), ": ", zstr_(nmStyle), udec(stepCount))          ' LIGHTBULB: Uncomment this line to exceed debug space
+    ' row,col points to upper-left of LENGTH columns by WIDTH rows
+    if segOrientation == SOR_LEFT_E || segOrientation == SOR_LEFT_F
+        ' pointing left
+        if newState <> STATE_ON
+            ' clear the vertical segment
+            repeat xOffset from 0 to segHeight - 1
+                drawLine(segStartY, segStartX + xOffset, segStartY + segHeight - 1, segStartX + xOffset, color.cBlack)
+        ' now draw pixels that are showing
+        case newState
+            STATE_TURNING_ON:   ' showing more pixels every time thru here
+                numberPixelsOn := segHeight - (stepCount - 1)
+                numberPixelsOff := segHeight - numberPixelsOn
+                'debug("- ON pxON=", udec_(numberPixelsOn), ", pxOFF=", udec_(numberPixelsOff))
+                case animateStyle
+                    CMD_BOTTOM_UP:
+                        ' pixels at BOTTOM are being lit
+                        drawLine(segStartY + numberPixelsOff, segStartX, segStartY + segHeight - 1, segStartX, segRgbColor)
+                    CMD_TOP_DOWN:
+                        ' pixels at TOP are being lit
+                        drawLine(segStartY, segStartX, segStartY + numberPixelsOn - 1, segStartX, segRgbColor)
+                    CMD_IMMEDIATE:
+                        drawLine(segStartY, segStartX, segStartY + segHeight - 1, segStartX, segRgbColor)
+                    CMD_COL_TO_LT:
+                        colOffset := numberPixelsOff
+                        drawLine(segStartY, segStartX + colOffset, segStartY + segHeight - 1, segStartX + colOffset, segRgbColor)
+                    CMD_COL_TO_RT:
+                        colOffset := numberPixelsOn
+                        drawLine(segStartY, segStartX + colOffset, segStartY + segHeight - 1, segStartX + colOffset, segRgbColor)
+                    other:
+                        'debug("STYLE:(vrtL) bad ON animation (", udec_(animateStyle), ")")
+                        abort
+            STATE_ON:   ' full line showing
+                drawLine(segStartY, segStartX, segStartY + segHeight - 1, segStartX, segRgbColor)
+            STATE_TURNING_OFF:  ' showing fewer pixels every time thru here
+                numberPixelsOff := segHeight - (stepCount - 1)
+                numberPixelsOn := segHeight - numberPixelsOff
+                'debug("- OFF pxON=", udec_(numberPixelsOn), ", pxOFF=", udec_(numberPixelsOff))
+                case animateStyle
+                    ' paint remaining ON pixels
+                    CMD_BOTTOM_UP:
+                        ' pixels at TOP are still lit
+                        if numberPixelsOff <> segHeight
+                            drawLine(segStartY, segStartX, segStartY + numberPixelsOn - 1, segStartX, segRgbColor)
+                    CMD_TOP_DOWN:
+                        ' pixels at bottom are still lit
+                        if numberPixelsOff <> segHeight
+                            drawLine(segStartY + numberPixelsOff, segStartX, segStartY + segHeight - 1, segStartX, segRgbColor)
+                    CMD_IMMEDIATE:
+                        drawLine(segStartY, segStartX, segStartY + segHeight - 1, segStartX, segRgbColor)
+                    CMD_COL_TO_LT:
+                        colOffset := numberPixelsOn
+                        if numberPixelsOn > 0
+                            drawLine(segStartY, segStartX + colOffset, segStartY + segHeight - 1, segStartX + colOffset, segRgbColor)
+                    CMD_COL_TO_RT:
+                        colOffset := numberPixelsOff
+                        if numberPixelsOn > 0
+                            drawLine(segStartY, segStartX + colOffset, segStartY + segHeight - 1, segStartX + colOffset, segRgbColor)
+                            drawLine(segStartY, segStartX + colOffset -1, segStartY + segHeight - 1, segStartX + colOffset -1, segRgbColor)
+                    other:
+                        'debug("STYLE:(vrtL) bad OFF animation (", udec_(animateStyle), ")")
+                        abort
+            STATE_OFF:  ' nothing to do since we clear segment first
+            OTHER:
+                debug("STATE(vrtR) not yet implemented (", udec_(newstate), ")")
+    else
+        debug("- BAD seg!")
+
+
+PRI drawLine(fmRow, fmColumn, toRow, toColumn, rgbColor) | row, column
+    'debug("mSG:drwLn fmRC=(", udec_(fmRow), ",", udec_(fmColumn), "), toRC=(", udec_(toRow), ",", udec_(toColumn), "), RGB=(", uhex_long(rgbColor), ")")
+    fmRow :=  0 #> fmRow <# screen.MAX_PHYSICAL_ROWS - 1
+    fmColumn :=  0 #> fmColumn <# screen.MAX_PHYSICAL_COLUMNS - 1
+    toRow :=  0 #> toRow <# screen.MAX_PHYSICAL_ROWS - 1
+    toColumn :=  0 #> toColumn <# screen.MAX_PHYSICAL_COLUMNS - 1
+    if fmRow == toRow
+        ' draw Horizontal Line
+        repeat column from fmColumn to toColumn
+            pixels.drawPixelAtRCwithRGB(fmRow, column, color.rgbForCValue(rgbColor))
+    elseif fmColumn == toColumn
+        ' draw Vertical Line
+        repeat row from fmRow to toRow
+            pixels.drawPixelAtRCwithRGB(row, fmColumn, color.rgbForCValue(rgbColor))
+    else
+        debug("DIAG lines not implemented !")
+        abort
+
+
+PRI isDebugLocn(nRow, nCol) : status
+    ' return T/F where T means we should show debug for this RC
+    status := FALSE
+    'if (nRow == 31 && nCol < 4) || (nRow < 2 && nCol < 3) || (nRow == 31 && nCol > 61) || (nRow < 2 && nCol > 61)
+    if (nRow  > 29)
+        status := TRUE ' FALSE  ' turn off debug
+
+PRI nameOfState(state) : stateName
+    case state
+        STATE_UNKNOWN:
+            stateName := @nmUnknown
+        STATE_TURNING_OFF:
+            stateName := @nmTurningOff
+        STATE_OFF:
+            stateName := @nmOFF
+        STATE_TURNING_ON:
+            stateName := @nmTurningOn
+        STATE_ON:
+            stateName := @nmOn
+        other:
+            stateName := @nmBad
+
+PRI nameOfCommand(command) : cmdName
+    case command
+        CMD_UNKNOWN:
+            cmdName := @cmdUnknown
+        CMD_BOTTOM_UP:
+            cmdName := @cmdBotUp
+        CMD_TOP_DOWN:
+            cmdName := @cmdTopDn
+        CMD_LT_TO_RT:
+            cmdName := @cmdLtToRt
+        CMD_RT_TO_LT:
+            cmdName := @cmdRtToLt
+        CMD_COL_TO_RT:
+            cmdName := @cmdColToRt
+        CMD_COL_TO_LT:
+            cmdName := @cmdColToLt
+        CMD_IMMEDIATE:
+            cmdName := @cmdImmed
+        other:
+            cmdName := @cmdBad
+
+PRI nameOfSegment(orientation) : segName
+    case orientation
+        SOR_UNKNOWN:
+            segName := @segUnknown
+        SOR_LEFT_E:
+            segName := @segE
+        SOR_LEFT_F:
+            segName := @segF
+        SOR_RIGHT_B:
+            segName := @segB
+        SOR_RIGHT_C:
+            segName := @segC
+        SOR_TOP_A:
+            segName := @segA
+        SOR_MIDDLE_G:
+            segName := @segG
+        SOR_BOTTOM_D:
+            segName := @segD
+        other:
+            segName := @segBAD
+
+PRI nameForOnOff(isOn) : boolName
+    boolName := swTurnOFF
+    if (isOn)
+        boolName := swTurnON
+
+DAT { state names }
+
+nmUnknown       byte    "stUNKNOWN", 0
+nmTurningOff    byte    "stTURNING_OFF", 0
+nmOFF           byte    "stOFF", 0
+nmTurningOn     byte    "stTURNING_ON", 0
+nmOn            byte    "stON", 0
+nmBad           byte    "STATE_BAD", 0
+
+cmdUnknown      byte  "cmdUNKNOWN", 0
+cmdBotUp        byte  "cmdBOTTOM_UP", 0
+cmdTopDn        byte  "cmdTOP_DOWN", 0
+cmdLtToRt       byte  "cmdLT_TO_RT", 0
+cmdRtToLt       byte  "cmdRT_TO_LT", 0
+cmdColToRt      byte  "cmdCOL_TO_RT", 0
+cmdColToLt      byte  "cmdCOL_TO_LT", 0
+cmdImmed        byte  "cmdIMMEDIATE", 0
+cmdBad          byte  "CMD_BAD", 0
+
+segUnknown      byte  "SOR_UNKNOWN", 0
+segE            byte  "SOR_LEFT_E", 0
+segF            byte  "SOR_LEFT_F", 0
+segB            byte  "SOR_RIGHT_B", 0
+segC            byte  "SOR_RIGHT_C", 0
+segA            byte  "SOR_TOP_A", 0
+segG            byte  "SOR_MIDDLE_G", 0
+segD            byte  "SOR_BOTTOM_D", 0
+segBAD          byte  "SOR_BAD", 0
+
+swTurnON        byte  "TURN_ON", 0
+swTurnOFF       byte  "TURN_OFF", 0
+
+
+CON { license }
+
+{{
+
+
+ -------------------------------------------------------------------------------------------------
+  MIT License
+
+  Copyright (c) 2020 Iron Sheep Productions, LLC
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+ =================================================================================================
+
+}}

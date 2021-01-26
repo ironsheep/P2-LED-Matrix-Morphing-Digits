@@ -1,0 +1,291 @@
+'' =================================================================================================
+''
+''   File....... isp_hub75_morphCounters.spin2
+''   Purpose.... Manage groups of morphing 7-segment digits
+''   Authors.... Stephen M Moraco
+''               -- Copyright (c) 2020 Iron Sheep Productions, LLC
+''               -- see below for terms of use
+''   E-mail..... stephen@ironsheep.biz
+''   Started.... Jan 2021
+''   Updated.... 24 Jan 2021
+''
+'' =================================================================================================
+
+CON { public control values }
+
+    DIGIT_NO_VALUE = -2   ' digit value when NOT [0-9]
+    DIGIT_HIDDEN = -1     ' digit value when NOT [0-9]
+
+    WITH_WRAP = TRUE
+    WITHOUT_WRAP = FALSE
+
+CON { Display constants }
+
+#0, GRP_UNKNOWN, GRP_CLOCK, GRP_UP_COUNTER, GRP_DOWN_COUNTER, GRP_DIGITS, GRP_DIGITS_RANDOM
+
+MAX_DIGITS = 6
+
+GAP_LARGE_DIGITS = 4
+
+OBJ { Objects we use }
+
+    screen              : "isp_hub75_screenAccess"
+    pixels              : "isp_hub75_screenUtils"
+    digits[MAX_DIGITS]  : "isp_hub75_morph7seg"
+
+VAR { instance variable }
+
+    long    numberDigits
+    long    segmentPeriod
+    long    groupType
+    long    currValue
+    long    valueCap
+    long    maxValueDivisor
+
+    ' calc values
+    long    digitHeight
+    long    digitWidth
+    long    segmentThickness
+    long    digitHspace
+
+    ' display delay times
+    long    digitPeriod
+    long    digitVal
+
+    ' variables when CLOCK is type
+    long    hours
+    long    hours24
+    long    minutes
+    long    dotRow
+    long    dotCol
+    long    dotVOffset
+
+    long    initValue[MAX_DIGITS]
+
+    ' flags
+    byte    showSecondIndicator
+    byte    isSetup
+    byte    busyCount
+
+PUB null()
+    '' This is NOT a top level object
+
+PUB initialize()
+    '' init the opbject so it knows nothing but knows it knows nothing ;-)
+    isSetup := FALSE
+    groupType := GRP_UNKNOWN
+
+PUB placeDigitGroup(row, column, grpType, nbrDigits, segThickness, segLength, initialValue, rgbColor) : grpWidth, grpHeight | currCol, digitIdx
+    '' Locate a desired digit group on our screen. Draw initial segements if {initialValue} is NOT off
+    digitHspace := (segLength > 7) ? GAP_LARGE_DIGITS : 1
+    groupType := grpType
+    numberDigits := nbrDigits
+    currValue := initialValue
+    valueCap := 1
+    repeat nbrDigits
+        valueCap := valueCap * 10
+    maxValueDivisor := valueCap / 10    ' e.g., if we are 3 digits then maxDiv is 100
+    valueCap := valueCap - 1
+    debug("mG:placeDigit rc=(", udec_(row), ",", udec_(column), ") ", udec(grpType), udec(nbrDigits), udec(initialValue), udec(valueCap), ", RGB=(", uhex_long_(rgbColor),")")
+
+    ensureIsSetup()
+
+    digitWidth, digitHeight, segmentThickness := calcDigitSizeFmSegLength(segLength, segThickness)
+    'debug("* Seg-len 5,2: ", udec_long(digitWidth), udec_long(digitHeight))
+
+    grpWidth := (digitWidth + digitHspace) * nbrDigits
+    if groupType == GRP_CLOCK
+        grpWidth := grpWidth + 2 + 1    ' add-in width of dots
+        dotRow := row + (segLength / 2)
+        dotCol := column + (digitWidth + digitHspace) * 2
+        dotVOffset := segLength + 1
+    grpHeight := digitHeight + 1
+
+    if groupType == GRP_CLOCK
+        hours := currValue / 60
+        minutes := currValue // 60
+        initValue[0] := hours / 10
+        initValue[1] := hours // 10
+        initValue[2] := minutes / 10
+        initValue[3] := minutes // 10
+        showSecondIndicator := TRUE
+    else
+        updateInitsFromValue(currValue)
+
+    currCol := column
+    repeat digitIdx from 0 to nbrDigits - 1
+        ' FIXME; UNDONE calculate initial values (mod 10!) - all decimal
+        digits[digitIdx].placeDigit(row, currCol, digitWidth, digitHeight, initValue[digitIdx], rgbColor)
+        currCol := currCol + digitWidth + digitHspace
+        if groupType == GRP_CLOCK && digitIdx == 1
+            currCol := currCol + 2 + 1  ' add in dot width
+
+    if groupType == GRP_CLOCK
+        showSecondsDots( 0 )
+
+PRI updateInitsFromValue(desiredValue) | currDivisor, digitIdx, digitValue, remainingValue
+    currDivisor := maxValueDivisor
+    remainingValue := desiredValue
+    repeat digitIdx from numberDigits - 1 to 0
+        digitValue := remainingValue / currDivisor
+        remainingValue -= digitValue * currDivisor
+        initValue[(numberDigits - 1) - digitIdx] := digitValue
+        if currDivisor == 1     ' safety, should never happen
+            quit
+        currDivisor /= 10
+
+PRI ensureIsSetup()
+    ' Do intial setup, if not yet done
+    if not isSetup
+        initialSetup()
+
+PRI initialSetup() | byte segIndex, orientation, segRow, segCol, segW, segL
+    ' Perform initial setup
+    isSetup := TRUE
+    busyCount := 0
+    segmentPeriod := 0     ' 8 x 100ths of a second
+    digitPeriod := 13    ' 90     ' 12 x 100ths of a second
+    hours24 := hours := minutes := 0
+    showSecondIndicator := FALSE
+    if groupType == GRP_CLOCK
+        showSecondIndicator := TRUE
+
+PUB isConfigured() : bStatus
+    '' return T/F were T means this counter is active
+    bStatus := (groupType <> GRP_UNKNOWN)
+
+PUB nextTimeCycle() | bShowCurrValue
+    'debug("mG:-nxTimCyc(", udec_(groupType), ")")
+    bShowCurrValue := TRUE
+    case groupType
+        GRP_CLOCK:
+            currValue := currValue + 1
+            if currValue > 1259
+                currValue := 0
+            hours := currValue / 60
+            minutes := currValue // 60
+            bShowCurrValue := FALSE ' nope, were doing that next
+            updateDigitsFromTime(hours, minutes)
+        GRP_UP_COUNTER:
+            currValue := currValue + 1
+            if currValue > valueCap
+                currValue := 0
+        GRP_DOWN_COUNTER:
+            currValue := currValue - 1
+            if currValue < 0
+                currValue := valueCap
+        GRP_DIGITS:
+            ' nothing here value is set from outside
+        GRP_DIGITS_RANDOM:
+            currValue := getrnd()
+            if currValue < 0
+                currValue := 0 - currValue
+            if currValue > valueCap
+                currValue //= (valueCap + 1)
+        other:
+            debug("- BAD Group Type")
+            abort
+
+    if bShowCurrValue
+        updateDigitsFromValue(currValue)
+
+PRI updateDigitsFromTime(timeHours, timeMinutes)
+    digits[0].setValue(timeHours / 10)
+    digits[1].setValue(timeHours // 10)
+    digits[2].setValue(timeMinutes / 10)
+    digits[3].setValue(timeMinutes // 10)
+    showSecondsDots( timeMinutes // 4 )
+
+PRI updateDigitsFromValue(desiredValue) | currDivisor, digitIdx, digitValue, remainingValue
+    currDivisor := maxValueDivisor
+    remainingValue := desiredValue
+    'debug("mG: ", udec(remainingValue), udec(currDivisor), udec(valueCap))
+    repeat digitIdx from numberDigits - 1 to 0
+        digitValue := remainingValue / currDivisor
+        remainingValue -= digitValue * currDivisor
+        'debug("mG:  ", udec(digitValue), udec(remainingValue))
+        digits[(numberDigits - 1) - digitIdx].setValue(digitValue)
+        if currDivisor >= 10     ' safety, should never happen
+            currDivisor /= 10
+        'debug("mG:  ", udec(currDivisor))
+
+    'repeat ' stop to eval debug
+
+PUB isAnimationComplete() : completeStatus | digitIdx
+    '' return T/F where T means this counter animations are complete
+    'debug("mG:-cmplt? (", udec_(groupType), ")")
+    completeStatus := TRUE
+    repeat digitIdx from 0 to MAX_DIGITS - 1
+        if not digits[digitIdx].isAnimationComplete()
+            completeStatus := FALSE
+            quit
+    if completeStatus == TRUE && busyCount > 0
+        completeStatus := FALSE
+        'debug("mG:-BUSY (", udec_(groupType), ")")
+        if busyCount > 0
+            busyCount := busyCount - 1
+
+PUB animateStep() | digitIdx
+    '' animate each digit in this counter
+    if not isAnimationComplete()
+        repeat digitIdx from 0 to MAX_DIGITS - 1
+            if not digits[digitIdx].isAnimationComplete()
+                digits[digitIdx].animateStep()
+
+        if isAnimationComplete()
+            'debug("mG:-DLY! (", udec_(groupType), ")")
+            busyCount := 40
+
+
+PRI calcDigitSizeFmSegLength(segmentLength, segmentWidth) : digWidth, digHeight, segWidth
+    ' FIXME: UNDONE assumes segmentWidth of 1
+    segWidth := segmentWidth
+    digWidth := segmentLength + (2 * segmentWidth)
+    digHeight := (segmentLength * 2) + (3 * segmentWidth)
+
+PRI showSecondsDots(lightDark) | red, green, blue, targetColor
+   ' lightDarkv[0,1] where 1 means bright color
+    if lightDark & 1 > 0    ' > 0 is 1/4 ON  -  & 1 > 0  is 1/2 ON
+        targetColor := $00006F
+    else
+        targetColor := $0080FF
+
+    drawSecondsDot(dotRow, dotCol, targetColor)
+    drawSecondsDot(dotRow + dotVOffset, dotCol, targetColor)
+
+PRI drawSecondsDot(row, column, rgbColor)
+    'place a dot on the screen
+    pixels.drawPixelAtRC(row, column, rgbColor)
+    pixels.drawPixelAtRC(row, column+1, rgbColor)
+    pixels.drawPixelAtRC(row+1, column, rgbColor)
+    pixels.drawPixelAtRC(row+1, column+1, rgbColor)
+
+
+CON { license }
+
+{{
+
+ -------------------------------------------------------------------------------------------------
+  MIT License
+
+  Copyright (c) 2020 Iron Sheep Productions, LLC
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+ =================================================================================================
+}}

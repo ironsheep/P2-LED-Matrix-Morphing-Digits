@@ -1,0 +1,1523 @@
+'' =================================================================================================
+''
+''   File....... isp_hub75_morph7seg.spin2
+''   Purpose.... manipulate a morphing 7 segment digit
+''   Authors.... Stephen M Moraco
+''               -- Copyright (c) 2020 Iron Sheep Productions, LLC
+''               -- see below for terms of use
+''   E-mail..... stephen@ironsheep.biz
+''   Started.... Jan 2021
+''   Updated.... 21 Jan 2021
+''
+'' =================================================================================================
+
+CON { public control values }
+
+    DIGIT_NO_VALUE = -2   ' digit value when NOT [0-9]
+    DIGIT_HIDDEN = -1     ' digit value when NOT [0-9]
+
+    WITH_WRAP = TRUE
+    WITHOUT_WRAP = FALSE
+
+OBJ
+
+    screen          : "isp_hub75_screenAccess"
+    segments[7]     : "isp_hub75_morphSegment"
+
+
+VAR { globals }
+    long    currValue
+    long    currRgbColor
+    long    topY
+    long    leftX
+    long    digitWidth
+    long    digitHeight
+    long    segmentLength
+    long    segmentWidth
+
+    long    defaultColor
+
+    byte    isSetup
+
+PUB null()
+    '' This is NOT a top level object
+
+DAT { debug titles }
+
+msPointers      byte    "pointers", 0
+msLtTable       byte    "ltTable", 0
+msRtTable0      byte    "rtTable0", 0
+msRtTable1      byte    "rtTable1", 0
+msActions       byte    "Actions", 0
+
+PUB placeDigit(row, column, width, height, digitValue, rgbColor)
+    '' Locate a desired digit on our screen. Draw initial segement if state is NOT off
+    ' now we can inform segements of their own locations
+    debug("m7:placeDigit rc=(", udec_(row), ",", udec_(column),"), dgt=(", udec_(digitValue), "), RGB=(", uhex_long_(rgbColor),")")
+    isSetup := FALSE
+    ' FIXME: UNDONE shouldn't this limit to whole digit width from right edge???
+    leftX :=  0 #> column <# screen.MAX_PHYSICAL_COLUMNS - 1
+    topY :=  0 #> row <# screen.MAX_PHYSICAL_ROWS - 1
+    currRgbColor := rgbColor
+    currValue := DIGIT_NO_VALUE
+    digitHeight := height
+    digitWidth := width
+    segmentWidth := 1
+    segmentLength := digitWidth - (2 * segmentWidth)
+    ensureIsSetup()
+    if digitValue <> DIGIT_HIDDEN
+        reconfigureForDigit(digitValue)
+{
+    screen.dbgMemDump(@msPointers, @leftPtrsActual, 12)
+    screen.dbgMemDump(@msLtTable, @leftPtrs, 40)
+    screen.dbgMemDump(@msRtTable0, @tableLt0, 40)
+    screen.dbgMemDump(@msRtTable1, @tableLt1, 40)
+    screen.dbgMemDump(@msActions, @fm0_1, 40)
+'}
+
+PUB setValue(digitValue)
+    '' Configure display to show desired {digitValue}: [0-9, DIGIT_HIDDEN]
+    ensureIsSetup()
+    if currValue <> digitValue
+        reconfigureForDigit(digitValue)
+
+PUB incrementValue(shouldWrap) | nextValue
+    '' Increment to the next digit [0->9]
+    ''  if wrap is requested, return to 0 after 9, else just stop at 9
+    nextValue := currValue + 1
+    if nextValue > 9
+        if shouldWrap <> WITH_WRAP
+            nextValue := 9
+        else
+            nextValue := 0
+    setValue(nextValue)
+
+PUB isAnimationComplete() : status | segmentIndex
+    '' Return T/F where T means all segment animations are complete
+    status := TRUE
+    repeat segmentIndex from 0 to 6
+        if not segments[segmentIndex].isMovementComplete()
+            status := FALSE
+            quit   ' we have our answer, abort loop
+
+PUB animateStep() | segmentIndex
+    '' Have each sement do 1 animation step, if one is pending
+    if not isAnimationComplete()
+        repeat segmentIndex from 0 to 6
+            if not segments[segmentIndex].isMovementComplete()
+                segments[segmentIndex].animateStep()
+
+PRI ensureIsSetup()
+    ' Do intial setup, if not yet done
+    if not isSetup
+        initialSetup()
+        leftPtrsActual := @@leftPtrs
+        'leftPtrsAddr := @leftPtrs
+        objectOffset := (leftPtrsActual - leftPtrsAddr) - 40    ' why this 40????
+
+
+PRI initialSetup() | byte segIndex, orientation, segRow, segCol, segW, segL
+    ' Perform initial setup
+    'debug("m7:initialSetup")
+    ' initialize all segments with type, color, location and set to hidden
+    repeat segIndex from 0 to 6
+        orientation := 1 << segIndex
+        case orientation
+          segments.SOR_TOP_A:   ' A TOP
+            segRow := topY
+            segCol := leftX + 1
+          segments.SOR_RIGHT_B:   ' B RIGHT-upper
+            segRow := topY + 1
+            segCol := leftX + 1 + segmentLength + 1 - segmentWidth
+          segments.SOR_RIGHT_C:   ' C RIGHT-lower
+            segRow := topY + 1 + segmentLength + 1
+            segCol := leftX + 1 + segmentLength + 1 - segmentWidth
+          segments.SOR_BOTTOM_D:   ' D BOTTOM
+            segRow := topY + 1 + (segmentLength * 2) + 1 + 1 - segmentWidth
+            segCol := leftX + 1
+          segments.SOR_LEFT_E:   ' E LEFT-lower
+            segRow := topY + 1 + segmentLength + 1
+            segCol := leftX
+          segments.SOR_LEFT_F:   ' F LEFT-upper
+            segRow := topY + 1
+            segCol := leftX
+          segments.SOR_MIDDLE_G:   ' G MIDDLE
+            segRow := topY + 1 + segmentLength + 1 - 1
+            segCol := leftX + 1
+
+        segments[segIndex].placeSegment(segRow, segCol, orientation, segmentWidth, segmentLength, segments.STATE_OFF, currRgbColor)
+
+    currValue := DIGIT_NO_VALUE
+    isSetup := TRUE
+
+PRI turnOnDigit(digit) | byte fromSegments, byte toSegments, bitIndex
+    'debug("m7:turnOnDigit dgt=(", udec_(digit), ")")
+    if currValue <> digit
+        if digit <> DIGIT_HIDDEN
+            ' hide some segments, show others
+            fromSegments := 0   ' no segments ON....
+            toSegments := byte[@segmentsByDigit][digit]   ' digit [0-9]
+            'debug(" -- table:",ubin(fromSegments),ubin(toSegments))
+            repeat bitIndex from 6 to 0
+                if fromSegments & (1 << bitIndex) > 0
+                    ' from segment is showing
+                    if toSegments & (1 << bitIndex) > 0
+                        ' to segment should be showing
+                        '   NO CHANGE
+                    else
+                        ' to segment should be hidden
+                        segments[bitIndex].commandSegment(segments.CMD_TURN_OFF + segments.CMD_IMMEDIATE)
+                else
+                    ' from segment is hidden
+                    if toSegments & (1 << bitIndex) > 0
+                        ' to segment should be showing
+                        segments[bitIndex].commandSegment(segments.CMD_TURN_ON + segments.CMD_IMMEDIATE)
+                    'else
+                        ' to segment should be hidden
+                        '   NO CHANGE
+        'else
+            ' going from digit to same digit, nothing to do!
+
+PRI reconfigureForDigit(digitValue) | tblIndex, pLtTable, pRtTable, actionIndex, segmentIndex, byte nextAction
+    if currValue <> digitValue
+        if digitValue <> DIGIT_HIDDEN
+            if currValue < 0
+                turnOnDigit(digitValue)
+            else
+                'debug("m7:reconfig ", udec_(currValue), " -> ", udec_(digitValue))
+                pLtTable := long[@leftPtrs][currValue] + objectOffset
+                'debug(" - ", uhex_long(pLtTable))
+                pRtTable := LONG [pLtTable][digitValue] + objectOffset
+                'debug(" - ", uhex_long(pRtTable))
+                'repeat
+                if pRtTable <> NO_ACTIONS
+                    actionIndex := 0
+                    repeat
+                        nextAction := BYTE [pRtTable][actionIndex++]
+                        if nextAction <> 0
+                            'debug(" action ", uhex_byte_(nextAction))
+                            segmentIndex := (nextAction & $e0) >> 5 - 1
+                            segments[segmentIndex].commandSegment(nextAction)
+                        else
+                            'debug(" - DONE")
+                            quit
+        'else
+            ' going from digitValue to same digitValue, nothing to do!
+    currValue := digitValue
+
+
+CON { dummy names }
+
+  NO_ACTIONS = 0
+
+DAT { initialized data }
+
+segmentsByDigit
+    byte    %0111_1110   ' 0 abcdef-
+    byte    %0011_0000   ' 1 -bc----
+    byte    %0110_1101   ' 2 ab-de-g
+    byte    %0111_1001   ' 3 abcd--g
+    byte    %0011_0011   ' 4 -bc--fg
+    byte    %0101_1011   ' 5 a-cd-fg
+    byte    %0101_1111   ' 6 a-cdefg
+    byte    %0111_0000   ' 7 abc----
+    byte    %0111_1111   ' 8 abcdefg
+    byte    %0111_1011   ' 9 abcd-fg
+
+' NEW TABLE of Actions:
+leftPtrsActual  long    0
+leftPtrsAddr    long    @leftPtrs
+objectOffset    long    0
+
+' =======================================================================================================================
+leftPtrs
+    LONG @tableLt0, @tableLt1, @tableLt2, @tableLt3, @tableLt4, @tableLt5, @tableLt6, @tableLt7, @tableLt8, @tableLt9
+' -----------------------------------------------------------------------------------------------------------------------
+tableLt0
+    LONG NO_ACTIONS, @fm0_1, @fm0_2, @fm0_3, @fm0_4, @fm0_5, @fm0_6, @fm0_7, @fm0_8, @fm0_9
+tableLt1
+    LONG @fm1_0, NO_ACTIONS, @fm1_2, @fm1_3, @fm1_4, @fm1_5, @fm1_6, @fm1_7, @fm1_8, @fm1_9
+tableLt2
+    LONG @fm2_0, @fm2_1, NO_ACTIONS, @fm2_3, @fm2_4, @fm2_5, @fm2_6, @fm2_7, @fm2_8, @fm2_9
+tableLt3
+    LONG @fm3_0, @fm3_1, @fm3_2, NO_ACTIONS, @fm3_4, @fm3_5, @fm3_6, @fm3_7, @fm3_8, @fm3_9
+tableLt4
+    LONG @fm4_0, @fm4_1, @fm4_2, @fm4_3, NO_ACTIONS, @fm4_5, @fm4_6, @fm4_7, @fm4_8, @fm4_9
+tableLt5
+    LONG @fm5_0, @fm5_1, @fm5_2, @fm5_3, @fm5_4, NO_ACTIONS, @fm5_6, @fm5_7, @fm5_8, @fm5_9
+tableLt6
+    LONG @fm6_0, @fm6_1, @fm6_2, @fm6_3, @fm6_4, @fm6_5, NO_ACTIONS, @fm6_7, @fm6_8, @fm6_9
+tableLt7
+    LONG @fm7_0, @fm7_1, @fm7_2, @fm7_3, @fm7_4, @fm7_5, @fm7_6, NO_ACTIONS, @fm7_8, @fm7_9
+tableLt8
+    LONG @fm8_0, @fm8_1, @fm8_2, @fm8_3, @fm8_4, @fm8_5, @fm8_6, @fm8_7, NO_ACTIONS, @fm8_9
+tableLt9
+    LONG @fm9_0, @fm9_1, @fm9_2, @fm9_3, @fm9_4, @fm9_5, @fm9_6, @fm9_7, @fm9_8, NO_ACTIONS
+' =======================================================================================================================
+
+
+fm0_1
+	' transition #1: digit 0 -> 1
+	' 4 segments changing, #ON=0, #OFF=4
+	' seg[a] turning OFF while [b] is staying ON.
+	' Segment [a] snakes OFF towards [b]
+	byte	segments.SEG_TOP_A + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[d] turning OFF while [c] is staying ON.
+	' Segment [d] snakes OFF towards [c]
+	byte	segments.SEG_BOTTOM_D + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[e] turning OFF while [c] is staying ON.
+	' VERT Segment [e] slides RIGHT to [c]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_OFF + segments.CMD_COL_TO_RT
+	' seg[f] turning OFF while [b] is staying ON.
+	' VERT Segment [f] slides RIGHT to [b]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_OFF + segments.CMD_COL_TO_RT
+	byte	0	' terminate entry
+
+fm0_2
+	' transition #2: digit 0 -> 2
+	' 3 segments changing, #ON=1, #OFF=2
+	' seg[c] turning OFF while [b] is staying ON.
+	' Segment [c] snakes OFF towards [b]
+	byte	segments.SEG_RIGHT_C + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	' seg[f] turning OFF while [a] is staying ON.
+	' Segment [f] snakes OFF towards [a]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	' seg[g] turning ON while [b] is staying ON.
+	' Segment [g] snakes ON away from [b]
+	byte	segments.SEG_MIDDLE_G + segments.CMD_TURN_ON + segments.CMD_RT_TO_LT
+	byte	0	' terminate entry
+
+fm0_3
+	' transition #3: digit 0 -> 3
+	' 3 segments changing, #ON=1, #OFF=2
+	' seg[e] turning OFF while [d] is staying ON.
+	' Segment [e] snakes OFF towards [d]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_OFF + segments.CMD_TOP_DOWN
+	' seg[f] turning OFF while [a] is staying ON.
+	' Segment [f] snakes OFF towards [a]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	' seg[g] turning ON while [b] is staying ON.
+	' Segment [g] snakes ON away from [b]
+	byte	segments.SEG_MIDDLE_G + segments.CMD_TURN_ON + segments.CMD_RT_TO_LT
+	byte	0	' terminate entry
+
+fm0_4
+	' transition #4: digit 0 -> 4
+	' 4 segments changing, #ON=1, #OFF=3
+	' seg[a] turning OFF while [b] is staying ON.
+	' Segment [a] snakes OFF towards [b]
+	byte	segments.SEG_TOP_A + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[d] turning OFF while [c] is staying ON.
+	' Segment [d] snakes OFF towards [c]
+	byte	segments.SEG_BOTTOM_D + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[e] turning OFF while [g] is turning ON.
+	' Segment [e] snakes OFF towards [g]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	' seg[g] turning ON while [b] is staying ON.
+	' Segment [g] snakes ON away from [b]
+	byte	segments.SEG_MIDDLE_G + segments.CMD_TURN_ON + segments.CMD_RT_TO_LT
+	byte	0	' terminate entry
+
+fm0_5
+	' transition #5: digit 0 -> 5
+	' 3 segments changing, #ON=1, #OFF=2
+	' seg[b] turning OFF while [a] is staying ON.
+	' Segment [b] snakes OFF towards [a]
+	byte	segments.SEG_RIGHT_B + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	' seg[e] turning OFF while [d] is staying ON.
+	' Segment [e] snakes OFF towards [d]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_OFF + segments.CMD_TOP_DOWN
+	' seg[g] turning ON while [b] is turning OFF.
+	' Segment [g] snakes ON towards [b]
+	byte	segments.SEG_MIDDLE_G + segments.CMD_TURN_ON + segments.CMD_LT_TO_RT
+	byte	0	' terminate entry
+
+fm0_6
+	' transition #6: digit 0 -> 6
+	' 2 segments changing, #ON=1, #OFF=1
+	' seg[b] turning OFF while [a] is staying ON.
+	' Segment [b] snakes OFF towards [a]
+	byte	segments.SEG_RIGHT_B + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	' seg[g] turning ON while [b] is turning OFF.
+	' Segment [g] snakes ON towards [b]
+	byte	segments.SEG_MIDDLE_G + segments.CMD_TURN_ON + segments.CMD_LT_TO_RT
+	byte	0	' terminate entry
+
+fm0_7
+	' transition #7: digit 0 -> 7
+	' 3 segments changing, #ON=0, #OFF=3
+	' seg[d] turning OFF while [c] is staying ON.
+	' Segment [d] snakes OFF towards [c]
+	byte	segments.SEG_BOTTOM_D + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[e] turning OFF while [c] is staying ON.
+	' VERT Segment [e] slides RIGHT to [c]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_OFF + segments.CMD_COL_TO_RT
+	' seg[f] turning OFF while [a] is staying ON.
+	' Segment [f] snakes OFF towards [a]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	byte	0	' terminate entry
+
+fm0_8
+	' transition #8: digit 0 -> 8
+	' 1 segment changing, #ON=1, #OFF=0
+	' seg[g] turning ON while [b] is staying ON.
+	' Segment [g] snakes ON away from [b]
+	byte	segments.SEG_MIDDLE_G + segments.CMD_TURN_ON + segments.CMD_RT_TO_LT
+	byte	0	' terminate entry
+
+fm0_9
+	' transition #9: digit 0 -> 9
+	' 2 segments changing, #ON=1, #OFF=1
+	' seg[e] turning OFF while [d] is staying ON.
+	' Segment [e] snakes OFF towards [d]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_OFF + segments.CMD_TOP_DOWN
+	' seg[g] turning ON while [b] is staying ON.
+	' Segment [g] snakes ON away from [b]
+	byte	segments.SEG_MIDDLE_G + segments.CMD_TURN_ON + segments.CMD_RT_TO_LT
+	byte	0	' terminate entry
+
+fm1_0
+	' transition #10: digit 1 -> 0
+	' 4 segments changing, #ON=4, #OFF=0
+	' seg[a] turning ON while [b] is staying ON.
+	' Segment [a] snakes ON away from [b]
+	byte	segments.SEG_TOP_A + segments.CMD_TURN_ON + segments.CMD_RT_TO_LT
+	' seg[d] turning ON while [c] is staying ON.
+	' Segment [d] snakes ON away from [c]
+	byte	segments.SEG_BOTTOM_D + segments.CMD_TURN_ON + segments.CMD_RT_TO_LT
+	' seg[e] turning ON while [g] is staying OFF.
+	' Segment [e] snakes ON towards [g]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_ON + segments.CMD_BOTTOM_UP
+	' seg[f] turning ON while [g] is staying OFF.
+	' Segment [f] snakes ON towards [g]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_ON + segments.CMD_TOP_DOWN
+	byte	0	' terminate entry
+
+fm1_2
+	' transition #11: digit 1 -> 2
+	' 5 segments changing, #ON=4, #OFF=1
+	' seg[c] turning OFF while [b] is staying ON.
+	' Segment [c] snakes OFF towards [b]
+	byte	segments.SEG_RIGHT_C + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	' seg[a] turning ON while [b] is staying ON.
+	' Segment [a] snakes ON away from [b]
+	byte	segments.SEG_TOP_A + segments.CMD_TURN_ON + segments.CMD_RT_TO_LT
+	' seg[d] turning ON while [c] is turning OFF.
+	' Segment [d] snakes ON towards [c]
+	byte	segments.SEG_BOTTOM_D + segments.CMD_TURN_ON + segments.CMD_LT_TO_RT
+	' seg[e] turning ON while [f] is staying OFF.
+	' Segment [e] snakes ON towards [f]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_ON + segments.CMD_BOTTOM_UP
+	' seg[g] turning ON while [b] is staying ON.
+	' Segment [g] snakes ON away from [b]
+	byte	segments.SEG_MIDDLE_G + segments.CMD_TURN_ON + segments.CMD_RT_TO_LT
+	byte	0	' terminate entry
+
+fm1_3
+	' transition #12: digit 1 -> 3
+	' 3 segments changing, #ON=3, #OFF=0
+	' seg[a] turning ON while [b] is staying ON.
+	' Segment [a] snakes ON away from [b]
+	byte	segments.SEG_TOP_A + segments.CMD_TURN_ON + segments.CMD_RT_TO_LT
+	' seg[d] turning ON while [c] is staying ON.
+	' Segment [d] snakes ON away from [c]
+	byte	segments.SEG_BOTTOM_D + segments.CMD_TURN_ON + segments.CMD_RT_TO_LT
+	' seg[g] turning ON while [b] is staying ON.
+	' Segment [g] snakes ON away from [b]
+	byte	segments.SEG_MIDDLE_G + segments.CMD_TURN_ON + segments.CMD_RT_TO_LT
+	byte	0	' terminate entry
+
+fm1_4
+	' transition #13: digit 1 -> 4
+	' 2 segments changing, #ON=2, #OFF=0
+	' seg[f] turning ON while [a] is staying OFF.
+	' Segment [f] snakes ON towards [a]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_ON + segments.CMD_BOTTOM_UP
+	' seg[g] turning ON while [b] is staying ON.
+	' Segment [g] snakes ON away from [b]
+	byte	segments.SEG_MIDDLE_G + segments.CMD_TURN_ON + segments.CMD_RT_TO_LT
+	byte	0	' terminate entry
+
+fm1_5
+	' transition #14: digit 1 -> 5
+	' 5 segments changing, #ON=4, #OFF=1
+	' seg[b] turning OFF while [a] is turning ON.
+	' Segment [b] snakes OFF towards [a]
+	byte	segments.SEG_RIGHT_B + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	' seg[a] turning ON while [b] is turning OFF.
+	' Segment [a] snakes ON towards [b]
+	byte	segments.SEG_TOP_A + segments.CMD_TURN_ON + segments.CMD_LT_TO_RT
+	' seg[d] turning ON while [c] is staying ON.
+	' Segment [d] snakes ON away from [c]
+	byte	segments.SEG_BOTTOM_D + segments.CMD_TURN_ON + segments.CMD_RT_TO_LT
+	' seg[f] turning ON while [e] is staying OFF.
+	' Segment [f] snakes ON towards [e]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_ON + segments.CMD_TOP_DOWN
+	' seg[g] turning ON while [b] is turning OFF.
+	' Segment [g] snakes ON towards [b]
+	byte	segments.SEG_MIDDLE_G + segments.CMD_TURN_ON + segments.CMD_LT_TO_RT
+	byte	0	' terminate entry
+
+fm1_6
+	' transition #15: digit 1 -> 6
+	' 6 segments changing, #ON=5, #OFF=1
+	' seg[b] turning OFF while [a] is turning ON.
+	' Segment [b] snakes OFF towards [a]
+	byte	segments.SEG_RIGHT_B + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	' seg[a] turning ON while [b] is turning OFF.
+	' Segment [a] snakes ON towards [b]
+	byte	segments.SEG_TOP_A + segments.CMD_TURN_ON + segments.CMD_LT_TO_RT
+	' seg[d] turning ON while [c] is staying ON.
+	' Segment [d] snakes ON away from [c]
+	byte	segments.SEG_BOTTOM_D + segments.CMD_TURN_ON + segments.CMD_RT_TO_LT
+	' seg[e] turning ON while [c] is staying ON.
+	' VERT Segment [e] slides LEFT from [c]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_ON + segments.CMD_COL_TO_LT
+	' seg[f] turning ON while [b] is turning OFF.
+	' VERT Segment [f] slides LEFT from [b]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_ON + segments.CMD_COL_TO_LT
+	' seg[g] turning ON while [b] is turning OFF.
+	' Segment [g] snakes ON towards [b]
+	byte	segments.SEG_MIDDLE_G + segments.CMD_TURN_ON + segments.CMD_LT_TO_RT
+	byte	0	' terminate entry
+
+fm1_7
+	' transition #16: digit 1 -> 7
+	' 1 segment changing, #ON=1, #OFF=0
+	' seg[a] turning ON while [b] is staying ON.
+	' Segment [a] snakes ON away from [b]
+	byte	segments.SEG_TOP_A + segments.CMD_TURN_ON + segments.CMD_RT_TO_LT
+	byte	0	' terminate entry
+
+fm1_8
+	' transition #17: digit 1 -> 8
+	' 5 segments changing, #ON=5, #OFF=0
+	' seg[a] turning ON while [b] is staying ON.
+	' Segment [a] snakes ON away from [b]
+	byte	segments.SEG_TOP_A + segments.CMD_TURN_ON + segments.CMD_RT_TO_LT
+	' seg[d] turning ON while [c] is staying ON.
+	' Segment [d] snakes ON away from [c]
+	byte	segments.SEG_BOTTOM_D + segments.CMD_TURN_ON + segments.CMD_RT_TO_LT
+	' seg[e] turning ON while [c] is staying ON.
+	' VERT Segment [e] slides LEFT from [c]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_ON + segments.CMD_COL_TO_LT
+	' seg[f] turning ON while [b] is staying ON.
+	' VERT Segment [f] slides LEFT from [b]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_ON + segments.CMD_COL_TO_LT
+	' seg[g] turning ON while [b] is staying ON.
+	' Segment [g] snakes ON away from [b]
+	byte	segments.SEG_MIDDLE_G + segments.CMD_TURN_ON + segments.CMD_RT_TO_LT
+	byte	0	' terminate entry
+
+fm1_9
+	' transition #18: digit 1 -> 9
+	' 4 segments changing, #ON=4, #OFF=0
+	' seg[a] turning ON while [b] is staying ON.
+	' Segment [a] snakes ON away from [b]
+	byte	segments.SEG_TOP_A + segments.CMD_TURN_ON + segments.CMD_RT_TO_LT
+	' seg[d] turning ON while [c] is staying ON.
+	' Segment [d] snakes ON away from [c]
+	byte	segments.SEG_BOTTOM_D + segments.CMD_TURN_ON + segments.CMD_RT_TO_LT
+	' seg[f] turning ON while [e] is staying OFF.
+	' Segment [f] snakes ON towards [e]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_ON + segments.CMD_TOP_DOWN
+	' seg[g] turning ON while [b] is staying ON.
+	' Segment [g] snakes ON away from [b]
+	byte	segments.SEG_MIDDLE_G + segments.CMD_TURN_ON + segments.CMD_RT_TO_LT
+	byte	0	' terminate entry
+
+fm2_0
+	' transition #19: digit 2 -> 0
+	' 3 segments changing, #ON=2, #OFF=1
+	' seg[g] turning OFF while [b] is staying ON.
+	' Segment [g] snakes OFF towards [b]
+	byte	segments.SEG_MIDDLE_G + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[c] turning ON while [b] is staying ON.
+	' Segment [c] snakes ON away from [b]
+	byte	segments.SEG_RIGHT_C + segments.CMD_TURN_ON + segments.CMD_TOP_DOWN
+	' seg[f] turning ON while [a] is staying ON.
+	' Segment [f] snakes ON away from [a]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_ON + segments.CMD_TOP_DOWN
+	byte	0	' terminate entry
+
+fm2_1
+	' transition #20: digit 2 -> 1
+	' 5 segments changing, #ON=1, #OFF=4
+	' seg[a] turning OFF while [b] is staying ON.
+	' Segment [a] snakes OFF towards [b]
+	byte	segments.SEG_TOP_A + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[d] turning OFF while [c] is turning ON.
+	' Segment [d] snakes OFF towards [c]
+	byte	segments.SEG_BOTTOM_D + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[e] turning OFF while [c] is turning ON.
+	' VERT Segment [e] slides RIGHT to [c]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_OFF + segments.CMD_COL_TO_RT
+	' seg[g] turning OFF while [b] is staying ON.
+	' Segment [g] snakes OFF towards [b]
+	byte	segments.SEG_MIDDLE_G + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[c] turning ON while [b] is staying ON.
+	' Segment [c] snakes ON away from [b]
+	byte	segments.SEG_RIGHT_C + segments.CMD_TURN_ON + segments.CMD_TOP_DOWN
+	byte	0	' terminate entry
+
+fm2_3
+	' transition #21: digit 2 -> 3
+	' 2 segments changing, #ON=1, #OFF=1
+	' seg[e] turning OFF while [d] is staying ON.
+	' Segment [e] snakes OFF towards [d]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_OFF + segments.CMD_TOP_DOWN
+	' seg[c] turning ON while [b] is staying ON.
+	' Segment [c] snakes ON away from [b]
+	byte	segments.SEG_RIGHT_C + segments.CMD_TURN_ON + segments.CMD_TOP_DOWN
+	byte	0	' terminate entry
+
+fm2_4
+	' transition #22: digit 2 -> 4
+	' 5 segments changing, #ON=2, #OFF=3
+	' seg[a] turning OFF while [b] is staying ON.
+	' Segment [a] snakes OFF towards [b]
+	byte	segments.SEG_TOP_A + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[d] turning OFF while [c] is turning ON.
+	' Segment [d] snakes OFF towards [c]
+	byte	segments.SEG_BOTTOM_D + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[e] turning OFF while [g] is staying ON.
+	' Segment [e] snakes OFF towards [g]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	' seg[c] turning ON while [b] is staying ON.
+	' Segment [c] snakes ON away from [b]
+	byte	segments.SEG_RIGHT_C + segments.CMD_TURN_ON + segments.CMD_TOP_DOWN
+	' seg[f] turning ON while [a] is turning OFF.
+	' Segment [f] snakes ON towards [a]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_ON + segments.CMD_BOTTOM_UP
+	byte	0	' terminate entry
+
+fm2_5
+	' transition #23: digit 2 -> 5
+	' 4 segments changing, #ON=2, #OFF=2
+	' seg[b] turning OFF while [a] is staying ON.
+	' Segment [b] snakes OFF towards [a]
+	byte	segments.SEG_RIGHT_B + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	' seg[e] turning OFF while [d] is staying ON.
+	' Segment [e] snakes OFF towards [d]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_OFF + segments.CMD_TOP_DOWN
+	' seg[c] turning ON while [b] is turning OFF.
+	' Segment [c] snakes ON towards [b]
+	byte	segments.SEG_RIGHT_C + segments.CMD_TURN_ON + segments.CMD_BOTTOM_UP
+	' seg[f] turning ON while [a] is staying ON.
+	' Segment [f] snakes ON away from [a]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_ON + segments.CMD_TOP_DOWN
+	byte	0	' terminate entry
+
+fm2_6
+	' transition #24: digit 2 -> 6
+	' 3 segments changing, #ON=2, #OFF=1
+	' seg[b] turning OFF while [a] is staying ON.
+	' Segment [b] snakes OFF towards [a]
+	byte	segments.SEG_RIGHT_B + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	' seg[c] turning ON while [b] is turning OFF.
+	' Segment [c] snakes ON towards [b]
+	byte	segments.SEG_RIGHT_C + segments.CMD_TURN_ON + segments.CMD_BOTTOM_UP
+	' seg[f] turning ON while [a] is staying ON.
+	' Segment [f] snakes ON away from [a]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_ON + segments.CMD_TOP_DOWN
+	byte	0	' terminate entry
+
+fm2_7
+	' transition #25: digit 2 -> 7
+	' 4 segments changing, #ON=1, #OFF=3
+	' seg[d] turning OFF while [c] is turning ON.
+	' Segment [d] snakes OFF towards [c]
+	byte	segments.SEG_BOTTOM_D + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[e] turning OFF while [c] is turning ON.
+	' VERT Segment [e] slides RIGHT to [c]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_OFF + segments.CMD_COL_TO_RT
+	' seg[g] turning OFF while [b] is staying ON.
+	' Segment [g] snakes OFF towards [b]
+	byte	segments.SEG_MIDDLE_G + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[c] turning ON while [b] is staying ON.
+	' Segment [c] snakes ON away from [b]
+	byte	segments.SEG_RIGHT_C + segments.CMD_TURN_ON + segments.CMD_TOP_DOWN
+	byte	0	' terminate entry
+
+fm2_8
+	' transition #26: digit 2 -> 8
+	' 2 segments changing, #ON=2, #OFF=0
+	' seg[c] turning ON while [b] is staying ON.
+	' Segment [c] snakes ON away from [b]
+	byte	segments.SEG_RIGHT_C + segments.CMD_TURN_ON + segments.CMD_TOP_DOWN
+	' seg[f] turning ON while [a] is staying ON.
+	' Segment [f] snakes ON away from [a]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_ON + segments.CMD_TOP_DOWN
+	byte	0	' terminate entry
+
+fm2_9
+	' transition #27: digit 2 -> 9
+	' 3 segments changing, #ON=2, #OFF=1
+	' seg[e] turning OFF while [d] is staying ON.
+	' Segment [e] snakes OFF towards [d]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_OFF + segments.CMD_TOP_DOWN
+	' seg[c] turning ON while [b] is staying ON.
+	' Segment [c] snakes ON away from [b]
+	byte	segments.SEG_RIGHT_C + segments.CMD_TURN_ON + segments.CMD_TOP_DOWN
+	' seg[f] turning ON while [a] is staying ON.
+	' Segment [f] snakes ON away from [a]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_ON + segments.CMD_TOP_DOWN
+	byte	0	' terminate entry
+
+fm3_0
+	' transition #28: digit 3 -> 0
+	' 3 segments changing, #ON=2, #OFF=1
+	' seg[g] turning OFF while [b] is staying ON.
+	' Segment [g] snakes OFF towards [b]
+	byte	segments.SEG_MIDDLE_G + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[e] turning ON while [d] is staying ON.
+	' Segment [e] snakes ON away from [d]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_ON + segments.CMD_BOTTOM_UP
+	' seg[f] turning ON while [a] is staying ON.
+	' Segment [f] snakes ON away from [a]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_ON + segments.CMD_TOP_DOWN
+	byte	0	' terminate entry
+
+fm3_1
+	' transition #29: digit 3 -> 1
+	' 3 segments changing, #ON=0, #OFF=3
+	' seg[a] turning OFF while [b] is staying ON.
+	' Segment [a] snakes OFF towards [b]
+	byte	segments.SEG_TOP_A + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[d] turning OFF while [c] is staying ON.
+	' Segment [d] snakes OFF towards [c]
+	byte	segments.SEG_BOTTOM_D + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[g] turning OFF while [b] is staying ON.
+	' Segment [g] snakes OFF towards [b]
+	byte	segments.SEG_MIDDLE_G + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	byte	0	' terminate entry
+
+fm3_2
+	' transition #30: digit 3 -> 2
+	' 2 segments changing, #ON=1, #OFF=1
+	' seg[c] turning OFF while [b] is staying ON.
+	' Segment [c] snakes OFF towards [b]
+	byte	segments.SEG_RIGHT_C + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	' seg[e] turning ON while [d] is staying ON.
+	' Segment [e] snakes ON away from [d]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_ON + segments.CMD_BOTTOM_UP
+	byte	0	' terminate entry
+
+fm3_4
+	' transition #31: digit 3 -> 4
+	' 3 segments changing, #ON=1, #OFF=2
+	' seg[a] turning OFF while [b] is staying ON.
+	' Segment [a] snakes OFF towards [b]
+	byte	segments.SEG_TOP_A + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[d] turning OFF while [c] is staying ON.
+	' Segment [d] snakes OFF towards [c]
+	byte	segments.SEG_BOTTOM_D + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[f] turning ON while [a] is turning OFF.
+	' Segment [f] snakes ON towards [a]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_ON + segments.CMD_BOTTOM_UP
+	byte	0	' terminate entry
+
+fm3_5
+	' transition #32: digit 3 -> 5
+	' 2 segments changing, #ON=1, #OFF=1
+	' seg[b] turning OFF while [a] is staying ON.
+	' Segment [b] snakes OFF towards [a]
+	byte	segments.SEG_RIGHT_B + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	' seg[f] turning ON while [a] is staying ON.
+	' Segment [f] snakes ON away from [a]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_ON + segments.CMD_TOP_DOWN
+	byte	0	' terminate entry
+
+fm3_6
+	' transition #33: digit 3 -> 6
+	' 3 segments changing, #ON=2, #OFF=1
+	' seg[b] turning OFF while [a] is staying ON.
+	' Segment [b] snakes OFF towards [a]
+	byte	segments.SEG_RIGHT_B + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	' seg[e] turning ON while [d] is staying ON.
+	' Segment [e] snakes ON away from [d]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_ON + segments.CMD_BOTTOM_UP
+	' seg[f] turning ON while [a] is staying ON.
+	' Segment [f] snakes ON away from [a]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_ON + segments.CMD_TOP_DOWN
+	byte	0	' terminate entry
+
+fm3_7
+	' transition #34: digit 3 -> 7
+	' 2 segments changing, #ON=0, #OFF=2
+	' seg[d] turning OFF while [c] is staying ON.
+	' Segment [d] snakes OFF towards [c]
+	byte	segments.SEG_BOTTOM_D + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[g] turning OFF while [b] is staying ON.
+	' Segment [g] snakes OFF towards [b]
+	byte	segments.SEG_MIDDLE_G + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	byte	0	' terminate entry
+
+fm3_8
+	' transition #35: digit 3 -> 8
+	' 2 segments changing, #ON=2, #OFF=0
+	' seg[e] turning ON while [d] is staying ON.
+	' Segment [e] snakes ON away from [d]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_ON + segments.CMD_BOTTOM_UP
+	' seg[f] turning ON while [a] is staying ON.
+	' Segment [f] snakes ON away from [a]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_ON + segments.CMD_TOP_DOWN
+	byte	0	' terminate entry
+
+fm3_9
+	' transition #36: digit 3 -> 9
+	' 1 segment changing, #ON=1, #OFF=0
+	' seg[f] turning ON while [a] is staying ON.
+	' Segment [f] snakes ON away from [a]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_ON + segments.CMD_TOP_DOWN
+	byte	0	' terminate entry
+
+fm4_0
+	' transition #37: digit 4 -> 0
+	' 4 segments changing, #ON=3, #OFF=1
+	' seg[g] turning OFF while [b] is staying ON.
+	' Segment [g] snakes OFF towards [b]
+	byte	segments.SEG_MIDDLE_G + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[a] turning ON while [b] is staying ON.
+	' Segment [a] snakes ON away from [b]
+	byte	segments.SEG_TOP_A + segments.CMD_TURN_ON + segments.CMD_RT_TO_LT
+	' seg[d] turning ON while [c] is staying ON.
+	' Segment [d] snakes ON away from [c]
+	byte	segments.SEG_BOTTOM_D + segments.CMD_TURN_ON + segments.CMD_RT_TO_LT
+	' seg[e] turning ON while [g] is turning OFF.
+	' Segment [e] snakes ON towards [g]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_ON + segments.CMD_BOTTOM_UP
+	byte	0	' terminate entry
+
+fm4_1
+	' transition #38: digit 4 -> 1
+	' 2 segments changing, #ON=0, #OFF=2
+	' seg[f] turning OFF while [b] is staying ON.
+	' VERT Segment [f] slides RIGHT to [b]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_OFF + segments.CMD_COL_TO_RT
+	' seg[g] turning OFF while [b] is staying ON.
+	' Segment [g] snakes OFF towards [b]
+	byte	segments.SEG_MIDDLE_G + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	byte	0	' terminate entry
+
+fm4_2
+	' transition #39: digit 4 -> 2
+	' 5 segments changing, #ON=3, #OFF=2
+	' seg[c] turning OFF while [b] is staying ON.
+	' Segment [c] snakes OFF towards [b]
+	byte	segments.SEG_RIGHT_C + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	' seg[f] turning OFF while [a] is turning ON.
+	' Segment [f] snakes OFF towards [a]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	' seg[a] turning ON while [b] is staying ON.
+	' Segment [a] snakes ON away from [b]
+	byte	segments.SEG_TOP_A + segments.CMD_TURN_ON + segments.CMD_RT_TO_LT
+	' seg[d] turning ON while [c] is turning OFF.
+	' Segment [d] snakes ON towards [c]
+	byte	segments.SEG_BOTTOM_D + segments.CMD_TURN_ON + segments.CMD_LT_TO_RT
+	' seg[e] turning ON while [g] is staying ON.
+	' Segment [e] snakes ON away from [g]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_ON + segments.CMD_TOP_DOWN
+	byte	0	' terminate entry
+
+fm4_3
+	' transition #40: digit 4 -> 3
+	' 3 segments changing, #ON=2, #OFF=1
+	' seg[f] turning OFF while [a] is turning ON.
+	' Segment [f] snakes OFF towards [a]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	' seg[a] turning ON while [b] is staying ON.
+	' Segment [a] snakes ON away from [b]
+	byte	segments.SEG_TOP_A + segments.CMD_TURN_ON + segments.CMD_RT_TO_LT
+	' seg[d] turning ON while [c] is staying ON.
+	' Segment [d] snakes ON away from [c]
+	byte	segments.SEG_BOTTOM_D + segments.CMD_TURN_ON + segments.CMD_RT_TO_LT
+	byte	0	' terminate entry
+
+fm4_5
+	' transition #41: digit 4 -> 5
+	' 3 segments changing, #ON=2, #OFF=1
+	' seg[b] turning OFF while [a] is turning ON.
+	' Segment [b] snakes OFF towards [a]
+	byte	segments.SEG_RIGHT_B + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	' seg[a] turning ON while [b] is turning OFF.
+	' Segment [a] snakes ON towards [b]
+	byte	segments.SEG_TOP_A + segments.CMD_TURN_ON + segments.CMD_LT_TO_RT
+	' seg[d] turning ON while [c] is staying ON.
+	' Segment [d] snakes ON away from [c]
+	byte	segments.SEG_BOTTOM_D + segments.CMD_TURN_ON + segments.CMD_RT_TO_LT
+	byte	0	' terminate entry
+
+fm4_6
+	' transition #42: digit 4 -> 6
+	' 4 segments changing, #ON=3, #OFF=1
+	' seg[b] turning OFF while [a] is turning ON.
+	' Segment [b] snakes OFF towards [a]
+	byte	segments.SEG_RIGHT_B + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	' seg[a] turning ON while [b] is turning OFF.
+	' Segment [a] snakes ON towards [b]
+	byte	segments.SEG_TOP_A + segments.CMD_TURN_ON + segments.CMD_LT_TO_RT
+	' seg[d] turning ON while [c] is staying ON.
+	' Segment [d] snakes ON away from [c]
+	byte	segments.SEG_BOTTOM_D + segments.CMD_TURN_ON + segments.CMD_RT_TO_LT
+	' seg[e] turning ON while [g] is staying ON.
+	' Segment [e] snakes ON away from [g]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_ON + segments.CMD_TOP_DOWN
+	byte	0	' terminate entry
+
+fm4_7
+	' transition #43: digit 4 -> 7
+	' 3 segments changing, #ON=1, #OFF=2
+	' seg[f] turning OFF while [a] is turning ON.
+	' Segment [f] snakes OFF towards [a]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	' seg[g] turning OFF while [b] is staying ON.
+	' Segment [g] snakes OFF towards [b]
+	byte	segments.SEG_MIDDLE_G + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[a] turning ON while [b] is staying ON.
+	' Segment [a] snakes ON away from [b]
+	byte	segments.SEG_TOP_A + segments.CMD_TURN_ON + segments.CMD_RT_TO_LT
+	byte	0	' terminate entry
+
+fm4_8
+	' transition #44: digit 4 -> 8
+	' 3 segments changing, #ON=3, #OFF=0
+	' seg[a] turning ON while [b] is staying ON.
+	' Segment [a] snakes ON away from [b]
+	byte	segments.SEG_TOP_A + segments.CMD_TURN_ON + segments.CMD_RT_TO_LT
+	' seg[d] turning ON while [c] is staying ON.
+	' Segment [d] snakes ON away from [c]
+	byte	segments.SEG_BOTTOM_D + segments.CMD_TURN_ON + segments.CMD_RT_TO_LT
+	' seg[e] turning ON while [g] is staying ON.
+	' Segment [e] snakes ON away from [g]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_ON + segments.CMD_TOP_DOWN
+	byte	0	' terminate entry
+
+fm4_9
+	' transition #45: digit 4 -> 9
+	' 2 segments changing, #ON=2, #OFF=0
+	' seg[a] turning ON while [b] is staying ON.
+	' Segment [a] snakes ON away from [b]
+	byte	segments.SEG_TOP_A + segments.CMD_TURN_ON + segments.CMD_RT_TO_LT
+	' seg[d] turning ON while [c] is staying ON.
+	' Segment [d] snakes ON away from [c]
+	byte	segments.SEG_BOTTOM_D + segments.CMD_TURN_ON + segments.CMD_RT_TO_LT
+	byte	0	' terminate entry
+
+fm5_0
+	' transition #46: digit 5 -> 0
+	' 3 segments changing, #ON=2, #OFF=1
+	' seg[g] turning OFF while [b] is turning ON.
+	' Segment [g] snakes OFF towards [b]
+	byte	segments.SEG_MIDDLE_G + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[b] turning ON while [a] is staying ON.
+	' Segment [b] snakes ON away from [a]
+	byte	segments.SEG_RIGHT_B + segments.CMD_TURN_ON + segments.CMD_TOP_DOWN
+	' seg[e] turning ON while [d] is staying ON.
+	' Segment [e] snakes ON away from [d]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_ON + segments.CMD_BOTTOM_UP
+	byte	0	' terminate entry
+
+fm5_1
+	' transition #47: digit 5 -> 1
+	' 5 segments changing, #ON=1, #OFF=4
+	' seg[a] turning OFF while [b] is turning ON.
+	' Segment [a] snakes OFF towards [b]
+	byte	segments.SEG_TOP_A + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[d] turning OFF while [c] is staying ON.
+	' Segment [d] snakes OFF towards [c]
+	byte	segments.SEG_BOTTOM_D + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[f] turning OFF while [b] is turning ON.
+	' VERT Segment [f] slides RIGHT to [b]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_OFF + segments.CMD_COL_TO_RT
+	' seg[g] turning OFF while [b] is turning ON.
+	' Segment [g] snakes OFF towards [b]
+	byte	segments.SEG_MIDDLE_G + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[b] turning ON while [a] is turning OFF.
+	' Segment [b] snakes ON towards [a]
+	byte	segments.SEG_RIGHT_B + segments.CMD_TURN_ON + segments.CMD_BOTTOM_UP
+	byte	0	' terminate entry
+
+fm5_2
+	' transition #48: digit 5 -> 2
+	' 4 segments changing, #ON=2, #OFF=2
+	' seg[c] turning OFF while [b] is turning ON.
+	' Segment [c] snakes OFF towards [b]
+	byte	segments.SEG_RIGHT_C + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	' seg[f] turning OFF while [a] is staying ON.
+	' Segment [f] snakes OFF towards [a]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	' seg[b] turning ON while [a] is staying ON.
+	' Segment [b] snakes ON away from [a]
+	byte	segments.SEG_RIGHT_B + segments.CMD_TURN_ON + segments.CMD_TOP_DOWN
+	' seg[e] turning ON while [d] is staying ON.
+	' Segment [e] snakes ON away from [d]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_ON + segments.CMD_BOTTOM_UP
+	byte	0	' terminate entry
+
+fm5_3
+	' transition #49: digit 5 -> 3
+	' 2 segments changing, #ON=1, #OFF=1
+	' seg[f] turning OFF while [a] is staying ON.
+	' Segment [f] snakes OFF towards [a]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	' seg[b] turning ON while [a] is staying ON.
+	' Segment [b] snakes ON away from [a]
+	byte	segments.SEG_RIGHT_B + segments.CMD_TURN_ON + segments.CMD_TOP_DOWN
+	byte	0	' terminate entry
+
+fm5_4
+	' transition #50: digit 5 -> 4
+	' 3 segments changing, #ON=1, #OFF=2
+	' seg[a] turning OFF while [b] is turning ON.
+	' Segment [a] snakes OFF towards [b]
+	byte	segments.SEG_TOP_A + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[d] turning OFF while [c] is staying ON.
+	' Segment [d] snakes OFF towards [c]
+	byte	segments.SEG_BOTTOM_D + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[b] turning ON while [a] is turning OFF.
+	' Segment [b] snakes ON towards [a]
+	byte	segments.SEG_RIGHT_B + segments.CMD_TURN_ON + segments.CMD_BOTTOM_UP
+	byte	0	' terminate entry
+
+fm5_6
+	' transition #51: digit 5 -> 6
+	' 1 segment changing, #ON=1, #OFF=0
+	' seg[e] turning ON while [d] is staying ON.
+	' Segment [e] snakes ON away from [d]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_ON + segments.CMD_BOTTOM_UP
+	byte	0	' terminate entry
+
+fm5_7
+	' transition #52: digit 5 -> 7
+	' 4 segments changing, #ON=1, #OFF=3
+	' seg[d] turning OFF while [c] is staying ON.
+	' Segment [d] snakes OFF towards [c]
+	byte	segments.SEG_BOTTOM_D + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[f] turning OFF while [a] is staying ON.
+	' Segment [f] snakes OFF towards [a]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	' seg[g] turning OFF while [b] is turning ON.
+	' Segment [g] snakes OFF towards [b]
+	byte	segments.SEG_MIDDLE_G + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[b] turning ON while [a] is staying ON.
+	' Segment [b] snakes ON away from [a]
+	byte	segments.SEG_RIGHT_B + segments.CMD_TURN_ON + segments.CMD_TOP_DOWN
+	byte	0	' terminate entry
+
+fm5_8
+	' transition #53: digit 5 -> 8
+	' 2 segments changing, #ON=2, #OFF=0
+	' seg[b] turning ON while [a] is staying ON.
+	' Segment [b] snakes ON away from [a]
+	byte	segments.SEG_RIGHT_B + segments.CMD_TURN_ON + segments.CMD_TOP_DOWN
+	' seg[e] turning ON while [d] is staying ON.
+	' Segment [e] snakes ON away from [d]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_ON + segments.CMD_BOTTOM_UP
+	byte	0	' terminate entry
+
+fm5_9
+	' transition #54: digit 5 -> 9
+	' 1 segment changing, #ON=1, #OFF=0
+	' seg[b] turning ON while [a] is staying ON.
+	' Segment [b] snakes ON away from [a]
+	byte	segments.SEG_RIGHT_B + segments.CMD_TURN_ON + segments.CMD_TOP_DOWN
+	byte	0	' terminate entry
+
+fm6_0
+	' transition #55: digit 6 -> 0
+	' 2 segments changing, #ON=1, #OFF=1
+	' seg[g] turning OFF while [b] is turning ON.
+	' Segment [g] snakes OFF towards [b]
+	byte	segments.SEG_MIDDLE_G + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[b] turning ON while [a] is staying ON.
+	' Segment [b] snakes ON away from [a]
+	byte	segments.SEG_RIGHT_B + segments.CMD_TURN_ON + segments.CMD_TOP_DOWN
+	byte	0	' terminate entry
+
+fm6_1
+	' transition #56: digit 6 -> 1
+	' 6 segments changing, #ON=1, #OFF=5
+	' seg[a] turning OFF while [b] is turning ON.
+	' Segment [a] snakes OFF towards [b]
+	byte	segments.SEG_TOP_A + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[d] turning OFF while [c] is staying ON.
+	' Segment [d] snakes OFF towards [c]
+	byte	segments.SEG_BOTTOM_D + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[e] turning OFF while [c] is staying ON.
+	' VERT Segment [e] slides RIGHT to [c]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_OFF + segments.CMD_COL_TO_RT
+	' seg[f] turning OFF while [b] is turning ON.
+	' VERT Segment [f] slides RIGHT to [b]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_OFF + segments.CMD_COL_TO_RT
+	' seg[g] turning OFF while [b] is turning ON.
+	' Segment [g] snakes OFF towards [b]
+	byte	segments.SEG_MIDDLE_G + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[b] turning ON while [a] is turning OFF.
+	' Segment [b] snakes ON towards [a]
+	byte	segments.SEG_RIGHT_B + segments.CMD_TURN_ON + segments.CMD_BOTTOM_UP
+	byte	0	' terminate entry
+
+fm6_2
+	' transition #57: digit 6 -> 2
+	' 3 segments changing, #ON=1, #OFF=2
+	' seg[c] turning OFF while [b] is turning ON.
+	' Segment [c] snakes OFF towards [b]
+	byte	segments.SEG_RIGHT_C + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	' seg[f] turning OFF while [a] is staying ON.
+	' Segment [f] snakes OFF towards [a]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	' seg[b] turning ON while [a] is staying ON.
+	' Segment [b] snakes ON away from [a]
+	byte	segments.SEG_RIGHT_B + segments.CMD_TURN_ON + segments.CMD_TOP_DOWN
+	byte	0	' terminate entry
+
+fm6_3
+	' transition #58: digit 6 -> 3
+	' 3 segments changing, #ON=1, #OFF=2
+	' seg[e] turning OFF while [d] is staying ON.
+	' Segment [e] snakes OFF towards [d]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_OFF + segments.CMD_TOP_DOWN
+	' seg[f] turning OFF while [a] is staying ON.
+	' Segment [f] snakes OFF towards [a]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	' seg[b] turning ON while [a] is staying ON.
+	' Segment [b] snakes ON away from [a]
+	byte	segments.SEG_RIGHT_B + segments.CMD_TURN_ON + segments.CMD_TOP_DOWN
+	byte	0	' terminate entry
+
+fm6_4
+	' transition #59: digit 6 -> 4
+	' 4 segments changing, #ON=1, #OFF=3
+	' seg[a] turning OFF while [b] is turning ON.
+	' Segment [a] snakes OFF towards [b]
+	byte	segments.SEG_TOP_A + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[d] turning OFF while [c] is staying ON.
+	' Segment [d] snakes OFF towards [c]
+	byte	segments.SEG_BOTTOM_D + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[e] turning OFF while [g] is staying ON.
+	' Segment [e] snakes OFF towards [g]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	' seg[b] turning ON while [a] is turning OFF.
+	' Segment [b] snakes ON towards [a]
+	byte	segments.SEG_RIGHT_B + segments.CMD_TURN_ON + segments.CMD_BOTTOM_UP
+	byte	0	' terminate entry
+
+fm6_5
+	' transition #60: digit 6 -> 5
+	' 1 segment changing, #ON=0, #OFF=1
+	' seg[e] turning OFF while [d] is staying ON.
+	' Segment [e] snakes OFF towards [d]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_OFF + segments.CMD_TOP_DOWN
+	byte	0	' terminate entry
+
+fm6_7
+	' transition #61: digit 6 -> 7
+	' 5 segments changing, #ON=1, #OFF=4
+	' seg[d] turning OFF while [c] is staying ON.
+	' Segment [d] snakes OFF towards [c]
+	byte	segments.SEG_BOTTOM_D + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[e] turning OFF while [c] is staying ON.
+	' VERT Segment [e] slides RIGHT to [c]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_OFF + segments.CMD_COL_TO_RT
+	' seg[f] turning OFF while [a] is staying ON.
+	' Segment [f] snakes OFF towards [a]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	' seg[g] turning OFF while [b] is turning ON.
+	' Segment [g] snakes OFF towards [b]
+	byte	segments.SEG_MIDDLE_G + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[b] turning ON while [a] is staying ON.
+	' Segment [b] snakes ON away from [a]
+	byte	segments.SEG_RIGHT_B + segments.CMD_TURN_ON + segments.CMD_TOP_DOWN
+	byte	0	' terminate entry
+
+fm6_8
+	' transition #62: digit 6 -> 8
+	' 1 segment changing, #ON=1, #OFF=0
+	' seg[b] turning ON while [a] is staying ON.
+	' Segment [b] snakes ON away from [a]
+	byte	segments.SEG_RIGHT_B + segments.CMD_TURN_ON + segments.CMD_TOP_DOWN
+	byte	0	' terminate entry
+
+fm6_9
+	' transition #63: digit 6 -> 9
+	' 2 segments changing, #ON=1, #OFF=1
+	' seg[e] turning OFF while [d] is staying ON.
+	' Segment [e] snakes OFF towards [d]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_OFF + segments.CMD_TOP_DOWN
+	' seg[b] turning ON while [a] is staying ON.
+	' Segment [b] snakes ON away from [a]
+	byte	segments.SEG_RIGHT_B + segments.CMD_TURN_ON + segments.CMD_TOP_DOWN
+	byte	0	' terminate entry
+
+fm7_0
+	' transition #64: digit 7 -> 0
+	' 3 segments changing, #ON=3, #OFF=0
+	' seg[d] turning ON while [c] is staying ON.
+	' Segment [d] snakes ON away from [c]
+	byte	segments.SEG_BOTTOM_D + segments.CMD_TURN_ON + segments.CMD_RT_TO_LT
+	' seg[e] turning ON while [g] is staying OFF.
+	' Segment [e] snakes ON towards [g]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_ON + segments.CMD_BOTTOM_UP
+	' seg[f] turning ON while [a] is staying ON.
+	' Segment [f] snakes ON away from [a]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_ON + segments.CMD_TOP_DOWN
+	byte	0	' terminate entry
+
+fm7_1
+	' transition #65: digit 7 -> 1
+	' 1 segment changing, #ON=0, #OFF=1
+	' seg[a] turning OFF while [b] is staying ON.
+	' Segment [a] snakes OFF towards [b]
+	byte	segments.SEG_TOP_A + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	byte	0	' terminate entry
+
+fm7_2
+	' transition #66: digit 7 -> 2
+	' 4 segments changing, #ON=3, #OFF=1
+	' seg[c] turning OFF while [b] is staying ON.
+	' Segment [c] snakes OFF towards [b]
+	byte	segments.SEG_RIGHT_C + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	' seg[d] turning ON while [c] is turning OFF.
+	' Segment [d] snakes ON towards [c]
+	byte	segments.SEG_BOTTOM_D + segments.CMD_TURN_ON + segments.CMD_LT_TO_RT
+	' seg[e] turning ON while [f] is staying OFF.
+	' Segment [e] snakes ON towards [f]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_ON + segments.CMD_BOTTOM_UP
+	' seg[g] turning ON while [b] is staying ON.
+	' Segment [g] snakes ON away from [b]
+	byte	segments.SEG_MIDDLE_G + segments.CMD_TURN_ON + segments.CMD_RT_TO_LT
+	byte	0	' terminate entry
+
+fm7_3
+	' transition #67: digit 7 -> 3
+	' 2 segments changing, #ON=2, #OFF=0
+	' seg[d] turning ON while [c] is staying ON.
+	' Segment [d] snakes ON away from [c]
+	byte	segments.SEG_BOTTOM_D + segments.CMD_TURN_ON + segments.CMD_RT_TO_LT
+	' seg[g] turning ON while [b] is staying ON.
+	' Segment [g] snakes ON away from [b]
+	byte	segments.SEG_MIDDLE_G + segments.CMD_TURN_ON + segments.CMD_RT_TO_LT
+	byte	0	' terminate entry
+
+fm7_4
+	' transition #68: digit 7 -> 4
+	' 3 segments changing, #ON=2, #OFF=1
+	' seg[a] turning OFF while [b] is staying ON.
+	' Segment [a] snakes OFF towards [b]
+	byte	segments.SEG_TOP_A + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[f] turning ON while [a] is turning OFF.
+	' Segment [f] snakes ON towards [a]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_ON + segments.CMD_BOTTOM_UP
+	' seg[g] turning ON while [b] is staying ON.
+	' Segment [g] snakes ON away from [b]
+	byte	segments.SEG_MIDDLE_G + segments.CMD_TURN_ON + segments.CMD_RT_TO_LT
+	byte	0	' terminate entry
+
+fm7_5
+	' transition #69: digit 7 -> 5
+	' 4 segments changing, #ON=3, #OFF=1
+	' seg[b] turning OFF while [a] is staying ON.
+	' Segment [b] snakes OFF towards [a]
+	byte	segments.SEG_RIGHT_B + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	' seg[d] turning ON while [c] is staying ON.
+	' Segment [d] snakes ON away from [c]
+	byte	segments.SEG_BOTTOM_D + segments.CMD_TURN_ON + segments.CMD_RT_TO_LT
+	' seg[f] turning ON while [a] is staying ON.
+	' Segment [f] snakes ON away from [a]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_ON + segments.CMD_TOP_DOWN
+	' seg[g] turning ON while [b] is turning OFF.
+	' Segment [g] snakes ON towards [b]
+	byte	segments.SEG_MIDDLE_G + segments.CMD_TURN_ON + segments.CMD_LT_TO_RT
+	byte	0	' terminate entry
+
+fm7_6
+	' transition #70: digit 7 -> 6
+	' 5 segments changing, #ON=4, #OFF=1
+	' seg[b] turning OFF while [a] is staying ON.
+	' Segment [b] snakes OFF towards [a]
+	byte	segments.SEG_RIGHT_B + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	' seg[d] turning ON while [c] is staying ON.
+	' Segment [d] snakes ON away from [c]
+	byte	segments.SEG_BOTTOM_D + segments.CMD_TURN_ON + segments.CMD_RT_TO_LT
+	' seg[e] turning ON while [c] is staying ON.
+	' VERT Segment [e] slides LEFT from [c]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_ON + segments.CMD_COL_TO_LT
+	' seg[f] turning ON while [a] is staying ON.
+	' Segment [f] snakes ON away from [a]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_ON + segments.CMD_TOP_DOWN
+	' seg[g] turning ON while [b] is turning OFF.
+	' Segment [g] snakes ON towards [b]
+	byte	segments.SEG_MIDDLE_G + segments.CMD_TURN_ON + segments.CMD_LT_TO_RT
+	byte	0	' terminate entry
+
+fm7_8
+	' transition #71: digit 7 -> 8
+	' 4 segments changing, #ON=4, #OFF=0
+	' seg[d] turning ON while [c] is staying ON.
+	' Segment [d] snakes ON away from [c]
+	byte	segments.SEG_BOTTOM_D + segments.CMD_TURN_ON + segments.CMD_RT_TO_LT
+	' seg[e] turning ON while [c] is staying ON.
+	' VERT Segment [e] slides LEFT from [c]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_ON + segments.CMD_COL_TO_LT
+	' seg[f] turning ON while [a] is staying ON.
+	' Segment [f] snakes ON away from [a]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_ON + segments.CMD_TOP_DOWN
+	' seg[g] turning ON while [b] is staying ON.
+	' Segment [g] snakes ON away from [b]
+	byte	segments.SEG_MIDDLE_G + segments.CMD_TURN_ON + segments.CMD_RT_TO_LT
+	byte	0	' terminate entry
+
+fm7_9
+	' transition #72: digit 7 -> 9
+	' 3 segments changing, #ON=3, #OFF=0
+	' seg[d] turning ON while [c] is staying ON.
+	' Segment [d] snakes ON away from [c]
+	byte	segments.SEG_BOTTOM_D + segments.CMD_TURN_ON + segments.CMD_RT_TO_LT
+	' seg[f] turning ON while [a] is staying ON.
+	' Segment [f] snakes ON away from [a]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_ON + segments.CMD_TOP_DOWN
+	' seg[g] turning ON while [b] is staying ON.
+	' Segment [g] snakes ON away from [b]
+	byte	segments.SEG_MIDDLE_G + segments.CMD_TURN_ON + segments.CMD_RT_TO_LT
+	byte	0	' terminate entry
+
+fm8_0
+	' transition #73: digit 8 -> 0
+	' 1 segment changing, #ON=0, #OFF=1
+	' seg[g] turning OFF while [b] is staying ON.
+	' Segment [g] snakes OFF towards [b]
+	byte	segments.SEG_MIDDLE_G + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	byte	0	' terminate entry
+
+fm8_1
+	' transition #74: digit 8 -> 1
+	' 5 segments changing, #ON=0, #OFF=5
+	' seg[a] turning OFF while [b] is staying ON.
+	' Segment [a] snakes OFF towards [b]
+	byte	segments.SEG_TOP_A + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[d] turning OFF while [c] is staying ON.
+	' Segment [d] snakes OFF towards [c]
+	byte	segments.SEG_BOTTOM_D + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[e] turning OFF while [c] is staying ON.
+	' VERT Segment [e] slides RIGHT to [c]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_OFF + segments.CMD_COL_TO_RT
+	' seg[f] turning OFF while [b] is staying ON.
+	' VERT Segment [f] slides RIGHT to [b]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_OFF + segments.CMD_COL_TO_RT
+	' seg[g] turning OFF while [b] is staying ON.
+	' Segment [g] snakes OFF towards [b]
+	byte	segments.SEG_MIDDLE_G + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	byte	0	' terminate entry
+
+fm8_2
+	' transition #75: digit 8 -> 2
+	' 2 segments changing, #ON=0, #OFF=2
+	' seg[c] turning OFF while [b] is staying ON.
+	' Segment [c] snakes OFF towards [b]
+	byte	segments.SEG_RIGHT_C + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	' seg[f] turning OFF while [a] is staying ON.
+	' Segment [f] snakes OFF towards [a]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	byte	0	' terminate entry
+
+fm8_3
+	' transition #76: digit 8 -> 3
+	' 2 segments changing, #ON=0, #OFF=2
+	' seg[e] turning OFF while [d] is staying ON.
+	' Segment [e] snakes OFF towards [d]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_OFF + segments.CMD_TOP_DOWN
+	' seg[f] turning OFF while [a] is staying ON.
+	' Segment [f] snakes OFF towards [a]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	byte	0	' terminate entry
+
+fm8_4
+	' transition #77: digit 8 -> 4
+	' 3 segments changing, #ON=0, #OFF=3
+	' seg[a] turning OFF while [b] is staying ON.
+	' Segment [a] snakes OFF towards [b]
+	byte	segments.SEG_TOP_A + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[d] turning OFF while [c] is staying ON.
+	' Segment [d] snakes OFF towards [c]
+	byte	segments.SEG_BOTTOM_D + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[e] turning OFF while [g] is staying ON.
+	' Segment [e] snakes OFF towards [g]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	byte	0	' terminate entry
+
+fm8_5
+	' transition #78: digit 8 -> 5
+	' 2 segments changing, #ON=0, #OFF=2
+	' seg[b] turning OFF while [a] is staying ON.
+	' Segment [b] snakes OFF towards [a]
+	byte	segments.SEG_RIGHT_B + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	' seg[e] turning OFF while [d] is staying ON.
+	' Segment [e] snakes OFF towards [d]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_OFF + segments.CMD_TOP_DOWN
+	byte	0	' terminate entry
+
+fm8_6
+	' transition #79: digit 8 -> 6
+	' 1 segment changing, #ON=0, #OFF=1
+	' seg[b] turning OFF while [a] is staying ON.
+	' Segment [b] snakes OFF towards [a]
+	byte	segments.SEG_RIGHT_B + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	byte	0	' terminate entry
+
+fm8_7
+	' transition #80: digit 8 -> 7
+	' 4 segments changing, #ON=0, #OFF=4
+	' seg[d] turning OFF while [c] is staying ON.
+	' Segment [d] snakes OFF towards [c]
+	byte	segments.SEG_BOTTOM_D + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[e] turning OFF while [c] is staying ON.
+	' VERT Segment [e] slides RIGHT to [c]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_OFF + segments.CMD_COL_TO_RT
+	' seg[f] turning OFF while [a] is staying ON.
+	' Segment [f] snakes OFF towards [a]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	' seg[g] turning OFF while [b] is staying ON.
+	' Segment [g] snakes OFF towards [b]
+	byte	segments.SEG_MIDDLE_G + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	byte	0	' terminate entry
+
+fm8_9
+	' transition #81: digit 8 -> 9
+	' 1 segment changing, #ON=0, #OFF=1
+	' seg[e] turning OFF while [d] is staying ON.
+	' Segment [e] snakes OFF towards [d]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_OFF + segments.CMD_TOP_DOWN
+	byte	0	' terminate entry
+
+fm9_0
+	' transition #82: digit 9 -> 0
+	' 2 segments changing, #ON=1, #OFF=1
+	' seg[g] turning OFF while [b] is staying ON.
+	' Segment [g] snakes OFF towards [b]
+	byte	segments.SEG_MIDDLE_G + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[e] turning ON while [d] is staying ON.
+	' Segment [e] snakes ON away from [d]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_ON + segments.CMD_BOTTOM_UP
+	byte	0	' terminate entry
+
+fm9_1
+	' transition #83: digit 9 -> 1
+	' 4 segments changing, #ON=0, #OFF=4
+	' seg[a] turning OFF while [b] is staying ON.
+	' Segment [a] snakes OFF towards [b]
+	byte	segments.SEG_TOP_A + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[d] turning OFF while [c] is staying ON.
+	' Segment [d] snakes OFF towards [c]
+	byte	segments.SEG_BOTTOM_D + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[f] turning OFF while [b] is staying ON.
+	' VERT Segment [f] slides RIGHT to [b]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_OFF + segments.CMD_COL_TO_RT
+	' seg[g] turning OFF while [b] is staying ON.
+	' Segment [g] snakes OFF towards [b]
+	byte	segments.SEG_MIDDLE_G + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	byte	0	' terminate entry
+
+fm9_2
+	' transition #84: digit 9 -> 2
+	' 3 segments changing, #ON=1, #OFF=2
+	' seg[c] turning OFF while [b] is staying ON.
+	' Segment [c] snakes OFF towards [b]
+	byte	segments.SEG_RIGHT_C + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	' seg[f] turning OFF while [a] is staying ON.
+	' Segment [f] snakes OFF towards [a]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	' seg[e] turning ON while [d] is staying ON.
+	' Segment [e] snakes ON away from [d]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_ON + segments.CMD_BOTTOM_UP
+	byte	0	' terminate entry
+
+fm9_3
+	' transition #85: digit 9 -> 3
+	' 1 segment changing, #ON=0, #OFF=1
+	' seg[f] turning OFF while [a] is staying ON.
+	' Segment [f] snakes OFF towards [a]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	byte	0	' terminate entry
+
+fm9_4
+	' transition #86: digit 9 -> 4
+	' 2 segments changing, #ON=0, #OFF=2
+	' seg[a] turning OFF while [b] is staying ON.
+	' Segment [a] snakes OFF towards [b]
+	byte	segments.SEG_TOP_A + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[d] turning OFF while [c] is staying ON.
+	' Segment [d] snakes OFF towards [c]
+	byte	segments.SEG_BOTTOM_D + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	byte	0	' terminate entry
+
+fm9_5
+	' transition #87: digit 9 -> 5
+	' 1 segment changing, #ON=0, #OFF=1
+	' seg[b] turning OFF while [a] is staying ON.
+	' Segment [b] snakes OFF towards [a]
+	byte	segments.SEG_RIGHT_B + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	byte	0	' terminate entry
+
+fm9_6
+	' transition #88: digit 9 -> 6
+	' 2 segments changing, #ON=1, #OFF=1
+	' seg[b] turning OFF while [a] is staying ON.
+	' Segment [b] snakes OFF towards [a]
+	byte	segments.SEG_RIGHT_B + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	' seg[e] turning ON while [d] is staying ON.
+	' Segment [e] snakes ON away from [d]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_ON + segments.CMD_BOTTOM_UP
+	byte	0	' terminate entry
+
+fm9_7
+	' transition #89: digit 9 -> 7
+	' 3 segments changing, #ON=0, #OFF=3
+	' seg[d] turning OFF while [c] is staying ON.
+	' Segment [d] snakes OFF towards [c]
+	byte	segments.SEG_BOTTOM_D + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	' seg[f] turning OFF while [a] is staying ON.
+	' Segment [f] snakes OFF towards [a]
+	byte	segments.SEG_LEFT_F + segments.CMD_TURN_OFF + segments.CMD_BOTTOM_UP
+	' seg[g] turning OFF while [b] is staying ON.
+	' Segment [g] snakes OFF towards [b]
+	byte	segments.SEG_MIDDLE_G + segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT
+	byte	0	' terminate entry
+
+fm9_8
+	' transition #90: digit 9 -> 8
+	' 1 segment changing, #ON=1, #OFF=0
+	' seg[e] turning ON while [d] is staying ON.
+	' Segment [e] snakes ON away from [d]
+	byte	segments.SEG_LEFT_E + segments.CMD_TURN_ON + segments.CMD_BOTTOM_UP
+	byte	0	' terminate entry
+
+CON { license }
+
+{{
+
+
+ -------------------------------------------------------------------------------------------------
+  MIT License
+
+  Copyright (c) 2020 Iron Sheep Productions, LLC
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+ =================================================================================================
+}}
