@@ -3,7 +3,7 @@
 ''   File....... isp_hub75_morphCounters.spin2
 ''   Purpose.... Manage groups of morphing 7-segment digits
 ''   Authors.... Stephen M Moraco
-''               -- Copyright (c) 2020 Iron Sheep Productions, LLC
+''               -- Copyright (c) 2021 Iron Sheep Productions, LLC
 ''               -- see below for terms of use
 ''   E-mail..... stephen@ironsheep.biz
 ''   Started.... Jan 2021
@@ -71,7 +71,7 @@ PUB null()
     '' This is NOT a top level object
 
 PUB initialize()
-    '' init the opbject so it knows nothing but knows it knows nothing ;-)
+    '' init this opbject so it knows nothing but knows it knows nothing ;-)
     isSetup := FALSE
     groupType := GRP_UNKNOWN
 
@@ -155,6 +155,7 @@ PUB isConfigured() : bStatus
     bStatus := (groupType <> GRP_UNKNOWN)
 
 PUB nextTimeCycle() | bShowCurrValue
+    '' step this counter by one
     'debug("mG:-nxTimCyc(", udec_(groupType), ")")
     bShowCurrValue := TRUE
     case groupType
@@ -212,7 +213,7 @@ PRI updateDigitsFromValue(desiredValue) | currDivisor, digitIdx, digitValue, rem
     'repeat ' stop to eval debug
 
 PUB isAnimationComplete() : completeStatus | digitIdx
-    '' return T/F where T means this counter animations are complete
+    '' return T/F where T means this countera animations are complete
     'debug("mG:-cmplt? (", udec_(groupType), ")")
     completeStatus := TRUE
     repeat digitIdx from 0 to MAX_DIGITS - 1
@@ -268,7 +269,7 @@ CON { license }
  -------------------------------------------------------------------------------------------------
   MIT License
 
-  Copyright (c) 2020 Iron Sheep Productions, LLC
+  Copyright (c) 2021 Iron Sheep Productions, LLC
 
   Permission is hereby granted, free of charge, to any person obtaining a copy
   of this software and associated documentation files (the "Software"), to deal

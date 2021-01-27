@@ -3,7 +3,7 @@
 ''   File....... isp_hub75_morph7seg.spin2
 ''   Purpose.... manipulate a morphing 7 segment digit
 ''   Authors.... Stephen M Moraco
-''               -- Copyright (c) 2020 Iron Sheep Productions, LLC
+''               -- Copyright (c) 2021 Iron Sheep Productions, LLC
 ''               -- see below for terms of use
 ''   E-mail..... stephen@ironsheep.biz
 ''   Started.... Jan 2021
@@ -111,9 +111,9 @@ PRI ensureIsSetup()
     ' Do intial setup, if not yet done
     if not isSetup
         initialSetup()
-        leftPtrsActual := @@leftPtrs
+        'leftPtrsActual := @@leftPtrs
         'leftPtrsAddr := @leftPtrs
-        objectOffset := (leftPtrsActual - leftPtrsAddr) - 40    ' why this 40????
+        'objectOffset := (leftPtrsActual - leftPtrsAddr) - 40    ' why this 40????
 
 
 PRI initialSetup() | byte segIndex, orientation, segRow, segCol, segW, segL
@@ -178,7 +178,7 @@ PRI turnOnDigit(digit) | byte fromSegments, byte toSegments, bitIndex
         'else
             ' going from digit to same digit, nothing to do!
 
-PRI reconfigureForDigit(digitValue) | tblIndex, pLtTable, pRtTable, actionIndex, segmentIndex, byte nextAction
+PRI reconfigureForDigit(digitValue) | tblIndex, pLtTable, pRtTable, pLtTable2, pRtTable2, actionIndex, segmentIndex, byte nextAction
     if currValue <> digitValue
         if digitValue <> DIGIT_HIDDEN
             if currValue < 0
@@ -187,12 +187,13 @@ PRI reconfigureForDigit(digitValue) | tblIndex, pLtTable, pRtTable, actionIndex,
                 'debug("m7:reconfig ", udec_(currValue), " -> ", udec_(digitValue))
                 'pLtTable := LONG[@leftPtrs][currValue] + objectOffset
                 pLtTable := @@leftPtrs[currValue]
-
-                'debug(" - ", uhex_long(pLtTable))
+                'debug("m7: ltLookup: ", uhex_long(pLtTable), uhex_long(pLtTable2))
+                'debug("m7: ltLookup ", uhex_long(pLtTable))
                 'pRtTable := LONG [pLtTable][digitValue] + objectOffset
-                pRtTable := @@pLtTable[digitValue]
+                pRtTable := @@LONG[pLtTable][digitValue]
                 ' remember to review @@ in P1 manual
-                'debug(" - ", uhex_long(pRtTable))
+                'debug("m7: rtLookup: ", uhex_long(pRtTable), uhex_long(pRtTable2))
+                'debug("m7: rtLookup ", uhex_long(pRtTable))
                 'repeat
                 if pRtTable <> NO_ACTIONS
                     actionIndex := 0
@@ -229,9 +230,9 @@ segmentsByDigit
     byte    %0111_1011   ' 9 abcd-fg
 
 ' NEW TABLE of Actions:
-leftPtrsActual  long    0
-leftPtrsAddr    long    @leftPtrs
-objectOffset    long    0
+'leftPtrsActual  long    0
+'leftPtrsAddr    long    @leftPtrs
+'objectOffset    long    0
 
 ' NOTE from spin2 doc pg4 symbol standing alone inherits last declared type!!
 ' =======================================================================================================================
@@ -1504,7 +1505,7 @@ CON { license }
  -------------------------------------------------------------------------------------------------
   MIT License
 
-  Copyright (c) 2020 Iron Sheep Productions, LLC
+  Copyright (c) 2021 Iron Sheep Productions, LLC
 
   Permission is hereby granted, free of charge, to any person obtaining a copy
   of this software and associated documentation files (the "Software"), to deal

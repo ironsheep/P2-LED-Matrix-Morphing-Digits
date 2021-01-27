@@ -3,7 +3,7 @@
 ''   File....... isp_hub75_morphSegment.spin2
 ''   Purpose.... manipulate a single morphing segment
 ''   Authors.... Stephen M Moraco
-''               -- Copyright (c) 2020 Iron Sheep Productions, LLC
+''               -- Copyright (c) 2021 Iron Sheep Productions, LLC
 ''               -- see below for terms of use
 ''   E-mail..... stephen@ironsheep.biz
 ''   Started.... Jan 2021
@@ -87,10 +87,10 @@ PUB null()
     '' This is NOT a top level object
 
 PUB placeSegment(row, column, orientation, segmentWidth, segmentLength, initialState, rgbColor) | nmInitState, nmSeg, bIsHoriz
+    '' Locate a desired segment on our screen. Draw initial segement if state is NOT off
     nmInitState := nameOfState(initialState)
     nmSeg := nameOfSegment(orientation)
     'debug("mSG:placeSegment rc=(", udec_(row), ",", udec_(column), "), ", zstr_(nmSeg), ", wl=(", udec_(segmentWidth) , ", ", udec_(segmentLength), "), ", zstr_(nmInitState), ", RGB=", uhex_long_(rgbColor))
-    '' Locate a desired segment on our screen. Draw initial segement if state is NOT off
     ' record settings choices we are given extrapolating some
     currentState := desiredEndState := nextState := STATE_OFF
     segStartX :=  0 #> column <# screen.MAX_PHYSICAL_COLUMNS - 1
@@ -128,7 +128,7 @@ PUB placeSegment(row, column, orientation, segmentWidth, segmentLength, initialS
         updateSegmentToState(initialState)
 
 PUB commandSegment(commandBits) | bTurnOn, nmStyle, nmSeg, nmOnOff
-    '' Start the segment moving to _OFF if not already off and NOT busy
+    '' Start the segment moving if NOT busy
     bTurnOn := (commandBits & MASK_ONOFF) == CMD_TURN_ON
     animateStyle := (commandBits & MASK_STYLE)
     nmStyle := nameOfCommand(animateStyle)
@@ -543,7 +543,7 @@ CON { license }
  -------------------------------------------------------------------------------------------------
   MIT License
 
-  Copyright (c) 2020 Iron Sheep Productions, LLC
+  Copyright (c) 2021 Iron Sheep Productions, LLC
 
   Permission is hereby granted, free of charge, to any person obtaining a copy
   of this software and associated documentation files (the "Software"), to deal

@@ -3,7 +3,7 @@
 ''   File....... isp_hub75_demoMorphSeg.spin2
 ''   Purpose.... Top-level Demonstration - showing off our HUB75 matrix w/Morphing 7 segment displays
 ''   Authors.... Stephen M Moraco
-''               -- Copyright (c) 2020 Iron Sheep Productions, LLC
+''               -- Copyright (c) 2021 Iron Sheep Productions, LLC
 ''               -- see below for terms of use
 ''   E-mail..... stephen@ironsheep.biz
 ''   Started.... Jan 2021
@@ -153,21 +153,21 @@ PRI loopUntilCountersFinish() | ctrIndex
             quit
 '}
 
-PUB wait100thSecs(count)
-    '' Wait for {count} 100ths of a second
+PRI wait100thSecs(count)
+    ' Wait for {count} 100ths of a second
     if count > 0
         repeat count
             waitms(10)  ' 1/100 seconds
 
-PUB waitSecs(count)
-    '' Wait for {count} 100ths of a second
+PRI waitSecs(count)
+    ' Wait for {count} 100ths of a second
     if count > 0
         repeat count
             waitms(1000)  ' 1 seconds
 
 
-PUB stop()
-    '' Stop the driver
+PRI stop()
+    ' Stop the driver
     if cog
         display.stop()
         cog := 0
@@ -180,7 +180,7 @@ CON { license }
  -------------------------------------------------------------------------------------------------
   MIT License
 
-  Copyright (c) 2020 Iron Sheep Productions, LLC
+  Copyright (c) 2021 Iron Sheep Productions, LLC
 
   Permission is hereby granted, free of charge, to any person obtaining a copy
   of this software and associated documentation files (the "Software"), to deal
