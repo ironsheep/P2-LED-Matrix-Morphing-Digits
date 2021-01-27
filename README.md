@@ -81,10 +81,10 @@ In total now we've identified what needs to be encoded:
 The command line for running the script is pretty simple:
 
 ```bash
-$ ./pymorph -o animationTable.spin2
+$ ./pymorph -o animationTable.out
 ```
 
-This runs the script and instructs it to write the table output to a file named animationTable.spin2
+This runs the script and instructs it to write the table output to a file named animationTable.out    *I then copied this content into the approparite file of my spin2 code.*
 
 ## The Demo
 
@@ -116,7 +116,7 @@ If you like my work and/or this has helped you in some way then feel free to hel
 
 ## License
 
-Copyright © 2020 Iron Sheep Productions, LLC. All rights reserved.<br />
+Copyright © 2021 Iron Sheep Productions, LLC. All rights reserved.<br />
 Licensed under the MIT License. <br>
 <br>
 Follow these links for more information:

@@ -185,9 +185,13 @@ PRI reconfigureForDigit(digitValue) | tblIndex, pLtTable, pRtTable, actionIndex,
                 turnOnDigit(digitValue)
             else
                 'debug("m7:reconfig ", udec_(currValue), " -> ", udec_(digitValue))
-                pLtTable := long[@leftPtrs][currValue] + objectOffset
+                'pLtTable := LONG[@leftPtrs][currValue] + objectOffset
+                pLtTable := @@leftPtrs[currValue]
+
                 'debug(" - ", uhex_long(pLtTable))
-                pRtTable := LONG [pLtTable][digitValue] + objectOffset
+                'pRtTable := LONG [pLtTable][digitValue] + objectOffset
+                pRtTable := @@pLtTable[digitValue]
+                ' remember to review @@ in P1 manual
                 'debug(" - ", uhex_long(pRtTable))
                 'repeat
                 if pRtTable <> NO_ACTIONS
@@ -229,9 +233,9 @@ leftPtrsActual  long    0
 leftPtrsAddr    long    @leftPtrs
 objectOffset    long    0
 
+' NOTE from spin2 doc pg4 symbol standing alone inherits last declared type!!
 ' =======================================================================================================================
-leftPtrs
-    LONG @tableLt0, @tableLt1, @tableLt2, @tableLt3, @tableLt4, @tableLt5, @tableLt6, @tableLt7, @tableLt8, @tableLt9
+leftPtrs LONG @tableLt0, @tableLt1, @tableLt2, @tableLt3, @tableLt4, @tableLt5, @tableLt6, @tableLt7, @tableLt8, @tableLt9
 ' -----------------------------------------------------------------------------------------------------------------------
 tableLt0
     LONG NO_ACTIONS, @fm0_1, @fm0_2, @fm0_3, @fm0_4, @fm0_5, @fm0_6, @fm0_7, @fm0_8, @fm0_9
