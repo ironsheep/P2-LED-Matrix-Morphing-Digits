@@ -55,21 +55,28 @@ OBJ
     color                   : "isp_hub75_color"
     display                 : "isp_hub75_display"
     counters[MAX_COUNTERS]  : "isp_hub75_morphCounters"
-    screen                  : "isp_hub75_screenAccess"
+    user                    : "isp_hub75_hwPanelConfig"   ' hardware config common to all demos
+    hub75Bffrs              : "isp_hub75_hwBufferAccess"
+    scrnBuffers             : "isp_hub75_hwBuffers"       ' the large buffers storing pixel data
 
-PUB start() : ok | ctrIdx
+PUB start() : ok | ctrIdx, chainIndex, maxPhysicalCols, maxPhysicalRows
     '' Start underlying drivers and run demo
 
     'debug("`term temp size 82 50 textsize 10")
+    hub75Bffrs.configure(hub75Bffrs.HUB75_ADAPTER_1, user.DISP0_ADAPTER_BASE_PIN, user.DISP0_PANEL_DRIVER_CHIP, user.DISP0_PANEL_ADDR_LINES)
+    chainIndex := hub75Bffrs.indexForHub75ChainId(hub75Bffrs.HUB75_ADAPTER_1)
+    maxPhysicalCols := hub75Bffrs.maxDisplayColumns(chainIndex)
+    maxPhysicalRows := hub75Bffrs.maxDisplayRows(chainIndex)
 
-    ok := cog := display.start()   ' send buffer to driver
+    display.setBufferPointers(chainIndex, scrnBuffers.chain0Ptrs())
+    ok := cog := display.start(chainIndex)   ' send buffer to driver
     if ok == -1
         debug("- DEMO: underlying drivers failed!")
         abort
 
     '  multiple SEVEN SEGMENT Morphing Digits DEMO
     repeat ctrIdx from 0 to MAX_COUNTERS -1
-        counters[ctrIdx].initialize()
+        counters[ctrIdx].initialize(chainIndex, maxPhysicalRows, maxPhysicalCols)
 
     display.clearScreen()
 
@@ -77,20 +84,20 @@ PUB start() : ok | ctrIdx
     display.setTextFont(display.TEXT_FONT_5x7)    ' font size
     display.setCursor(0, 0)   ' start at top left, with one pixel of spacing
     display.setColoredTextAtLnCol(0,0, string("Iron Sheep"), color.cMaroon)
-    display.commitScreenToPanel()
+    display.commitScreenToPanelSet()
 
     clkLtWidth, clkLtHeight := counters[GRP_CLOCK_LT].placeDigitGroup(10, 2, counters.GRP_CLOCK, 4, 1, 6, 0, color.cOrange)
 
-    if screen.MAX_PHYSICAL_COLUMNS > 64
+    if maxPhysicalCols > 64
         clkRtWidth, clkRtHeight := counters[GRP_CLOCK_RT].placeDigitGroup(8, 64+2, counters.GRP_CLOCK, 4, 1, 6, 12 * 60, color.cGreen)
 
-    if screen.MAX_PHYSICAL_ROWS > 32
+    if maxPhysicalRows > 32
         grpDnWidth, grpDnHeight := counters[GRP_DOWNCTR_2DIG].placeDigitGroup(28, 3, counters.GRP_DOWN_COUNTER, 3, 1, 15, 204, color.cTeal)
 
-    if screen.MAX_PHYSICAL_COLUMNS > 64 && screen.MAX_PHYSICAL_ROWS > 32
+    if maxPhysicalCols > 64 && maxPhysicalRows > 32
         grpRndWidth, grpRndHeight := counters[GRP_CTR_6DIG_RAND].placeDigitGroup(32, 64+4, counters.GRP_DIGITS_RANDOM, 4, 1, 9, 5436, color.cRed)
 
-    display.commitScreenToPanel()
+    display.commitScreenToPanelSet()
     'repeat
 
     repeat
@@ -107,7 +114,7 @@ PRI stepIdleCounters() | ctrIndex, bDidStep
             counters[ctrIndex].nextTimeCycle()
             bDidStep := TRUE
     if bDidStep
-        display.commitScreenToPanel()
+        display.commitScreenToPanelSet()
 
 PRI animateActiveCounters() | ctrIndex, bDidAnimate
     bDidAnimate := FALSE
@@ -117,7 +124,7 @@ PRI animateActiveCounters() | ctrIndex, bDidAnimate
                 counters[ctrIndex].animateStep()
                 bDidAnimate := TRUE
     if bDidAnimate
-        display.commitScreenToPanel()
+        display.commitScreenToPanelSet()
 
 PRI allCounterAnimationsComplete() : status | ctrIndex
     status := TRUE
@@ -130,7 +137,7 @@ PRI allCounterAnimationsComplete() : status | ctrIndex
 {
     repeat
         passTime()                      ' seed the next animations
-        display.commitScreenToPanel()   ' show screen changes
+        display.commitScreenToPanelSet()   ' show screen changes
         loopUntilCountersFinish()       ' let animations complete
 
 PRI passTime() | ctrIndex
@@ -145,7 +152,7 @@ PRI loopUntilCountersFinish() | ctrIndex
             repeat ctrIndex from 0 to MAX_COUNTERS - 1
                 if not counters[ctrIndex].isAnimationComplete()
                     counters[ctrIndex].animateStep()
-            display.commitScreenToPanel()
+            display.commitScreenToPanelSet()
             'wait100thSecs(segmentPeriod)
             'waitSecs(2)
 

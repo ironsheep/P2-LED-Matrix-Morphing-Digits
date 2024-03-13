@@ -57,13 +57,16 @@ CON { segment states, segment names, orientations and such }
 ' --------------------------------------------------------------------------------------------------
 
 OBJ
-    screen      : "isp_hub75_screenAccess"
     pixels      : "isp_hub75_screenUtils"
     color       : "isp_hub75_color"
+    colorUtils  : "isp_hub75_colorUtils"
 
 VAR
     ' configuration
     long    segOrientation
+    long    chainIndex
+    long    maxPhysicalCols
+    long    maxPhysicalRows
     ' animation in progress
     long    animateStyle
     long    stepCount
@@ -86,6 +89,12 @@ VAR
 PUB null()
     '' This is NOT a top level object
 
+PUB initialize(nChainIndex, nPhysicalRows, nPhysicalColumns)
+    '' init this opbject so it knows nothing but knows it knows nothing ;-)
+    chainIndex := nChainIndex
+    maxPhysicalCols := nPhysicalColumns
+    maxPhysicalRows := nPhysicalRows
+
 PUB placeSegment(row, column, orientation, segmentWidth, segmentLength, initialState, rgbColor) | nmInitState, nmSeg, bIsHoriz
     '' Locate a desired segment on our screen. Draw initial segement if state is NOT off
     nmInitState := nameOfState(initialState)
@@ -93,8 +102,8 @@ PUB placeSegment(row, column, orientation, segmentWidth, segmentLength, initialS
     'debug("mSG:placeSegment rc=(", udec_(row), ",", udec_(column), "), ", zstr_(nmSeg), ", wl=(", udec_(segmentWidth) , ", ", udec_(segmentLength), "), ", zstr_(nmInitState), ", RGB=", uhex_long_(rgbColor))
     ' record settings choices we are given extrapolating some
     currentState := desiredEndState := nextState := STATE_OFF
-    segStartX :=  0 #> column <# screen.MAX_PHYSICAL_COLUMNS - 1
-    segStartY :=  0 #> row <# screen.MAX_PHYSICAL_ROWS - 1
+    segStartX :=  0 #> column <# maxPhysicalCols - 1
+    segStartY :=  0 #> row <# maxPhysicalRows - 1
     segOrientation := orientation
     segRgbColor := rgbColor
     segLength := segmentLength
@@ -416,18 +425,18 @@ PRI updateSpecialVerticalSegment(newState) | pixInset, rowIndex, numberPixelsOff
 
 PRI drawLine(fmRow, fmColumn, toRow, toColumn, rgbColor) | row, column
     'debug("mSG:drwLn fmRC=(", udec_(fmRow), ",", udec_(fmColumn), "), toRC=(", udec_(toRow), ",", udec_(toColumn), "), RGB=(", uhex_long(rgbColor), ")")
-    fmRow :=  0 #> fmRow <# screen.MAX_PHYSICAL_ROWS - 1
-    fmColumn :=  0 #> fmColumn <# screen.MAX_PHYSICAL_COLUMNS - 1
-    toRow :=  0 #> toRow <# screen.MAX_PHYSICAL_ROWS - 1
-    toColumn :=  0 #> toColumn <# screen.MAX_PHYSICAL_COLUMNS - 1
+    fmRow :=  0 #> fmRow <# maxPhysicalRows - 1
+    fmColumn :=  0 #> fmColumn <# maxPhysicalCols - 1
+    toRow :=  0 #> toRow <# maxPhysicalRows - 1
+    toColumn :=  0 #> toColumn <# maxPhysicalCols - 1
     if fmRow == toRow
         ' draw Horizontal Line
         repeat column from fmColumn to toColumn
-            pixels.drawPixelAtRCwithRGB(fmRow, column, color.rgbForCValue(rgbColor))
+            pixels.drawPixelAtRCwithRGB(chainIndex, fmRow, column, colorUtils.rgbForCValue(rgbColor))
     elseif fmColumn == toColumn
         ' draw Vertical Line
         repeat row from fmRow to toRow
-            pixels.drawPixelAtRCwithRGB(row, fmColumn, color.rgbForCValue(rgbColor))
+            pixels.drawPixelAtRCwithRGB(chainIndex, row, fmColumn, colorUtils.rgbForCValue(rgbColor))
     else
         debug("DIAG lines not implemented !")
         abort

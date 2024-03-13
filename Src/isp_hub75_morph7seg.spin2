@@ -18,14 +18,18 @@ CON { public control values }
 
     WITH_WRAP = TRUE
     WITHOUT_WRAP = FALSE
+    MAX_SEGMENTS = 7
 
 OBJ
 
-    screen          : "isp_hub75_screenAccess"
-    segments[7]     : "isp_hub75_morphSegment"
+    segments[MAX_SEGMENTS]     : "isp_hub75_morphSegment"
+    'hub75Bffrs                 : "isp_hub75_hwBufferAccess"
 
 
 VAR { globals }
+    long    chainIndex
+    long    maxPhysicalCols
+    long    maxPhysicalRows
     long    currValue
     long    currRgbColor
     long    topY
@@ -42,6 +46,14 @@ VAR { globals }
 PUB null()
     '' This is NOT a top level object
 
+PUB initialize(nChainIndex, nPhysicalRows, nPhysicalColumns) | segmentIndex
+  chainIndex := nChainIndex
+  maxPhysicalCols := nPhysicalColumns
+  maxPhysicalRows := nPhysicalRows
+  repeat segmentIndex from 0 to MAX_SEGMENTS -1
+    segments[segmentIndex].initialize(nChainIndex, nPhysicalRows, nPhysicalColumns)
+
+
 DAT { debug titles }
 
 msPointers      byte    "pointers", 0
@@ -54,10 +66,11 @@ PUB placeDigit(row, column, width, height, digitValue, rgbColor)
     '' Locate a desired digit on our screen. Draw initial segement if state is NOT off
     ' now we can inform segements of their own locations
     debug("m7:placeDigit rc=(", udec_(row), ",", udec_(column),"), dgt=(", udec_(digitValue), "), RGB=(", uhex_long_(rgbColor),")")
+
     isSetup := FALSE
     ' FIXME: UNDONE shouldn't this limit to whole digit width from right edge???
-    leftX :=  0 #> column <# screen.MAX_PHYSICAL_COLUMNS - 1
-    topY :=  0 #> row <# screen.MAX_PHYSICAL_ROWS - 1
+    leftX :=  0 #> column <# maxPhysicalCols - 1
+    topY :=  0 #> row <# maxPhysicalRows - 1
     currRgbColor := rgbColor
     currValue := DIGIT_NO_VALUE
     digitHeight := height

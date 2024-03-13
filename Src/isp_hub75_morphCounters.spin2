@@ -29,7 +29,6 @@ GAP_LARGE_DIGITS = 4
 
 OBJ { Objects we use }
 
-    screen              : "isp_hub75_screenAccess"
     pixels              : "isp_hub75_screenUtils"
     digits[MAX_DIGITS]  : "isp_hub75_morph7seg"
 
@@ -41,6 +40,7 @@ VAR { instance variable }
     long    currValue
     long    valueCap
     long    maxValueDivisor
+    long    chainIndex
 
     ' calc values
     long    digitHeight
@@ -70,10 +70,13 @@ VAR { instance variable }
 PUB null()
     '' This is NOT a top level object
 
-PUB initialize()
+PUB initialize(nChainIndex, nPhysicalRows, nPhysicalColumns) | digitIndex
     '' init this opbject so it knows nothing but knows it knows nothing ;-)
     isSetup := FALSE
     groupType := GRP_UNKNOWN
+    chainIndex := nChainIndex
+    repeat digitIndex from 0 to MAX_DIGITS -1
+        digits[digitIndex].initialize(nChainIndex, nPhysicalRows, nPhysicalColumns)
 
 PUB placeDigitGroup(row, column, grpType, nbrDigits, segThickness, segLength, initialValue, rgbColor) : grpWidth, grpHeight | currCol, digitIdx
     '' Locate a desired digit group on our screen. Draw initial segements if {initialValue} is NOT off
@@ -256,10 +259,10 @@ PRI showSecondsDots(lightDark) | red, green, blue, targetColor
 
 PRI drawSecondsDot(row, column, rgbColor)
     'place a dot on the screen
-    pixels.drawPixelAtRC(row, column, rgbColor)
-    pixels.drawPixelAtRC(row, column+1, rgbColor)
-    pixels.drawPixelAtRC(row+1, column, rgbColor)
-    pixels.drawPixelAtRC(row+1, column+1, rgbColor)
+    pixels.drawPixelAtRC(chainIndex, row, column, rgbColor)
+    pixels.drawPixelAtRC(chainIndex, row, column+1, rgbColor)
+    pixels.drawPixelAtRC(chainIndex, row+1, column, rgbColor)
+    pixels.drawPixelAtRC(chainIndex, row+1, column+1, rgbColor)
 
 
 CON { license }
