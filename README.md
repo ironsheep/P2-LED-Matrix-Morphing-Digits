@@ -14,13 +14,26 @@ This project is my nod to **Hari Wiguna**'s [HariFun #165 video](https://www.you
 
 Demo:  [A Video of this project in action](https://youtu.be/-zx-_Z1aoWY).
 
+**Requires:** the [P2 HUB75 LED Matrix Driver](https://github.com/ironsheep/P2-HUB75-LED-Matrix-Driver) **v4.0.0 or later**. The driver is not included in this repository. See [Installing and building](#installing-and-building).
+
 ## Project Goals
 
 - Evaluate how hard it would be to plan and then generate the set of transitions using a Python script
 - Generate animation Tables to be included in spin2 code for use on P2
 - Create a demo using multiple LED Matrix panels driven by our new P2 driver
 
-All of this has been achieved in this project as represented in this repo!
+All of this was achieved in the original 2021 release.
+
+## Current status (2026)
+
+- **Ported to driver v4.0.0.** The demo builds against the HUB75 driver v4.0.0 and its new one-call startup. Earlier driver versions are no longer supported.
+- **Next: rebuilding for v4's display quality.** Driver v4 refreshes above 60 Hz at full 8-bit color depth. This project is being reworked to take advantage of that, for smoother, more realistic and more soothing motion:
+  - laying the counters out to fill the actual display, such as the 2x2 "quad" display of four 128x64 panels (256 x 128 pixels), instead of fixed positions designed for small panels
+  - pacing the animation to the faster refresh rate
+  - using the full color depth for softer segment transitions
+- **Planned:** automated tests, and a release version carried in each distributed file.
+
+The demo video above shows the 2021 version.
 
 ## Structure of this repository
 
@@ -30,7 +43,7 @@ There are a couple of subdirectories in this repo:
 | --------------- | ----------- |
 | Docs/ | A description file (.txt) annotated while studying the generated transitions and the generated table file (.out) produced by the latest version of the script |
 | Generator/ | This directory contains the python script which generates the animation table
-| Src/ | This directory contains the source code which chaces the animation table and produces the LED Matrix output of morphing digits
+| Src/ | This directory contains the source code which chases the animation table and produces the LED Matrix output of morphing digits. Only the morphing-digits files are versioned here. To build, the driver's files sit alongside them (see [Installing and building](#installing-and-building)) |
 
 
 ## The Generator 
@@ -80,25 +93,36 @@ In total now we've identified what needs to be encoded:
 
 The command line for running the script is pretty simple:
 
+The script needs Python 3 plus the `tzlocal` and `colorama` packages (`pip install tzlocal colorama`):
+
 ```bash
-$ ./pymorph -o animationTable.out
+$ ./Generator/pymorph.py -o animationTable.out
 ```
 
-This runs the script and instructs it to write the table output to a file named animationTable.out    *I then copied this content into the approparite file of my spin2 code.*
+This runs the script and instructs it to write the table output to a file named animationTable.out    *I then copied this content into the appropriate file of my spin2 code* (the `fmN_M` entries of the `DAT` section in `isp_hub75_morph7seg.spin2`).
 
 ## The Demo
 
-The Morphing Digits demo consists of 4 files that are compiled along with the P2 LED Matrix Driver.
+The Morphing Digits demo consists of 4 files that are compiled along with the P2 HUB75 LED Matrix Driver (v4.0.0 or later).
 
 |  **File Name** | Description |
 | --------------- | ----------- |
-| isp\_hub75_demoMorphSeg.spin2 | the **Top-Level** file |
+| demo\_hub75_morphSeg.spin2 | the **Top-Level** file |
 | isp\_hub75_morphCounters.spin2 | the **counter object** comprised of N morphing digits |
 | isp\_hub75_morph7seg.spin2 | the **7-segment-digit object** comprised of 7 morphing segments (contains the animation table and table chase algorithm |
 | isp\_hub75_morphSegment.spin2 | the individual **morphing segment object** - capable of both snake and column animations |
 
 
-### Using using this code to make your own display
+### Installing and building
+
+This repository holds only the morphing-digits files. The driver is distributed separately:
+
+1. Download the [P2 HUB75 LED Matrix Driver](https://github.com/ironsheep/P2-HUB75-LED-Matrix-Driver) v4.0.0 or later and unpack it into a folder.
+2. Copy the four `.spin2` files from this repository's `Src/` folder into that same folder. None of them share a name with a driver file.
+3. Describe your panels in the driver's `isp_hub75_hwPanelConfig.spin2` (the `DISP0_*` settings). This display's files take their panel layout from it.
+4. Compile and run `demo_hub75_morphSeg.spin2`, e.g. `pnut-ts demo_hub75_morphSeg.spin2`.
+
+### Using this code to make your own display
 
 To use this code in your own project you will replace the top-level file with one containing your own logic. You will include the remaining files from this project and files from the LED Matrix driver project as shown in this demo top-level file.  Lastly, let your imagination take you where you wish to go!
 

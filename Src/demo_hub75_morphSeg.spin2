@@ -7,7 +7,7 @@
 ''               -- see below for terms of use
 ''   E-mail..... stephen@ironsheep.biz
 ''   Started.... Jan 2021
-''   Updated.... 21 Jan 2021
+''   Updated.... 09 Oct 2026
 ''
 '' =================================================================================================
 
@@ -55,24 +55,17 @@ OBJ
     color                   : "isp_hub75_color"
     display                 : "isp_hub75_display"
     counters[MAX_COUNTERS]  : "isp_hub75_morphCounters"
-    user                    : "isp_hub75_hwPanelConfig"   ' hardware config common to all demos
     hub75Bffrs              : "isp_hub75_hwBufferAccess"
-    scrnBuffers             : "isp_hub75_hwBuffers"       ' the large buffers storing pixel data
 
 PUB start() : ok | ctrIdx, chainIndex, maxPhysicalCols, maxPhysicalRows
     '' Start underlying drivers and run demo
 
     'debug("`term temp size 82 50 textsize 10")
-    hub75Bffrs.configure(hub75Bffrs.HUB75_ADAPTER_1, user.DISP0_ADAPTER_BASE_PIN, user.DISP0_PANEL_DRIVER_CHIP, user.DISP0_PANEL_ADDR_LINES)
     chainIndex := hub75Bffrs.indexForHub75ChainId(hub75Bffrs.HUB75_ADAPTER_1)
+    ' configures the adapter from isp_hub75_hwPanelConfig and starts the driver (aborts on failure)
+    ok := cog := display.start(display.HUB75_ADAPTER_1)
     maxPhysicalCols := hub75Bffrs.maxDisplayColumns(chainIndex)
     maxPhysicalRows := hub75Bffrs.maxDisplayRows(chainIndex)
-
-    display.setBufferPointers(chainIndex, scrnBuffers.chain0Ptrs())
-    ok := cog := display.start(chainIndex)   ' send buffer to driver
-    if ok == -1
-        debug("- DEMO: underlying drivers failed!")
-        abort
 
     '  multiple SEVEN SEGMENT Morphing Digits DEMO
     repeat ctrIdx from 0 to MAX_COUNTERS -1
