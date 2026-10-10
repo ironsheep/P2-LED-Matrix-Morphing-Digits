@@ -133,6 +133,7 @@ dmypy.json
 # Claude agent configuration (not shipped)
 .claude/
 CLAUDE.md
+.todo-mcp/
 
 # local reference copy of the HUB75 driver (never committed)
 REF-NO-COMMIT/
