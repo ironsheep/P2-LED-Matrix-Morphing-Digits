@@ -8,8 +8,13 @@
 ''   E-mail..... stephen@ironsheep.biz
 ''   Started.... Jan 2021
 ''   Updated.... 24 Jan 2021
+''   Version.... v1.0.0
 ''
 '' =================================================================================================
+
+CON ' library version -- values are written by tools/stamp_version.sh, never edit by hand
+
+    MORPH_VERSION = 10000     ' MAJOR * 10000 + MINOR * 100 + PATCH, e.g. v1.2.3 is 10203
 
 CON { public control values }
 
@@ -69,6 +74,10 @@ VAR { instance variable }
 
 PUB null()
     '' This is NOT a top level object
+
+PUB versionString() : pVersion
+    '' Return the address of the zero-terminated library version text, e.g. "v1.0.0"
+    pVersion := @"v1.0.0"     ' MORPH_VERSION_STR -- written by tools/stamp_version.sh
 
 PUB initialize(nChainIndex, nPhysicalRows, nPhysicalColumns) | digitIndex
     '' init this opbject so it knows nothing but knows it knows nothing ;-)
