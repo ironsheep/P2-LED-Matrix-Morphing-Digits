@@ -140,10 +140,10 @@ REF-NO-COMMIT/
 
 # HUB75 driver files are copied into Src/ for building but never versioned here.
 # Users download the driver and copy this display's files over it.
-# Our files MUST be named isp_hub75_morph*.spin2 or demo_hub75_morphSeg.spin2.
+# Our files MUST be named isp_hub75_morph*.spin2 or demo_hub75_morph*.spin2.
 Src/*.spin2
 !Src/isp_hub75_morph*.spin2
-!Src/demo_hub75_morphSeg.spin2
+!Src/demo_hub75_morph*.spin2
 # compiler outputs
 Src/*.bin
 Src/*.lst
