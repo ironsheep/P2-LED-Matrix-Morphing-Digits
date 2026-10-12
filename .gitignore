@@ -149,3 +149,12 @@ Src/*.bin
 Src/*.lst
 Src/*.map
 Src/*.obj
+
+# our working records (plans and their archive, spec, analyses) are written for us, not
+# for someone using the library, so they are never versioned
+Docs/plans/
+Docs/analysis/
+Docs/SPECIFICATION.md
+
+# bench run logs
+Src/logs/
