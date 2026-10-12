@@ -134,6 +134,7 @@ dmypy.json
 .claude/
 CLAUDE.md
 .todo-mcp/
+tasks/
 
 # local reference copy of the HUB75 driver (never committed)
 REF-NO-COMMIT/
