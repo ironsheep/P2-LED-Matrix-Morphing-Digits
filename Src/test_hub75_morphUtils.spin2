@@ -1,0 +1,145 @@
+'' =================================================================================================
+''
+''   File....... test_hub75_morphUtils.spin2
+''   Purpose.... Test harness for the morphing-digit bench programs: PASS/FAIL, timing and summary log lines
+''   Authors.... Stephen M Moraco
+''               -- see below for terms of use
+''   E-mail..... stephen@ironsheep.biz
+''   Started.... Oct 2026
+''   Updated.... 12 Oct 2026
+''
+'' =================================================================================================
+
+{ Every test program reports through this object, so every log reads the same way.
+
+  Lifecycle (one program, one pass):
+    1. beginSuite()  - zero the counts, print the SUITE line
+    2. checkEqual()  - one PASS or FAIL line per check, counted
+       timeStart() / timeReport() - one TIME line per measurement (not counted as a check)
+    3. finish()      - print SUMMARY and RESULT, then the END_SESSION line so a headless run exits
+       (pnut-term-ts --end-marker matches that text; the DEBUG_END_SESSION constant prints only a blank line there)
+
+  Log line formats (one line each, fields separated by two spaces):
+    SUITE    <suite name>  clkfreq=<Hz>
+    PASS     <check name>  expected=<n>  actual=<n>
+    FAIL     <check name>  expected=<n>  actual=<n>
+    TIME     <timing name>  ticks=<n>  us=<n>  clkfreq=<Hz>
+    SUMMARY  ran=<n>  passed=<n>  failed=<n>
+    RESULT   PASS | FAIL | NO CHECKS    (FAIL if any check failed; NO CHECKS if none ran)
+    END_SESSION
+
+  Booleans are checked with checkEqual(): pass TRUE or FALSE as the expected value.
+  Compile with pnut-ts -d: without -d every debug() line is dropped and the log is empty.
+}
+
+CON ' ---- Reporting ----
+
+  ' Microseconds in one second: converts clock ticks to microseconds at clkfreq
+  MICROS_PER_SECOND = 1_000_000
+
+  ' Pause before the end marker: pnut-term-ts closes the log when it sees END_SESSION,
+  ' and without this pause the last lines before it were cut short (seen on the bench, 2026-10-12)
+  END_SETTLE_MS = 200
+
+DAT ' ---- Run Counts ----
+
+  ' singleton state for the one program running on this cog
+  checksRun       long    0
+  checksPassed    long    0
+  checksFailed    long    0
+
+PUB beginSuite(pSuiteName)
+'' Start a test run: zero the check counts and print the SUITE line.
+''
+'' @param pSuiteName - Zero-terminated name of the suite (the test program)
+
+    checksRun := 0
+    checksPassed := 0
+    checksFailed := 0
+    debug("SUITE    ", zstr_(pSuiteName), "  clkfreq=", udec_(clkfreq))
+
+
+PUB checkEqual(actualValue, pCheckName, expectedValue)
+'' Compare an actual value with the expected one; print PASS or FAIL and count it.
+''
+'' @param actualValue - The value the code under test produced
+'' @param pCheckName - Zero-terminated name of this check
+'' @param expectedValue - The value the check requires
+
+    checksRun++
+    if actualValue == expectedValue
+        checksPassed++
+        debug("PASS     ", zstr_(pCheckName), "  expected=", sdec_(expectedValue), "  actual=", sdec_(actualValue))
+    else
+        checksFailed++
+        debug("FAIL     ", zstr_(pCheckName), "  expected=", sdec_(expectedValue), "  actual=", sdec_(actualValue))
+
+
+PUB timeStart() : startTick
+'' Read the system counter to mark the start of a measurement.
+''
+'' @returns startTick - The system counter now (clock ticks, wraps at 32 bits)
+
+    startTick := getct()
+
+
+PUB timeReport(pTimingName, startTick) : elapsedTicks | elapsedUs
+'' Print a TIME line for the interval since timeStart(), in clock ticks and in microseconds at clkfreq.
+''
+'' @param pTimingName - Zero-terminated name of the measurement
+'' @param startTick - The value timeStart() returned
+'' @returns elapsedTicks - Clock ticks since startTick (valid for intervals under 2^32 ticks)
+
+' Local Variables:
+' @local elapsedUs - elapsedTicks converted to microseconds without 32-bit overflow
+
+    elapsedTicks := getct() - startTick
+    elapsedUs := muldiv64(elapsedTicks, MICROS_PER_SECOND, clkfreq)
+    debug("TIME     ", zstr_(pTimingName), "  ticks=", udec_(elapsedTicks), "  us=", udec_(elapsedUs), "  clkfreq=", udec_(clkfreq))
+
+
+PUB finish() : failedCount
+'' End the run: print SUMMARY and RESULT, then the end marker that lets a headless run exit.
+''
+'' @returns failedCount - Number of checks that failed in this run
+
+    failedCount := checksFailed
+    debug("SUMMARY  ran=", udec_(checksRun), "  passed=", udec_(checksPassed), "  failed=", udec_(checksFailed))
+    if checksFailed > 0
+        debug("RESULT   FAIL")
+    elseif checksRun == 0
+        debug("RESULT   NO CHECKS")
+    else
+        debug("RESULT   PASS")
+    waitms(END_SETTLE_MS)
+    debug("END_SESSION")
+
+
+CON ' ---- License ----
+
+{{
+
+ -------------------------------------------------------------------------------------------------
+  MIT License
+
+  Copyright (c) 2021 Stephen Moraco
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+ -------------------------------------------------------------------------------------------------
+}}

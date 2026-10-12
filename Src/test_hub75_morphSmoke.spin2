@@ -1,0 +1,95 @@
+'' =================================================================================================
+''
+''   File....... test_hub75_morphSmoke.spin2
+''   Purpose.... Smoke test of the test harness: one PASS check and one timing line, then the summary
+''   Authors.... Stephen M Moraco
+''               -- see below for terms of use
+''   E-mail..... stephen@ironsheep.biz
+''   Started.... Oct 2026
+''   Updated.... 12 Oct 2026
+''
+'' =================================================================================================
+
+{ Shipped as SMOKE_MODE = SMOKE_PASS: the run must print one PASS, one TIME and
+  "SUMMARY  ran=1  passed=1  failed=0". The other two modes prove the harness reports
+  the unhappy cases; change SMOKE_MODE on a scratch copy to run them (never commit the change):
+    SMOKE_NO_CHECKS  - no check runs: SUMMARY still prints (ran=0), then RESULT NO CHECKS and the end marker
+    SMOKE_FORCE_FAIL - one check is given a wrong expected value: a FAIL line, failed=1, RESULT FAIL
+}
+
+CON ' ---- Timing ----
+
+  CLK_FREQ = 335_000_000                                        ' system freq as a constant
+  _clkfreq = CLK_FREQ                                           ' set system clock
+
+CON ' ---- Smoke Settings ----
+
+  ' Which run this build performs:
+  '  SMOKE_PASS       - one check that must pass
+  '  SMOKE_NO_CHECKS  - no checks at all
+  '  SMOKE_FORCE_FAIL - one check with a deliberately wrong expected value
+  #0, SMOKE_PASS, SMOKE_NO_CHECKS, SMOKE_FORCE_FAIL
+
+  SMOKE_MODE = SMOKE_PASS
+
+  ADDEND_ONE = 20
+  ADDEND_TWO = 22
+  EXPECTED_SUM = 42
+  WRONG_EXPECTED_SUM = 43
+  TIMED_WAIT_US = 100                                           ' the TIME line should read close to this
+
+OBJ
+
+    utils : "test_hub75_morphUtils"
+
+PUB go() | addendOne, addendTwo, expectedSum, startTick
+'' Run the smoke test: begin, check, time, finish.
+''
+
+    utils.beginSuite(@"smoke")
+
+    if SMOKE_MODE <> SMOKE_NO_CHECKS
+        addendOne := ADDEND_ONE
+        addendTwo := ADDEND_TWO
+        expectedSum := EXPECTED_SUM
+        if SMOKE_MODE == SMOKE_FORCE_FAIL
+            ' Deliberate failure: the expected value is wrong on purpose, so the harness
+            ' must print FAIL with expected=43 actual=42 and count it in the summary.
+            expectedSum := WRONG_EXPECTED_SUM
+        utils.checkEqual(addendOne + addendTwo, @"smoke sum", expectedSum)
+
+    startTick := utils.timeStart()
+    waitus(TIMED_WAIT_US)
+    utils.timeReport(@"smoke waitus", startTick)
+
+    utils.finish()
+
+
+CON ' ---- License ----
+
+{{
+
+ -------------------------------------------------------------------------------------------------
+  MIT License
+
+  Copyright (c) 2021 Stephen Moraco
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+ -------------------------------------------------------------------------------------------------
+}}
