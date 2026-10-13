@@ -1,7 +1,7 @@
 '' =================================================================================================
 ''
 ''   File....... isp_hub75_morph7seg.spin2
-''   Purpose.... manipulate a morphing 7 segment digit
+''   Purpose.... One morphing 7-segment digit: its geometry, and the drawing of every segment that changed
 ''   Authors.... Stephen M Moraco
 ''               -- Copyright (c) 2021 Iron Sheep Productions, LLC
 ''               -- see below for terms of use
@@ -12,7 +12,29 @@
 ''
 '' =================================================================================================
 
-CON { public control values }
+{ Geometry, in digit-local pixels (u right, v down, from the digit's top-left). One coverage mask
+  (isp_hub75_morphMask) of length L and thickness T serves all seven segments: a horizontal segment
+  reads it as it is (rows across = v), a vertical one transposed (rows across = u). With s = ceil(T/2),
+  the segments' points start s pixels past each corner's centre, so
+      digit width  W = L + 2s,   digit height  H = 2W - T
+  and every mask sits on whole pixels. For T = 1 that is the 2021 digit: W = L + 2, H = 2L + 3.
+
+        u0     v0                    u0      v0
+    A   s      0                 F   0       s
+    G   s      W - T             B   W - T   s
+    D   s      H - T             E   0       W - T + s
+                                 C   W - T   W - T + s
+
+  A column slide (E, F) travels W - T: from home to the opposite vertical.
+
+  Drawing (spec R-4.3, R-9.3). Each frame the digit asks every segment for its state, works out the
+  local rectangle each changed segment touched, and redraws only those rectangles, by screen rows.
+  A pixel is the sum of every segment's mask x profile there, held to 255, then the group's intensity
+  ramp (isp_hub75_morphColor): exact where anti-aliased edges meet, and full where shapes overlap.
+  One copyRowRun per row; runs are clipped to the display first (the driver holds runs to the edge).
+}
+
+CON ' public control values
 
     DIGIT_NO_VALUE = -2   ' digit value when NOT [0-9]
     DIGIT_HIDDEN = -1     ' digit value when NOT [0-9]
@@ -22,112 +44,205 @@ CON { public control values }
     MAX_SEGMENTS = 7
     LAST_SEGMENT = MAX_SEGMENTS - 1     ' index of the last segment slot (segments[] runs from 0)
 
+CON ' drawing
+
+    LEVEL_FULL = 255                    ' a fully lit pixel (mask byte, lit share and ramp index)
+    LEVEL_ROUND = LEVEL_FULL / 2        ' added before dividing by LEVEL_FULL, to round to nearest
+    ' one slot's entry in slotTable (longs): what drawBlock() reads for it
+    #0, F_MODE, F_BOX_U0, F_BOX_U1, F_BOX_V0, F_BOX_V1, F_U0, F_V0, F_VERTICAL, F_OFFSET, F_LIT
+    SLOT_LONGS = F_LIT + 1
+    SLOT_TABLE_LONGS = SLOT_LONGS * MAX_SEGMENTS
+    MAX_SEGMENT_LENGTH = 128            ' the longest segment (mask columns) a digit can draw
+    SUBPIXEL_SHIFT = 8                  ' positions are in 1/256 pixel (morphSegment.SUBPIXELS)
+    SUBPIXEL_MASK = segments.SUBPIXELS - 1
+    SUBPIXEL_HALF = segments.SUBPIXELS / 2
+    SHARE_SHIFT = 12                    ' lit-share arithmetic is Q12
+    SHARE_ONE = 1 << SHARE_SHIFT
+    SHARE_HALF = SHARE_ONE / 2
+    SQUARE_HALF_SHIFT = SHARE_SHIFT + 1 ' u^2 / 2 in Q12: (u * u) >> 13
+    NEXT_ONE = 1                        ' one pixel, column or row further on
+    CENTER_DIVISOR = 2                  ' half of a thickness (rounded up with + NEXT_ONE)
+    BYTES_PER_LONG = 4
+    LONG_SHIFT = 2                      ' a long index times BYTES_PER_LONG
+    BYTE_BITS = 8                       ' the next byte of a packed color
+    MAX_DIGIT_VALUE = 9
+
 OBJ
 
     segments[MAX_SEGMENTS]     : "isp_hub75_morphSegment"
-    'hub75Bffrs                 : "isp_hub75_hwBufferAccess"
+    hub75Bffrs                 : "isp_hub75_hwBufferAccess"    ' the address rule (mountedBlockRun) and the window watch
 
+DAT ' shared drawing tables: one cog draws, one digit at a time, so one copy serves every digit
 
-VAR { globals }
+    slotTable       long    0[SLOT_TABLE_LONGS]                 ' this frame's state of every slot, for drawBlock() (F_ fields)
+    litTable        byte    0[MAX_SEGMENTS * MAX_SEGMENT_LENGTH]    ' this frame's snake lit shares, per slot and mask column
+
+VAR ' per digit
     long    chainIndex
     long    maxPhysicalCols
     long    maxPhysicalRows
     long    currValue
-    long    currRgbColor
     long    topY
     long    leftX
     long    digitWidth
     long    digitHeight
-    long    segmentLength
-    long    segmentWidth
+    long    segCols             ' the mask's columns: segment length L
+    long    segRows             ' the mask's rows: thickness T
+    long    pMask               ' the group's coverage mask: segRows x segCols bytes
+    long    pRamp               ' the group's intensity ramp: 256 packed colors
+    long    bNeedsRender        ' TRUE when a command changed a segment since the last drawing
+    long    cellRows            ' one cell's (panel's) size as mounted: blocks never cross a cell
+    long    cellColumns
 
-    long    defaultColor
-
-    byte    isSetup
+    ' geometry per segment slot (G=0 .. A=6)
+    long    segU0[MAX_SEGMENTS]
+    long    segV0[MAX_SEGMENTS]
+    long    segVertical[MAX_SEGMENTS]
+    ' the state drawn last, per slot (renderState() values)
+    long    drawnMode[MAX_SEGMENTS]
+    long    drawnHead[MAX_SEGMENTS]
+    long    drawnTail[MAX_SEGMENTS]
+    long    drawnFromEnd[MAX_SEGMENTS]
+    long    drawnOn[MAX_SEGMENTS]
+    long    drawnOffset[MAX_SEGMENTS]
+    ' where this digit may draw, on the display (inclusive): the display, until its group narrows it
+    long    clipLeft
+    long    clipTop
+    long    clipRight
+    long    clipBottom
 
 PUB null()
-    '' This is NOT a top level object
+'' This is NOT a top level object
+''
 
 PUB initialize(nChainIndex, nPhysicalRows, nPhysicalColumns) | segmentIndex
-  chainIndex := nChainIndex
-  maxPhysicalCols := nPhysicalColumns
-  maxPhysicalRows := nPhysicalRows
-  repeat segmentIndex from 0 to MAX_SEGMENTS -1
-    segments[segmentIndex].initialize(nChainIndex, nPhysicalRows, nPhysicalColumns)
+'' Set the display this digit draws on, and turn every segment off.
+''
+'' @param nChainIndex - the index of the adapter (chain of panels) this digit draws on
+'' @param nPhysicalRows - the display's rows, as mounted
+'' @param nPhysicalColumns - the display's columns, as mounted
 
-
-DAT { debug titles }
-
-msPointers      byte    "pointers", 0
-msLtTable       byte    "ltTable", 0
-msRtTable0      byte    "rtTable0", 0
-msRtTable1      byte    "rtTable1", 0
-msActions       byte    "Actions", 0
-
-PUB placeDigit(row, column, width, height, digitValue, rgbColor)
-    '' Locate a desired digit on our screen. Draw initial segement if state is NOT off
-    ' now we can inform segements of their own locations
-    debug("m7:placeDigit rc=(", udec_(row), ",", udec_(column),"), dgt=(", udec_(digitValue), "), RGB=(", uhex_long_(rgbColor),")")
-
-    isSetup := FALSE
-    ' FIXME: UNDONE shouldn't this limit to whole digit width from right edge???
-    leftX :=  0 #> column <# maxPhysicalCols - 1
-    topY :=  0 #> row <# maxPhysicalRows - 1
-    currRgbColor := rgbColor
+    chainIndex := nChainIndex
+    maxPhysicalCols := nPhysicalColumns
+    maxPhysicalRows := nPhysicalRows
+    cellRows, cellColumns := hub75Bffrs.cellSizeInPixels(nChainIndex)
+    clipLeft := clipTop := 0
+    clipRight := nPhysicalColumns - NEXT_ONE
+    clipBottom := nPhysicalRows - NEXT_ONE
     currValue := DIGIT_NO_VALUE
-    digitHeight := height
+    repeat segmentIndex from 0 to LAST_SEGMENT
+        segments[segmentIndex].initialize()
+        drawnMode[segmentIndex] := segments.MODE_NONE
+
+PUB digitSize(segLength, thickness) : width, height | inset
+'' The pixel size of a digit with this segment length and thickness (see the geometry above).
+''
+'' @param segLength - the segments' length L, in pixels
+'' @param thickness - the segments' thickness T, in pixels
+'' @returns width - W = L + 2 x ceil(T/2)
+'' @returns height - H = 2W - T
+
+' Local Variables:
+' @local inset - ceil(T/2): how far each segment's end sits past its corner's edge
+
+    inset := (thickness + NEXT_ONE) / CENTER_DIVISOR
+    width := segLength + CENTER_DIVISOR * inset
+    height := CENTER_DIVISOR * width - thickness
+
+PUB placeDigit(row, column, segLength, thickness, digitValue, pSegMask, pColorRamp, tailX256) : width, height | segmentIndex, inset, crossBar
+'' Place this digit with its top-left at (row, column) and show digitValue (DIGIT_HIDDEN shows nothing).
+'' The group has built the mask (thickness rows of segLength columns) and the ramp; the digit is drawn by
+'' the next animate().
+''
+'' @param row - the digit's top row on the display
+'' @param column - the digit's left column on the display
+'' @param segLength - the segments' length L, in pixels
+'' @param thickness - the segments' thickness T, in pixels
+'' @param digitValue - 0-9, or DIGIT_HIDDEN
+'' @param pSegMask - the group's coverage mask
+'' @param pColorRamp - the group's intensity ramp
+'' @param tailX256 - the snake tail, in 1/256 pixel
+'' @returns width - the digit's width in pixels
+'' @returns height - the digit's height in pixels
+
+' Local Variables:
+' @local segmentIndex - the slot being placed
+' @local inset - ceil(T/2)
+' @local crossBar - W - T: the middle segment's top row, the right verticals' column, and the slide distance
+
+    leftX := column
+    topY := row
+    segCols := segLength
+    segRows := thickness
+    pMask := pSegMask
+    pRamp := pColorRamp
+    width, height := digitSize(segLength, thickness)
     digitWidth := width
-    segmentWidth := 1
-    segmentLength := digitWidth - (2 * segmentWidth)
-    ensureIsSetup()
+    digitHeight := height
+    inset := (thickness + NEXT_ONE) / CENTER_DIVISOR
+    crossBar := width - thickness
+    setSlot(segments.SOR_TOP_A, inset, 0, FALSE)
+    setSlot(segments.SOR_MIDDLE_G, inset, crossBar, FALSE)
+    setSlot(segments.SOR_BOTTOM_D, inset, height - thickness, FALSE)
+    setSlot(segments.SOR_LEFT_F, 0, inset, TRUE)
+    setSlot(segments.SOR_RIGHT_B, crossBar, inset, TRUE)
+    setSlot(segments.SOR_LEFT_E, 0, crossBar + inset, TRUE)
+    setSlot(segments.SOR_RIGHT_C, crossBar, crossBar + inset, TRUE)
+    repeat segmentIndex from 0 to LAST_SEGMENT
+        segments[segmentIndex].placeSegment(NEXT_ONE << segmentIndex, segLength << SUBPIXEL_SHIFT, crossBar << SUBPIXEL_SHIFT, tailX256)
+        drawnMode[segmentIndex] := segments.MODE_NONE
+    currValue := DIGIT_NO_VALUE
+    bNeedsRender := FALSE
     if digitValue <> DIGIT_HIDDEN
         reconfigureForDigit(digitValue)
-{
-    screen.dbgMemDump(@msPointers, @leftPtrsActual, 12)
-    screen.dbgMemDump(@msLtTable, @leftPtrs, 40)
-    screen.dbgMemDump(@msRtTable0, @tableLt0, 40)
-    screen.dbgMemDump(@msRtTable1, @tableLt1, 40)
-    screen.dbgMemDump(@msActions, @fm0_1, 40)
-'}
 
 PUB setValue(digitValue)
-    '' Configure display to show desired {digitValue}: [0-9, DIGIT_HIDDEN]
-    ensureIsSetup()
+'' Show digitValue: 0-9 morphs from the value shown, DIGIT_HIDDEN shows nothing.
+''
+'' @param digitValue - 0-9, or DIGIT_HIDDEN
+
     if currValue <> digitValue
         reconfigureForDigit(digitValue)
 
 PUB incrementValue(shouldWrap) | nextValue
-    '' Increment to the next digit [0->9]
-    ''  if wrap is requested, return to 0 after 9, else just stop at 9
-    nextValue := currValue + 1
-    if nextValue > 9
+'' Show the next digit (0 -> 9); after 9, wrap to 0 when shouldWrap is WITH_WRAP, else stay at 9.
+''
+'' @param shouldWrap - WITH_WRAP or WITHOUT_WRAP
+
+    nextValue := currValue + NEXT_ONE
+    if nextValue > MAX_DIGIT_VALUE
         if shouldWrap <> WITH_WRAP
-            nextValue := 9
+            nextValue := MAX_DIGIT_VALUE
         else
             nextValue := 0
     setValue(nextValue)
 
-PUB isAnimationComplete() : status | segmentIndex
-    '' Return T/F where T means all segment animations are complete
-    status := TRUE
-    repeat segmentIndex from 0 to 6
+PUB isAnimationComplete() : bComplete | segmentIndex
+'' Return TRUE when no segment of this digit is moving.
+''
+'' @returns bComplete - TRUE when every segment is at rest
+
+    bComplete := TRUE
+    repeat segmentIndex from 0 to LAST_SEGMENT
         if not segments[segmentIndex].isMovementComplete()
-            status := FALSE
-            quit   ' we have our answer, abort loop
+            bComplete := FALSE
+            quit
 
 PUB animate(nowMs) : movingCount | segmentIndex
-'' Draw every moving segment of this digit at its position for time nowMs (a segment that is not moving draws nothing).
+'' Move every segment to its position for time nowMs, then redraw what changed (a digit at rest draws nothing).
 ''
 '' @param nowMs - The frame's time in ms, from isp_hub75_morphTime.update(): the same value for every group, digit and segment of a frame
 '' @returns movingCount - Number of this digit's segments still moving after this call; 0 when the digit is at rest
 
 ' Local Variables:
-' @local segmentIndex - Index of the segment being drawn
+' @local segmentIndex - Index of the segment being moved
 
     movingCount := 0
-    if not isAnimationComplete()      ' early-out: an idle digit draws nothing
+    if bNeedsRender or not isAnimationComplete()      ' early-out: an idle digit costs one test (R-9.3)
         repeat segmentIndex from 0 to LAST_SEGMENT
             movingCount += segments[segmentIndex].animate(nowMs)
+        drawChanges()
+        bNeedsRender := FALSE
 
 PUB setMotion(durationMs, easeStyle) | segmentIndex
 '' Set how every segment of this digit moves: the duration of each move and its easing.
@@ -141,115 +256,447 @@ PUB setMotion(durationMs, easeStyle) | segmentIndex
     repeat segmentIndex from 0 to LAST_SEGMENT
         segments[segmentIndex].setMotion(durationMs, easeStyle)
 
-PRI ensureIsSetup()
-    ' Do intial setup, if not yet done
-    if not isSetup
-        initialSetup()
-        'leftPtrsActual := @@leftPtrs
-        'leftPtrsAddr := @leftPtrs
-        'objectOffset := (leftPtrsActual - leftPtrsAddr) - 40    ' why this 40????
+PUB setTail(tailX256) | segmentIndex
+'' Set every segment's snake tail.
+''
+'' @param tailX256 - the snake tail, in 1/256 pixel
 
+' Local Variables:
+' @local segmentIndex - Index of the segment being set
 
-PRI initialSetup() | byte segIndex, orientation, segRow, segCol, segW, segL
-    ' Perform initial setup
-    'debug("m7:initialSetup")
-    ' initialize all segments with type, color, location and set to hidden
-    repeat segIndex from 0 to 6
-        orientation := 1 << segIndex
-        case orientation
-          segments.SOR_TOP_A:   ' A TOP
-            segRow := topY
-            segCol := leftX + 1
-          segments.SOR_RIGHT_B:   ' B RIGHT-upper
-            segRow := topY + 1
-            segCol := leftX + 1 + segmentLength + 1 - segmentWidth
-          segments.SOR_RIGHT_C:   ' C RIGHT-lower
-            segRow := topY + 1 + segmentLength + 1
-            segCol := leftX + 1 + segmentLength + 1 - segmentWidth
-          segments.SOR_BOTTOM_D:   ' D BOTTOM
-            segRow := topY + 1 + (segmentLength * 2) + 1 + 1 - segmentWidth
-            segCol := leftX + 1
-          segments.SOR_LEFT_E:   ' E LEFT-lower
-            segRow := topY + 1 + segmentLength + 1
-            segCol := leftX
-          segments.SOR_LEFT_F:   ' F LEFT-upper
-            segRow := topY + 1
-            segCol := leftX
-          segments.SOR_MIDDLE_G:   ' G MIDDLE
-            segRow := topY + 1 + segmentLength + 1 - 1
-            segCol := leftX + 1
+    repeat segmentIndex from 0 to LAST_SEGMENT
+        segments[segmentIndex].setTail(tailX256)
 
-        segments[segIndex].placeSegment(segRow, segCol, orientation, segmentWidth, segmentLength, segments.STATE_OFF, currRgbColor)
+PUB commandSegment(segmentIndex, commandBits) : status
+'' Send one command byte to one segment (for tests; the digit's own transitions come from the table).
+''
+'' @param segmentIndex - the slot, 0 (G) to LAST_SEGMENT (A)
+'' @param commandBits - Command byte %GGG_AAAT
+'' @returns status - the segment's status: morphStatus SUCCESS or E_BAD_COMMAND
 
-    currValue := DIGIT_NO_VALUE
-    isSetup := TRUE
+    status := segments[segmentIndex].commandSegment(commandBits)
+    bNeedsRender := TRUE
 
-PRI turnOnDigit(digit) | byte fromSegments, byte toSegments, bitIndex
-    'debug("m7:turnOnDigit dgt=(", udec_(digit), ")")
-    if currValue <> digit
-        if digit <> DIGIT_HIDDEN
-            ' hide some segments, show others
-            fromSegments := 0   ' no segments ON....
-            toSegments := byte[@segmentsByDigit][digit]   ' digit [0-9]
-            'debug(" -- table:",ubin(fromSegments),ubin(toSegments))
-            repeat bitIndex from 6 to 0
-                if fromSegments & (1 << bitIndex) > 0
-                    ' from segment is showing
-                    if toSegments & (1 << bitIndex) > 0
-                        ' to segment should be showing
-                        '   NO CHANGE
-                    else
-                        ' to segment should be hidden
-                        segments[bitIndex].commandSegment(segments.CMD_TURN_OFF + segments.CMD_IMMEDIATE)
-                else
-                    ' from segment is hidden
-                    if toSegments & (1 << bitIndex) > 0
-                        ' to segment should be showing
-                        segments[bitIndex].commandSegment(segments.CMD_TURN_ON + segments.CMD_IMMEDIATE)
-                    'else
-                        ' to segment should be hidden
-                        '   NO CHANGE
-        'else
-            ' going from digit to same digit, nothing to do!
+PRI setSlot(orientation, leftU, topV, bVertical) | slot
+' Record one segment's mask position and direction; its slot is its orientation's bit position.
 
-PRI reconfigureForDigit(digitValue) | tblIndex, pLtTable, pRtTable, pLtTable2, pRtTable2, actionIndex, segmentIndex, byte nextAction
+    slot := encod orientation
+    segU0[slot] := leftU
+    segV0[slot] := topV
+    segVertical[slot] := bVertical
+
+PRI drawChanges() | slot, mode, head, tail, bFromEnd, bOn, offset, colLo, colHi, posLo, posHi
+' Read every segment's state, then redraw the local rectangle each changed segment touched (old and new).
+
+' Local Variables:
+' @local slot - the segment slot
+' @local mode, head, tail, bFromEnd, bOn, offset - the slot's renderState() this frame
+' @local colLo, colHi - a snake's changed columns, from its start end
+' @local posLo, posHi - the lower and higher of two positions, in 1/256 pixel
+
+    ' first every slot's new state and box, so each redraw composites the frame's state of every segment
+    repeat slot from 0 to LAST_SEGMENT
+        segStateLoad(slot)
+    repeat slot from 0 to LAST_SEGMENT
+        mode, head, tail, bFromEnd, bOn, offset := frameMode[slot], frameHead[slot], frameTail[slot], frameFromEnd[slot], frameOn[slot], frameOffset[slot]
+        if mode <> drawnMode[slot] or tail <> drawnTail[slot] or bFromEnd <> drawnFromEnd[slot] or bOn <> drawnOn[slot]
+            drawStateRect(slot, drawnMode[slot], drawnOffset[slot])         ' where it was ...
+            drawStateRect(slot, mode, offset)                               ' ... and where it is
+        elseif mode == segments.MODE_SNAKE and head <> drawnHead[slot]
+            posLo := (head <# drawnHead[slot]) - tail - segments.SUBPIXELS
+            posHi := (head #> drawnHead[slot]) + segments.SUBPIXELS
+            colLo := (posLo sar SUBPIXEL_SHIFT) #> 0
+            colHi := (posHi sar SUBPIXEL_SHIFT) <# (segCols - NEXT_ONE)
+            if bFromEnd                                                     ' columns counted from the far end: mirror the range
+                posLo := segCols - NEXT_ONE - colHi
+                colHi := segCols - NEXT_ONE - colLo
+                colLo := posLo
+            if colLo <= colHi
+                drawAlong(slot, colLo, colHi)
+        elseif mode == segments.MODE_SLIDE and offset <> drawnOffset[slot]
+            drawSlideRect(slot, drawnOffset[slot], offset)
+        drawnMode[slot] := mode
+        drawnHead[slot] := head
+        drawnTail[slot] := tail
+        drawnFromEnd[slot] := bFromEnd
+        drawnOn[slot] := bOn
+        drawnOffset[slot] := offset
+
+DAT ' this frame's state per slot, for the pixel loop (the digits draw one at a time, so one copy serves all)
+
+    frameMode       long    0[MAX_SEGMENTS]
+    frameHead       long    0[MAX_SEGMENTS]
+    frameTail       long    0[MAX_SEGMENTS]
+    frameFromEnd    long    0[MAX_SEGMENTS]
+    frameOn         long    0[MAX_SEGMENTS]
+    frameOffset     long    0[MAX_SEGMENTS]
+
+PRI segStateLoad(slot) | pEntry
+' Load one slot's state for this frame into the frame arrays and its slotTable entry, with its bounding box
+' (local, inclusive) where it is drawn now.
+
+' Local Variables:
+' @local pEntry - the slot's slotTable entry
+
+    frameMode[slot], frameHead[slot], frameTail[slot], frameFromEnd[slot], frameOn[slot], frameOffset[slot] := segments[slot].renderState()
+    if frameMode[slot] == segments.MODE_SNAKE
+        fillLitShares(slot)
+    pEntry := @slotTable + slot * SLOT_LONGS * BYTES_PER_LONG
+    LONG[pEntry][F_BOX_U0], LONG[pEntry][F_BOX_V0], LONG[pEntry][F_BOX_U1], LONG[pEntry][F_BOX_V1] := stateBox(slot, frameMode[slot], frameOffset[slot])
+    LONG[pEntry][F_MODE] := frameMode[slot]
+    LONG[pEntry][F_U0] := segU0[slot]
+    LONG[pEntry][F_V0] := segV0[slot]
+    LONG[pEntry][F_VERTICAL] := segVertical[slot]
+    LONG[pEntry][F_OFFSET] := frameOffset[slot]
+    LONG[pEntry][F_LIT] := @litTable + slot * MAX_SEGMENT_LENGTH
+
+PRI stateBox(slot, mode, offset) : leftU, topV, rightU, bottomV
+' A slot's box (local, inclusive) in this mode: a slide's column moved sideways by offset (1/256 pixel), any
+' other mode at home.
+
+    if mode <> segments.MODE_SLIDE
+        offset := segments.NO_OFFSET
+    if segVertical[slot]
+        leftU := segU0[slot] + (offset sar SUBPIXEL_SHIFT)
+        rightU := segU0[slot] + segRows - NEXT_ONE + ((offset + SUBPIXEL_MASK) sar SUBPIXEL_SHIFT)
+        topV := segV0[slot]
+        bottomV := topV + segCols - NEXT_ONE
+    else
+        leftU := segU0[slot]
+        rightU := leftU + segCols - NEXT_ONE
+        topV := segV0[slot]
+        bottomV := topV + segRows - NEXT_ONE
+
+PRI drawStateRect(slot, mode, offset) | leftU, topV, rightU, bottomV
+' Redraw the box a slot covers in this mode at this offset (nothing for MODE_NONE).
+
+    if mode <> segments.MODE_NONE
+        leftU, topV, rightU, bottomV := stateBox(slot, mode, offset)
+        drawLocalRect(leftU, topV, rightU, bottomV)
+
+PRI drawSlideRect(slot, fromOffset, toOffset) | leftU, topV, rightU, bottomV, otherLeftU, otherRightU
+' Redraw where a sliding column was and where it is now, as one rectangle: the two boxes overlap.
+
+    leftU, topV, rightU, bottomV := stateBox(slot, segments.MODE_SLIDE, fromOffset)
+    otherLeftU, _, otherRightU, _ := stateBox(slot, segments.MODE_SLIDE, toOffset)
+    drawLocalRect(leftU <# otherLeftU, topV, rightU #> otherRightU, bottomV)
+
+PRI drawAlong(slot, colLo, colHi)
+' Redraw columns colLo..colHi of a slot's mask (along the segment), its full thickness.
+
+    if segVertical[slot]
+        drawLocalRect(segU0[slot], segV0[slot] + colLo, segU0[slot] + segRows - NEXT_ONE, segV0[slot] + colHi)
+    else
+        drawLocalRect(segU0[slot] + colLo, segV0[slot], segU0[slot] + colHi, segV0[slot] + segRows - NEXT_ONE)
+
+PRI drawLocalRect(leftU, topV, rightU, bottomV) | firstX, lastX, firstY, lastY, blockX0, blockX1, blockY0, blockY1, pPixel, rightStep, downStep
+' Redraw a local rectangle, clipped to the digit's clip rectangle: split into blocks that each lie in one cell (one panel),
+' each block drawn by drawBlock() at the address and steps the driver's address rule gives
+' (hub75Bffrs.mountedBlockRun()); then the driver's window watch is told what was written.
+
+' Local Variables:
+' @local firstX, lastX, firstY, lastY - the rectangle on the display, clipped
+' @local blockX0, blockX1, blockY0, blockY1 - the block being drawn: the rectangle's part in one cell
+' @local pPixel, rightStep, downStep - the block's top-left pixel address and its steps, or NO_PIXEL
+
+    firstX := (leftX + leftU) #> clipLeft
+    lastX := (leftX + rightU) <# clipRight
+    firstY := (topY + topV) #> clipTop
+    lastY := (topY + bottomV) <# clipBottom
+    if firstX <= lastX and firstY <= lastY
+        blockY0 := firstY
+        repeat while blockY0 <= lastY
+            blockY1 := ((blockY0 / cellRows + NEXT_ONE) * cellRows - NEXT_ONE) <# lastY
+            blockX0 := firstX
+            repeat while blockX0 <= lastX
+                blockX1 := ((blockX0 / cellColumns + NEXT_ONE) * cellColumns - NEXT_ONE) <# lastX
+                pPixel, rightStep, downStep := hub75Bffrs.mountedBlockRun(chainIndex, blockY0, blockX0, blockY1 - blockY0 + NEXT_ONE, blockX1 - blockX0 + NEXT_ONE)
+                if pPixel <> hub75Bffrs.NO_PIXEL                     ' a cell that holds no panel draws nothing
+                    drawBlock(pPixel, rightStep, downStep, blockX0 - leftX, blockY0 - topY, blockX1 - blockX0 + NEXT_ONE, blockY1 - blockY0 + NEXT_ONE)
+                blockX0 := blockX1 + NEXT_ONE
+            blockY0 := blockY1 + NEXT_ONE
+        hub75Bffrs.noteDrawn(chainIndex, firstY, firstX, lastY, lastX)
+
+PRI drawBlock(pPixel, rightStep, downStep, firstU, firstV, nColumns, nRows) | pSlots, pMaskB, maskCols, maskRows, pRampB, rowPixel, localU, localV, colsLeft
+' Draw one block in one cell, inline PASM (cog-exec): for every pixel, the sum of every segment's level there
+' (its mask; times its snake's lit share; or its mask slid sideways), held to LEVEL_FULL, through the ramp,
+' written as the pixel's three bytes (red, green, blue: the driver's writePacked() order).
+'
+' @param pPixel - hub address of the block's top-left pixel
+' @param rightStep - signed bytes to the next pixel right, in this cell
+' @param downStep - signed bytes to the next pixel down, in this cell
+' @param firstU - the block's left column, digit-local
+' @param firstV - the block's top row, digit-local
+' @param nColumns - the block's width
+' @param nRows - the block's height
+
+' Local Variables (the first 16 longs, mapped to cog registers by name):
+' @local pSlots - this frame's slot table (SLOT_LONGS per slot)
+' @local pMaskB - the group's coverage mask
+' @local maskCols, maskRows - the mask's columns (segment length) and rows (thickness)
+' @local pRampB - the group's intensity ramp
+' @local rowPixel - the current row's first pixel
+' @local localU, localV - the current pixel, digit-local
+' @local colsLeft - pixels left in the current row
+
+    pSlots := @slotTable
+    pMaskB := pMask
+    maskCols := segCols
+    maskRows := segRows
+    pRampB := pRamp
+    rowPixel := pPixel
+    localV := firstV
+    org
+                setq    #SLOT_TABLE_LONGS - NEXT_ONE            ' the slot table, into cog registers
+                rdlong  slots, pSlots
+.row
+                mov     nActive, #0                             ' the slots that cover this row
+                mov     slotBase, #0
+                mov     slotsLeft, #MAX_SEGMENTS
+.scan
+                alts    slotBase, #slots + F_MODE
+                mov     t1, 0-0                 wz
+    if_z        jmp     #.scanNext                              ' MODE_NONE
+                alts    slotBase, #slots + F_BOX_V0
+                cmps    localV, 0-0                  wc
+    if_c        jmp     #.scanNext
+                alts    slotBase, #slots + F_BOX_V1
+                mov     t1, 0-0
+                cmps    t1, localV                   wc
+    if_c        jmp     #.scanNext
+                altd    nActive, #active
+                mov     0-0, slotBase
+                add     nActive, #NEXT_ONE
+.scanNext
+                add     slotBase, #SLOT_LONGS
+                djnz    slotsLeft, #.scan
+
+                mov     pix, rowPixel
+                mov     localU, firstU
+                mov     colsLeft, nColumns
+.pixel
+                mov     sum, #0
+                mov     activeIdx, #0
+                mov     activeLeft, nActive     wz
+    if_z        jmp     #.store
+.slot
+                alts    activeIdx, #active
+                mov     slotBase, 0-0
+                add     activeIdx, #NEXT_ONE
+                alts    slotBase, #slots + F_BOX_U0
+                cmps    localU, 0-0                  wc
+    if_c        jmp     #.slotNext
+                alts    slotBase, #slots + F_BOX_U1
+                mov     t1, 0-0
+                cmps    t1, localU                   wc
+    if_c        jmp     #.slotNext
+                alts    slotBase, #slots + F_U0                 ' across and along the segment's mask
+                mov     t1, 0-0
+                mov     du, localU
+                sub     du, t1
+                alts    slotBase, #slots + F_V0
+                mov     t1, 0-0
+                mov     dv, localV
+                sub     dv, t1
+                alts    slotBase, #slots + F_VERTICAL
+                mov     t1, 0-0                 wz
+    if_z        mov     across, dv
+    if_z        mov     along, du
+    if_nz       mov     across, du
+    if_nz       mov     along, dv
+                alts    slotBase, #slots + F_MODE
+                mov     mode, 0-0
+                cmp     mode, #segments.MODE_SLIDE  wz
+    if_z        jmp     #.slide
+                mov     t1, across                              ' full or snake: the mask byte
+                mul     t1, maskCols
+                add     t1, along
+                add     t1, pMaskB
+                rdbyte  level, t1
+                cmp     mode, #segments.MODE_SNAKE  wz
+    if_nz       jmp     #.add
+                alts    slotBase, #slots + F_LIT                ' snake: times the column's lit share, / 255 rounded
+                mov     t1, 0-0
+                add     t1, along
+                rdbyte  t2, t1
+                mul     level, t2
+                add     level, #LEVEL_ROUND + NEXT_ONE
+                mov     t2, level
+                shr     t2, #SUBPIXEL_SHIFT
+                add     level, t2
+                shr     level, #SUBPIXEL_SHIFT
+                jmp     #.add
+.slide
+                alts    slotBase, #slots + F_OFFSET             ' slide: the mask moved sideways, two rows blended
+                mov     t1, 0-0
+                mov     t2, across
+                shl     t2, #SUBPIXEL_SHIFT
+                sub     t2, t1
+                mov     coverNext, t2
+                and     coverNext, #SUBPIXEL_MASK
+                sar     t2, #SUBPIXEL_SHIFT
+                mov     m0, #0
+                cmp     t2, maskRows            wc              ' unsigned: a row above the mask reads as huge
+    if_c        mov     t1, t2
+    if_c        mul     t1, maskCols
+    if_c        add     t1, along
+    if_c        add     t1, pMaskB
+    if_c        rdbyte  m0, t1
+                add     t2, #NEXT_ONE
+                mov     m1, #0
+                cmp     t2, maskRows            wc
+    if_c        mov     t1, t2
+    if_c        mul     t1, maskCols
+    if_c        add     t1, along
+    if_c        add     t1, pMaskB
+    if_c        rdbyte  m1, t1
+                mov     t1, ##segments.SUBPIXELS
+                sub     t1, coverNext
+                mul     m0, t1
+                mul     m1, coverNext
+                add     m0, m1
+                add     m0, #SUBPIXEL_HALF
+                shr     m0, #SUBPIXEL_SHIFT
+                mov     level, m0
+.add
+                add     sum, level
+.slotNext
+                djnz    activeLeft, #.slot
+.store
+                fle     sum, #LEVEL_FULL                        ' through the ramp, then red, green, blue bytes
+                shl     sum, #LONG_SHIFT
+                add     sum, pRampB
+                rdlong  t1, sum
+                wrbyte  t1, pix
+                shr     t1, #BYTE_BITS
+                mov     t2, pix
+                add     t2, #NEXT_ONE
+                wrbyte  t1, t2
+                shr     t1, #BYTE_BITS
+                add     t2, #NEXT_ONE
+                wrbyte  t1, t2
+                add     pix, rightStep
+                add     localU, #NEXT_ONE
+                djnz    colsLeft, #.pixel
+                add     rowPixel, downStep
+                add     localV, #NEXT_ONE
+                djnz    nRows, #.row
+                ret
+
+slots           long    0[SLOT_TABLE_LONGS]
+active          long    0[MAX_SEGMENTS]
+nActive         long    0
+slotBase        long    0
+slotsLeft       long    0
+activeIdx       long    0
+activeLeft      long    0
+pix             long    0
+sum             long    0
+t1              long    0
+t2              long    0
+du              long    0
+dv              long    0
+across          long    0
+along           long    0
+mode            long    0
+level           long    0
+coverNext       long    0
+m0              long    0
+m1              long    0
+    end
+
+PRI fillLitShares(slot) | fromStart, distance, tail, head, share, pLit, fullBelow, darkFrom, bOn, bFromEnd, behindLevel, aheadLevel
+' A snake's lit share (0-255) of every mask column, into litTable: the average over the column of
+' clamp((head - x) / tail, 0, 1), x measured from the snake's start end; turning off lights the rest.
+' Columns wholly behind the moving edge and columns past the head take one level each (bytefill); only the
+' columns of the edge itself (about tail + 2) are worked out.
+
+' Local Variables:
+' @local fromStart - a column's index counted from the snake's start end
+' @local distance - head minus the column's near edge, in 1/256 pixel
+' @local tail, head - the snake's tail and head, in 1/256 pixel
+' @local share - the column's lit share
+' @local pLit - this slot's lit shares
+' @local fullBelow - columns (from the start end) below this lie wholly behind head - tail
+' @local darkFrom - columns (from the start end) from this one on lie at or past the head
+' @local bOn, bFromEnd - turning on; counted from the far end
+' @local behindLevel, aheadLevel - the share behind the edge and past the head
+
+    tail := frameTail[slot]
+    head := frameHead[slot]
+    bOn := frameOn[slot]
+    bFromEnd := frameFromEnd[slot]
+    pLit := @litTable + slot * MAX_SEGMENT_LENGTH
+    fullBelow := (((head - tail) sar SUBPIXEL_SHIFT) - NEXT_ONE) #> 0 <# segCols
+    darkFrom := ((head + SUBPIXEL_MASK) sar SUBPIXEL_SHIFT) #> fullBelow <# segCols
+    behindLevel := bOn ? LEVEL_FULL : 0
+    aheadLevel := LEVEL_FULL - behindLevel
+    if bFromEnd
+        bytefill(pLit + segCols - fullBelow, behindLevel, fullBelow)
+        bytefill(pLit, aheadLevel, segCols - darkFrom)
+    else
+        bytefill(pLit, behindLevel, fullBelow)
+        bytefill(pLit + darkFrom, aheadLevel, segCols - darkFrom)
+    fromStart := fullBelow
+    repeat darkFrom - fullBelow                                         ' the edge's columns (none when it has no width)
+        distance := head - (fromStart << SUBPIXEL_SHIFT)
+        ' average of clamp(t) over the column = tail x (G(distance / tail) - G((distance - 1 px) / tail)), G the integral of clamp
+        share := ((rampIntegral((distance << SHARE_SHIFT) / tail) - rampIntegral(((distance - segments.SUBPIXELS) << SHARE_SHIFT) / tail)) * tail) sar SUBPIXEL_SHIFT
+        share := ((share * LEVEL_FULL + SHARE_HALF) sar SHARE_SHIFT) #> 0 <# LEVEL_FULL
+        if not bOn
+            share := LEVEL_FULL - share
+        BYTE[pLit][bFromEnd ? segCols - NEXT_ONE - fromStart : fromStart] := share
+        fromStart++
+
+PRI rampIntegral(position) : area
+' The integral from 0 of clamp(x, 0, 1) up to position, all in Q12: 0 below 0, x^2 / 2 to 1, then x - 1/2.
+
+    if position <= 0
+        area := 0
+    elseif position < SHARE_ONE
+        area := (position * position) >> SQUARE_HALF_SHIFT
+    else
+        area := position - SHARE_HALF
+
+PRI turnOnDigit(digit) | toSegments, bitIndex
+' Show a digit from blank: each of its segments turns on at once (the first value a digit shows).
+
+    toSegments := byte[@segmentsByDigit][digit]
+    repeat bitIndex from LAST_SEGMENT to 0
+        if toSegments & (NEXT_ONE << bitIndex)
+            segments[bitIndex].commandSegment(segments.CMD_TURN_ON + segments.CMD_IMMEDIATE)
+    bNeedsRender := TRUE
+
+PRI reconfigureForDigit(digitValue) | pLtTable, pRtTable, actionIndex, segmentIndex, nextAction
+' Start the transition from the value shown to digitValue: the generated table's commands, or a first showing.
+
     if currValue <> digitValue
-        if digitValue <> DIGIT_HIDDEN
-            if currValue < 0
-                turnOnDigit(digitValue)
-            else
-                'debug("m7:reconfig ", udec_(currValue), " -> ", udec_(digitValue))
-                'pLtTable := LONG[@leftPtrs][currValue] + objectOffset
-                pLtTable := @@leftPtrs[currValue]
-                'debug("m7: ltLookup: ", uhex_long(pLtTable), uhex_long(pLtTable2))
-                'debug("m7: ltLookup ", uhex_long(pLtTable))
-                'pRtTable := LONG [pLtTable][digitValue] + objectOffset
-                pRtTable := @@LONG[pLtTable][digitValue]
-                ' remember to review @@ in P1 manual
-                'debug("m7: rtLookup: ", uhex_long(pRtTable), uhex_long(pRtTable2))
-                'debug("m7: rtLookup ", uhex_long(pRtTable))
-                'repeat
-                if pRtTable <> NO_ACTIONS
-                    actionIndex := 0
-                    repeat
-                        nextAction := BYTE [pRtTable][actionIndex++]
-                        if nextAction <> 0
-                            'debug(" action ", uhex_byte_(nextAction))
-                            segmentIndex := (nextAction & $e0) >> 5 - 1
-                            segments[segmentIndex].commandSegment(nextAction)
-                        else
-                            'debug(" - DONE")
-                            quit
-        'else
-            ' going from digitValue to same digitValue, nothing to do!
+        if digitValue == DIGIT_HIDDEN
+            repeat segmentIndex from 0 to LAST_SEGMENT
+                segments[segmentIndex].commandSegment(segments.CMD_TURN_OFF + segments.CMD_IMMEDIATE)
+            bNeedsRender := TRUE
+        elseif currValue < 0
+            turnOnDigit(digitValue)
+        else
+            pLtTable := @@leftPtrs[currValue]
+            pRtTable := @@LONG[pLtTable][digitValue]
+            if pRtTable <> NO_ACTIONS
+                actionIndex := 0
+                repeat
+                    nextAction := BYTE[pRtTable][actionIndex++]
+                    if nextAction <> 0
+                        segmentIndex := (nextAction & segments.MASK_SEGMENT) >> segments.SEGMENT_ID_SHIFT - NEXT_ONE
+                        segments[segmentIndex].commandSegment(nextAction)
+                    else
+                        quit
+            bNeedsRender := TRUE
     currValue := digitValue
 
-
-CON { dummy names }
+CON ' table markers
 
   NO_ACTIONS = 0
 
-DAT { initialized data }
+DAT ' digit shapes and the generated transition table
 
 segmentsByDigit
     byte    %0111_1110   ' 0 abcdef-
@@ -1531,7 +1978,7 @@ fm9_8
 	byte	segments.SEG_LEFT_E + segments.CMD_TURN_ON + segments.CMD_BOTTOM_UP
 	byte	0	' terminate entry
 
-CON { license }
+CON ' license
 
 {{
 

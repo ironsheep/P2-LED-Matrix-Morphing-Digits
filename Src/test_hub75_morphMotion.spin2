@@ -10,26 +10,31 @@
 ''
 '' =================================================================================================
 
-{ Task 163, phase 2: proves the animate(nowMs) contract on the quad.
+{ Task 163, phase 2 (ported to the task 166 renderer): proves the animate(nowMs) contract on the quad.
 
-  The probe is the screen buffer itself. A horizontal segment turning on left to right lights one more pixel per
-  step, so the number of lit pixels in its row IS the step the renderer drew (turning off, it is length - step).
-  litCount() reads those pixels back through screenUtils.pixelAddressAtRC(); it never asks the segment.
-  Time comes from isp_hub75_morphTime; the move-duration checks also read getct() themselves, an independent
-  count of the same interval.
+  The probe is the screen buffer itself. The test segment is segment A of a digit 1 pixel thick and 31 long, drawn
+  with the edge profile through a test ramp whose red byte IS the level (no gamma), so the sum of the red bytes of
+  A's row / 255 is the segment's lit amount, in pixels. litTenths() reads those bytes back through
+  screenUtils.pixelAddressAtRC(); it never asks the segment. Time comes from isp_hub75_morphTime; the move-duration
+  checks also read getct() themselves, an independent count of the same interval.
+
+  Expected lit amounts are worked out from the profile, not from the code: with the edge profile the head runs
+  h = p x (L + 1) pixels over the move (p the share done), and the lit amount turning on is
+      h^2 / 2  (h <= 1),   h - 1/2  (1 <= h <= L),   L - (L + 1 - h)^2 / 2  (h >= L)
+  and turning off, L minus that. Amounts are compared in tenths of a pixel.
 
   Sections:
     1. a 300 ms move takes 300 ms, never less and at most one frame more, at the natural (commit-paced) frame
        rate and at a slower rate forced by a waitms() in every frame
-    2. a frame forced long (LONG_FRAME_MS) during a 3 s move: the next frame draws the step for the time that
-       has passed (a jump of many steps), and the frame-rate meter's figure drops
+    2. a frame forced long (LONG_FRAME_MS) during a 3 s move: the next frame draws the position for the time that
+       has passed (a jump of many pixels), and the frame-rate meter's figure drops
     3. a command arriving mid-move snaps the move in flight to its end, then starts the new move
-    4. smoothstep easing puts the segment where 3p^2 - 2p^3 says (expected steps worked out by hand below)
+    4. smoothstep easing puts the segment where 3p^2 - 2p^3 says (expected amounts worked out by hand below)
     5. the group setters refuse out-of-range values with an error code and change nothing (R-10.2)
 
   Log lines this program adds to the harness's lines (same field style):
     MOVE      <name>  move_ms=<n>  measured_ms=<n>  ticks_ms=<n>  frames=<n>  max_frame_ms=<n>
-    LONGFRAME step_before=<n>  expected_before=<n>  step_after=<n>  expected_after=<n>  elapsed_after_ms=<n>  fps_before_x100=<n>  fps_after_x100=<n>
+    LONGFRAME lit_before_x10=<n>  expected_before_x10=<n>  lit_after_x10=<n>  expected_after_x10=<n>  elapsed_after_ms=<n>  fps_before_x100=<n>  fps_after_x100=<n>
 }
 
 CON ' ---- Timing ----
@@ -39,11 +44,17 @@ CON ' ---- Timing ----
 
 CON ' ---- Test segment and moves ----
 
-  SEG_ROW = 40                                                  ' the test segment: a horizontal top segment ...
-  SEG_COLUMN = 8
-  SEG_LENGTH = 31                                               ' ... of 31 pixels: 31 steps, 30 step intervals
-  SEG_STEP_INTERVALS = SEG_LENGTH - 1
+  DIGIT_ROW = 40                                                ' the test digit; its segment A is row 40 ...
+  DIGIT_COLUMN = 7                                              ' ... columns 8 to 38
+  SEG_ROW = DIGIT_ROW
+  SEG_COLUMN = DIGIT_COLUMN + 1
+  SEG_LENGTH = 31                                               ' 31 pixels: the head runs 32 pixels over a move
   SEG_THICKNESS = 1
+  SLOT_A = 6                                                    ' segment A's slot in the digit
+  MASK_BYTES = SEG_LENGTH * SEG_THICKNESS
+  EDGE_TAIL_X256 = 256                                          ' the edge profile: a 1-pixel tail
+  TENTHS = 10                                                   ' lit amounts are compared in tenths of a pixel
+  FULL_TENTHS = SEG_LENGTH * TENTHS
   MOVE_MS = 300                                                 ' the plan's verify case
   HALF_MOVE_MS = MOVE_MS / 2
   QUARTER_MOVE_MS = MOVE_MS / 4
@@ -52,36 +63,42 @@ CON ' ---- Test segment and moves ----
   NO_EXTRA_MS = 0
   TIMING_SLACK_MS = 1                                           ' getct and the time base floor the same interval to whole ms separately
   ONE_MS = 1                                                    ' the smallest step past a limit
-  STEP_AT_HALF_MOVE = 1 + SEG_STEP_INTERVALS / 2                ' p = 0.5: step 1 + 15 = 16
+  X100 = 100                                                    ' onTenths() works in hundredths of a pixel ...
+  HALF_X100 = X100 / 2                                          ' ... half a pixel
+  SQUARE_X100_TO_TENTHS = 2 * X100 * X100 / TENTHS              ' (h x 100)^2 / this = h^2 / 2 in tenths
+  ONE_PIXEL = 1
+  HALF_OFF_TENTHS = 155                                         ' p = 0.5 turning off: h = 16, on amount 15.5, off = 31 - 15.5
 
 CON ' ---- Long frame ----
 
-  LONG_MOVE_MS = 3000                                           ' 100 ms per step: the jump is easy to see
+  LONG_MOVE_MS = 3000                                           ' about 94 ms per pixel: the jump is easy to see
   LEAD_IN_MS = 2100                                             ' natural idle frames first: at least one whole meter window at the natural rate
   BEFORE_LONG_MS = 500                                          ' natural frames of the move before the long frame
   LONG_FRAME_MS = 1500                                          ' longer than the meter's window, so the update() after it closes the window that holds it
-  MIN_SKIP_STEPS = 10                                           ' the long frame must advance at least this many steps (one step per frame would advance 1)
-  STEP_TOLERANCE = 1                                            ' exact-ratio expectation against the code's Q15 truncation: one step apart at a boundary
+  MIN_SKIP_TENTHS = 100                                         ' the long frame must advance at least 10 pixels (one frame advances under 1)
+  AMOUNT_TOLERANCE_TENTHS = 2                                   ' expected amount against the code's Q15 truncation and per-column rounding
   DROP_DIVISOR = 2                                              ' after the long frame the meter must read under half its natural figure
 
 CON ' ---- Injected times and easing ----
 
   INJECT_BASE_MS = 100_000                                      ' injected times start here (any value: only differences count)
   INJECT_GAP_MS = 10_000                                        ' each injected move starts this far after the previous one
-  ' smoothstep, worked out by hand for 30 step intervals: step = 1 + floor(30 x (3p^2 - 2p^3))
-  SMOOTH_STEP_AT_QUARTER = 5                                    ' p = 0.25: 3/16 - 2/64 = 0.15625, x 30 = 4.69
-  SMOOTH_STEP_AT_THREE_QUARTERS = 26                            ' p = 0.75: 27/16 - 54/64 = 0.84375, x 30 = 25.31
-  LINEAR_STEP_AT_QUARTER = 8                                    ' p = 0.25: x 30 = 7.5 (smoothstep must differ from this)
+  ' smoothstep, worked out by hand: p_s = 3p^2 - 2p^3, h = 32 p_s, on amount h - 1/2
+  SMOOTH_TENTHS_AT_QUARTER = 45                                 ' p = 0.25: p_s = 0.15625, h = 5.0, amount 4.5
+  SMOOTH_TENTHS_AT_3_QUARTERS = 265                         ' p = 0.75: p_s = 0.84375, h = 27.0, amount 26.5
+  LINEAR_TENTHS_AT_QUARTER = 75                                 ' p = 0.25 linear: h = 8.0, amount 7.5 (smoothstep must differ from this)
 
 CON ' ---- Group under test ----
 
   GROUP_ROW = 60
   GROUP_COLUMN = 100
   GROUP_DIGITS = 1
-  GROUP_SEG_LENGTH = 15                                         ' segment A: 15 steps, 14 step intervals
-  GROUP_START_VALUE = 0                                         ' 0 -> 1: segment A snakes off left to right, so its lit count is 15 - step
+  GROUP_SEG_LENGTH = 15                                         ' segment A: 15 pixels
+  GROUP_START_VALUE = 0                                         ' 0 -> 1: segment A snakes off left to right
   GROUP_A_COLUMN = GROUP_COLUMN + 1                             ' segment A starts one pixel right of the digit's left edge
-  GROUP_SMOOTH_STEP_AT_QUARTER = 3                              ' p = 0.25: 1 + floor(14 x 0.15625 = 2.19)
+  ' edge profile, p = 0.25 smoothstep: h = 16 x 0.15625 = 2.5; column 0 is dark, column 1 keeps 1/8 lit: 14 lit pixels
+  ' (linear would give h = 4: columns 0-2 dark, 12 lit)
+  GROUP_LIT_AT_QUARTER = 14
   HOLD_MS = 200
   UNKNOWN_EASING_STYLE = 99                                     ' no easing style has this value
   REPEAT_ASKS = 3                                               ' a pure query asked this many times gives one answer
@@ -94,17 +111,22 @@ OBJ
     hub75Bffrs  : "isp_hub75_hwBufferAccess"
     utils       : "test_hub75_morphUtils"
     timeBase    : "isp_hub75_morphTime"
-    seg         : "isp_hub75_morphSegment"
+    dig         : "isp_hub75_morph7seg"
+    seg         : "isp_hub75_morphSegment"                      ' command constants only
     group       : "isp_hub75_morphCounters"
     morphStatus : "isp_hub75_morphStatus"
+    morphMask   : "isp_hub75_morphMask"
+    morphColor  : "isp_hub75_morphColor"
 
 VAR
 
     long    chainIndex
     long    maxRows
     long    maxColumns
+    long    linearRamp[morphColor.RAMP_LEVELS]
+    byte    mask[MASK_BYTES]
 
-PUB go()
+PUB go() | level
 '' Run the motion test: start the display, run each section, finish.
 ''
 
@@ -117,11 +139,16 @@ PUB go()
     display.commitScreenToPanelSet()
     timeBase.reset()
 
-    seg.initialize(chainIndex, maxRows, maxColumns)
-    seg.placeSegment(SEG_ROW, SEG_COLUMN, seg.SOR_TOP_A, SEG_THICKNESS, SEG_LENGTH, seg.STATE_OFF, color.cRed)
-    utils.checkEqual(segmentLit(), @"probe: the placed segment reads all dark", 0)
+    ' the probe's ramp: red byte = level, through the driver's own packing
+    repeat level from 0 to morphColor.RAMP_MAX
+        linearRamp[level] := pixels.packedCorrectedRgb(chainIndex, level, 0, 0)
+    morphMask.buildMask(@mask, MASK_BYTES, SEG_THICKNESS, SEG_LENGTH << dig.SUBPIXEL_SHIFT, morphMask.END_SQUARE, morphMask.SECTION_FLAT)
+    dig.initialize(chainIndex, maxRows, maxColumns)
+    dig.placeDigit(DIGIT_ROW, DIGIT_COLUMN, SEG_LENGTH, SEG_THICKNESS, dig.DIGIT_HIDDEN, @mask, @linearRamp, EDGE_TAIL_X256)
+    dig.animate(timeBase.update())
+    utils.checkEqual(litTenths(), @"probe: the placed segment reads all dark", 0)
 
-    checkMoveTiming(@"natural frame rate, turning on", NO_EXTRA_MS, seg.CMD_TURN_ON | seg.CMD_LT_TO_RT, SEG_LENGTH)
+    checkMoveTiming(@"natural frame rate, turning on", NO_EXTRA_MS, seg.CMD_TURN_ON | seg.CMD_LT_TO_RT, FULL_TENTHS)
     checkMoveTiming(@"slow frame rate, turning off", SLOW_FRAME_EXTRA_MS, seg.CMD_TURN_OFF | seg.CMD_LT_TO_RT, 0)
     checkLongFrame()
     checkSnap()
@@ -131,12 +158,12 @@ PUB go()
     utils.finish()
 
 
-PRI checkMoveTiming(pName, extraMs, command, endLit) | nowMs, startMs, prevMs, maxFrameMs, frameCount, startTick, endTick, measuredMs, tickMs
+PRI checkMoveTiming(pName, extraMs, command, endTenths) | nowMs, startMs, prevMs, maxFrameMs, frameCount, startTick, endTick, measuredMs, tickMs
     ' run a MOVE_MS move in a real frame loop (update, animate, commit) and time it from the frame that stamps its start
     ' to the frame that completes it
 
-    seg.setMotion(MOVE_MS, timeBase.EASE_LINEAR)
-    seg.commandSegment(command)                                 ' draws step 1
+    dig.setMotion(MOVE_MS, timeBase.EASE_LINEAR)
+    dig.commandSegment(SLOT_A, command)
     nowMs := timeBase.update()
     startTick := getct()
     startMs := nowMs
@@ -144,8 +171,8 @@ PRI checkMoveTiming(pName, extraMs, command, endLit) | nowMs, startMs, prevMs, m
     endTick := startTick
     maxFrameMs := 0
     frameCount := 0
-    seg.animate(nowMs)                                          ' stamps the move's start at startMs
-    repeat until seg.isMovementComplete()
+    dig.animate(nowMs)                                          ' stamps the move's start at startMs
+    repeat until dig.isAnimationComplete()
         display.commitScreenToPanelSet()
         if extraMs > 0
             waitms(extraMs)
@@ -154,7 +181,7 @@ PRI checkMoveTiming(pName, extraMs, command, endLit) | nowMs, startMs, prevMs, m
         maxFrameMs := maxFrameMs #> (nowMs - prevMs)
         prevMs := nowMs
         frameCount++
-        seg.animate(nowMs)
+        dig.animate(nowMs)
     display.commitScreenToPanelSet()
     measuredMs := nowMs - startMs
     tickMs := muldiv64(endTick - startTick, timeBase.MS_PER_SECOND, clkfreq)
@@ -163,13 +190,13 @@ PRI checkMoveTiming(pName, extraMs, command, endLit) | nowMs, startMs, prevMs, m
     utils.checkEqual(measuredMs >= MOVE_MS, @"the move never ends before its duration", TRUE)
     utils.checkEqual(measuredMs <= MOVE_MS + maxFrameMs, @"the move ends at most one frame after its duration", TRUE)
     utils.checkEqual(abs (tickMs - measuredMs) <= TIMING_SLACK_MS, @"getct agrees with the time base on the move's length", TRUE)
-    utils.checkEqual(segmentLit(), @"the segment ends on its target (lit pixels)", endLit)
+    utils.checkEqual(litTenths(), @"the segment ends on its target (lit tenths)", endTenths)
 
 
-PRI checkLongFrame() | nowMs, leadStartMs, startMs, stepBefore, stepAfter, elapsedBefore, elapsedAfter, expectedBefore, expectedAfter, fpsBeforeX100, fpsAfterX100
+PRI checkLongFrame() | nowMs, leadStartMs, startMs, litBefore, litAfter, elapsedBefore, elapsedAfter, expectedBefore, expectedAfter, fpsBeforeX100, fpsAfterX100
     ' natural frames, then a 3 s move whose middle holds one frame of LONG_FRAME_MS
 
-    seg.setMotion(LONG_MOVE_MS, timeBase.EASE_LINEAR)
+    dig.setMotion(LONG_MOVE_MS, timeBase.EASE_LINEAR)
     nowMs := timeBase.update()
     leadStartMs := nowMs
     repeat while nowMs - leadStartMs < LEAD_IN_MS
@@ -177,95 +204,98 @@ PRI checkLongFrame() | nowMs, leadStartMs, startMs, stepBefore, stepAfter, elaps
         nowMs := timeBase.update()
     fpsBeforeX100 := timeBase.framesPerSecondX100()
 
-    seg.commandSegment(seg.CMD_TURN_ON | seg.CMD_LT_TO_RT)
+    dig.commandSegment(SLOT_A, seg.CMD_TURN_ON | seg.CMD_LT_TO_RT)
     nowMs := timeBase.update()
     startMs := nowMs
-    seg.animate(nowMs)
+    dig.animate(nowMs)
     repeat while nowMs - startMs < BEFORE_LONG_MS
         display.commitScreenToPanelSet()
         nowMs := timeBase.update()
-        seg.animate(nowMs)
-    stepBefore := segmentLit()
+        dig.animate(nowMs)
+    litBefore := litTenths()
     elapsedBefore := nowMs - startMs
 
     display.commitScreenToPanelSet()
     waitms(LONG_FRAME_MS)                                       ' the forced long frame
     nowMs := timeBase.update()
-    seg.animate(nowMs)
-    stepAfter := segmentLit()
+    dig.animate(nowMs)
+    litAfter := litTenths()
     elapsedAfter := nowMs - startMs
     fpsAfterX100 := timeBase.framesPerSecondX100()
 
-    ' the step for an elapsed time, from the exact ratio (not the code's arithmetic)
-    expectedBefore := seg.FIRST_STEP + elapsedBefore * SEG_STEP_INTERVALS / LONG_MOVE_MS
-    expectedAfter := seg.FIRST_STEP + elapsedAfter * SEG_STEP_INTERVALS / LONG_MOVE_MS
-    debug("LONGFRAME step_before=", udec_(stepBefore), "  expected_before=", udec_(expectedBefore), "  step_after=", udec_(stepAfter), "  expected_after=", udec_(expectedAfter), "  elapsed_after_ms=", sdec_(elapsedAfter), "  fps_before_x100=", udec_(fpsBeforeX100), "  fps_after_x100=", udec_(fpsAfterX100))
+    ' the amount for an elapsed time, from the exact ratio (not the code's arithmetic)
+    expectedBefore := onTenths(elapsedBefore, LONG_MOVE_MS)
+    expectedAfter := onTenths(elapsedAfter, LONG_MOVE_MS)
+    debug("LONGFRAME lit_before_x10=", udec_(litBefore), "  expected_before_x10=", udec_(expectedBefore), "  lit_after_x10=", udec_(litAfter), "  expected_after_x10=", udec_(expectedAfter), "  elapsed_after_ms=", sdec_(elapsedAfter), "  fps_before_x100=", udec_(fpsBeforeX100), "  fps_after_x100=", udec_(fpsAfterX100))
 
-    utils.checkEqual(abs (stepBefore - expectedBefore) <= STEP_TOLERANCE, @"natural frames: the drawn step follows the time", TRUE)
-    utils.checkEqual(abs (stepAfter - expectedAfter) <= STEP_TOLERANCE, @"after the long frame: the drawn step is the one for the time passed", TRUE)
-    utils.checkEqual(stepAfter - stepBefore >= MIN_SKIP_STEPS, @"the long frame skips ahead many steps, it does not slow the move", TRUE)
+    utils.checkEqual(abs (litBefore - expectedBefore) <= AMOUNT_TOLERANCE_TENTHS, @"natural frames: the drawn amount follows the time", TRUE)
+    utils.checkEqual(abs (litAfter - expectedAfter) <= AMOUNT_TOLERANCE_TENTHS, @"after the long frame: the drawn amount is the one for the time passed", TRUE)
+    utils.checkEqual(litAfter - litBefore >= MIN_SKIP_TENTHS, @"the long frame skips ahead many pixels, it does not slow the move", TRUE)
     utils.checkEqual(fpsAfterX100 < fpsBeforeX100 / DROP_DIVISOR, @"the frame-rate meter reports the drop", TRUE)
 
-    repeat until seg.isMovementComplete()
+    repeat until dig.isAnimationComplete()
         display.commitScreenToPanelSet()
-        seg.animate(timeBase.update())
+        dig.animate(timeBase.update())
     display.commitScreenToPanelSet()
-    utils.checkEqual(segmentLit(), @"the long move ends fully on", SEG_LENGTH)
+    utils.checkEqual(litTenths(), @"the long move ends fully on", FULL_TENTHS)
 
 
 PRI checkSnap() | injectMs
     ' injected times: a command that arrives mid-move, opposite and same-direction
 
-    seg.setMotion(MOVE_MS, timeBase.EASE_LINEAR)
+    dig.setMotion(MOVE_MS, timeBase.EASE_LINEAR)
     injectMs := INJECT_BASE_MS
 
-    ' the segment is on: turning it off left to right leaves (length - step) pixels lit
-    seg.commandSegment(seg.CMD_TURN_OFF | seg.CMD_LT_TO_RT)
-    seg.animate(injectMs)
-    seg.animate(injectMs + HALF_MOVE_MS)
-    utils.checkEqual(segmentLit(), @"mid-move: half of the segment has turned off", SEG_LENGTH - STEP_AT_HALF_MOVE)
+    ' the segment is on: turning it off left to right, half way
+    dig.commandSegment(SLOT_A, seg.CMD_TURN_OFF | seg.CMD_LT_TO_RT)
+    dig.animate(injectMs)
+    dig.animate(injectMs + HALF_MOVE_MS)
+    utils.checkEqual(litTenths(), @"mid-move: half of the segment has turned off (15.5 px lit)", HALF_OFF_TENTHS)
 
-    ' the opposite command: the off move snaps to its end (dark), then the on move draws its step 1 (one pixel)
-    seg.commandSegment(seg.CMD_TURN_ON | seg.CMD_RT_TO_LT)
-    utils.checkEqual(segmentLit(), @"opposite command mid-move: snapped to off, new move drew step 1", seg.FIRST_STEP)
-    utils.checkEqual(seg.isMovementComplete(), @"opposite command mid-move: the new move is running", FALSE)
+    ' the opposite command: the off move snaps to its end (dark), then the on move starts from nothing lit
+    dig.commandSegment(SLOT_A, seg.CMD_TURN_ON | seg.CMD_RT_TO_LT)
     injectMs += INJECT_GAP_MS
-    seg.animate(injectMs)
-    seg.animate(injectMs + MOVE_MS)
-    utils.checkEqual(segmentLit(), @"opposite command mid-move: the digit ends on the last command's target", SEG_LENGTH)
+    dig.animate(injectMs)
+    utils.checkEqual(litTenths(), @"opposite command mid-move: snapped to off, the new move starts dark", 0)
+    utils.checkEqual(dig.isAnimationComplete(), @"opposite command mid-move: the new move is running", FALSE)
+    dig.animate(injectMs + MOVE_MS)
+    utils.checkEqual(litTenths(), @"opposite command mid-move: the digit ends on the last command's target", FULL_TENTHS)
 
     ' the same command again mid-move: the move snaps to its end, and the repeat has nothing left to do
-    seg.commandSegment(seg.CMD_TURN_OFF | seg.CMD_LT_TO_RT)
+    dig.commandSegment(SLOT_A, seg.CMD_TURN_OFF | seg.CMD_LT_TO_RT)
     injectMs += INJECT_GAP_MS
-    seg.animate(injectMs)
-    seg.animate(injectMs + HALF_MOVE_MS)
-    seg.commandSegment(seg.CMD_TURN_OFF | seg.CMD_LT_TO_RT)
-    utils.checkEqual(segmentLit(), @"same command mid-move: snapped to its end (off)", 0)
-    utils.checkEqual(seg.isMovementComplete(), @"same command mid-move: nothing left to move", TRUE)
+    dig.animate(injectMs)
+    dig.animate(injectMs + HALF_MOVE_MS)
+    dig.commandSegment(SLOT_A, seg.CMD_TURN_OFF | seg.CMD_LT_TO_RT)
+    dig.animate(injectMs + HALF_MOVE_MS)
+    utils.checkEqual(litTenths(), @"same command mid-move: snapped to its end (off)", 0)
+    utils.checkEqual(dig.isAnimationComplete(), @"same command mid-move: nothing left to move", TRUE)
 
 
 PRI checkEasing() | injectMs
     ' injected times: smoothstep at a quarter and three quarters of the move
 
-    seg.setMotion(MOVE_MS, timeBase.EASE_SMOOTH)
+    dig.setMotion(MOVE_MS, timeBase.EASE_SMOOTH)
     injectMs := INJECT_BASE_MS
-    seg.commandSegment(seg.CMD_TURN_ON | seg.CMD_LT_TO_RT)
-    seg.animate(injectMs)
-    seg.animate(injectMs + QUARTER_MOVE_MS)
-    utils.checkEqual(segmentLit(), @"smoothstep at a quarter of the move", SMOOTH_STEP_AT_QUARTER)
-    utils.checkEqual(segmentLit() <> LINEAR_STEP_AT_QUARTER, @"smoothstep differs from linear at a quarter", TRUE)
-    seg.animate(injectMs + THREE_QUARTER_MOVE_MS)
-    utils.checkEqual(segmentLit(), @"smoothstep at three quarters of the move", SMOOTH_STEP_AT_THREE_QUARTERS)
-    seg.animate(injectMs + MOVE_MS)
-    utils.checkEqual(segmentLit(), @"smoothstep ends fully on", SEG_LENGTH)
-    seg.setMotion(MOVE_MS, timeBase.EASE_LINEAR)
+    dig.commandSegment(SLOT_A, seg.CMD_TURN_ON | seg.CMD_LT_TO_RT)
+    dig.animate(injectMs)
+    dig.animate(injectMs + QUARTER_MOVE_MS)
+    utils.checkEqual(litTenths(), @"smoothstep at a quarter of the move", SMOOTH_TENTHS_AT_QUARTER)
+    utils.checkEqual(litTenths() <> LINEAR_TENTHS_AT_QUARTER, @"smoothstep differs from linear at a quarter", TRUE)
+    dig.animate(injectMs + THREE_QUARTER_MOVE_MS)
+    utils.checkEqual(litTenths(), @"smoothstep at three quarters of the move", SMOOTH_TENTHS_AT_3_QUARTERS)
+    dig.animate(injectMs + MOVE_MS)
+    utils.checkEqual(litTenths(), @"smoothstep ends fully on", FULL_TENTHS)
+    dig.setMotion(MOVE_MS, timeBase.EASE_LINEAR)
 
 
 PRI checkGroupSetters() | injectMs, bAllComplete
     ' the group's setters: accepted values, refused values, then the 0 -> 1 transition shows nothing changed
 
     group.initialize(chainIndex, maxRows, maxColumns)
+    group.setProfile(timeBase.PROFILE_EDGE)
     group.placeDigitGroup(GROUP_ROW, GROUP_COLUMN, group.GRP_UP_COUNTER, GROUP_DIGITS, SEG_THICKNESS, GROUP_SEG_LENGTH, GROUP_START_VALUE, color.cGreen)
+    group.animate(INJECT_BASE_MS)                               ' draws the placed digit
     utils.checkEqual(groupALit(), @"probe: digit 0 shows segment A fully lit", GROUP_SEG_LENGTH)
 
     utils.checkEqual(group.setMoveDuration(MOVE_MS), @"setMoveDuration accepts 300 ms", morphStatus.SUCCESS)
@@ -278,11 +308,11 @@ PRI checkGroupSetters() | injectMs, bAllComplete
     utils.checkEqual(group.setEasing(UNKNOWN_EASING_STYLE), @"setEasing refuses an unknown style", morphStatus.E_UNKNOWN_EASING)
 
     ' the 0 -> 1 transition runs with what was accepted: 300 ms, smoothstep, a 200 ms hold
-    injectMs := INJECT_BASE_MS
+    injectMs := INJECT_BASE_MS + INJECT_GAP_MS
     group.nextTimeCycle()
     group.animate(injectMs)
     group.animate(injectMs + QUARTER_MOVE_MS)
-    utils.checkEqual(groupALit(), @"refused easing left smoothstep in place (step at a quarter)", GROUP_SEG_LENGTH - GROUP_SMOOTH_STEP_AT_QUARTER)
+    utils.checkEqual(groupALit(), @"refused easing left smoothstep in place (lit pixels at a quarter)", GROUP_LIT_AT_QUARTER)
     group.animate(injectMs + MOVE_MS - ONE_MS)
     utils.checkEqual(group.isAnimationComplete(), @"refused durations left 300 ms in place: still moving at 299 ms", FALSE)
     group.animate(injectMs + MOVE_MS)
@@ -297,10 +327,28 @@ PRI checkGroupSetters() | injectMs, bAllComplete
     utils.checkEqual(group.isHoldComplete(injectMs + MOVE_MS + HOLD_MS), @"refused holds left 200 ms in place: hold over at 200 ms", TRUE)
 
 
-PRI segmentLit() : nLit
-    ' lit pixels of the test segment's row
+PRI onTenths(elapsedMs, moveMs) : amountTenths | headX100
+    ' the lit amount turning on, in tenths of a pixel, after elapsedMs of a linear moveMs move (see the notes above)
 
-    nLit := litCount(SEG_ROW, SEG_COLUMN, SEG_LENGTH)
+    headX100 := muldiv64(elapsedMs <# moveMs, (SEG_LENGTH + ONE_PIXEL) * X100, moveMs)
+    if headX100 <= X100
+        amountTenths := headX100 * headX100 / SQUARE_X100_TO_TENTHS
+    elseif headX100 <= SEG_LENGTH * X100
+        amountTenths := (headX100 - HALF_X100) / (X100 / TENTHS)
+    else
+        amountTenths := FULL_TENTHS - ((SEG_LENGTH + ONE_PIXEL) * X100 - headX100) * ((SEG_LENGTH + ONE_PIXEL) * X100 - headX100) / SQUARE_X100_TO_TENTHS
+
+
+PRI litTenths() : amountTenths | column, pPixel, total
+    ' the test segment's lit amount, in tenths of a pixel: the red bytes of its row (the level, through the linear ramp)
+
+    total := 0
+    column := SEG_COLUMN
+    repeat SEG_LENGTH
+        pPixel := pixels.pixelAddressAtRC(chainIndex, SEG_ROW, column++)
+        if pPixel <> hub75Bffrs.NO_PIXEL
+            total += BYTE[pPixel]
+    amountTenths := (total * TENTHS + morphColor.RAMP_MAX / (TENTHS / TENTHS + ONE_PIXEL)) / morphColor.RAMP_MAX
 
 
 PRI groupALit() : nLit

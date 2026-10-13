@@ -16,14 +16,6 @@ CON ' library version -- values are written by tools/stamp_version.sh, never edi
 
     MORPH_VERSION = 10000     ' MAJOR * 10000 + MINOR * 100 + PATCH, e.g. v1.2.3 is 10203
 
-CON { public control values }
-
-    DIGIT_NO_VALUE = -2   ' digit value when NOT [0-9]
-    DIGIT_HIDDEN = -1     ' digit value when NOT [0-9]
-
-    WITH_WRAP = TRUE
-    WITHOUT_WRAP = FALSE
-
 CON ' motion and cadence settings of a group
 
     MIN_MOVE_MS = 1                 ' a move lasts at least 1 ms (animate() divides by the duration)
@@ -33,7 +25,7 @@ CON ' motion and cadence settings of a group
     DEFAULT_HOLD_MS = 200           ' hold after each transition when the caller sets none: the 2021 demo held 8 to 10
                                     '   loop passes, 178 to 222 ms (Docs/analysis/morph-time-design.md section d)
 
-CON { Display constants }
+CON ' group types and sizes
 
 #0, GRP_UNKNOWN, GRP_CLOCK, GRP_UP_COUNTER, GRP_DOWN_COUNTER, GRP_DIGITS, GRP_DIGITS_RANDOM
 
@@ -42,14 +34,20 @@ LAST_DIGIT = MAX_DIGITS - 1         ' index of the last digit slot (digits[] run
 
 GAP_LARGE_DIGITS = 4
 
-OBJ { Objects we use }
+CON ' the group's segment shape and color (one mask and one ramp serve every digit)
+
+    MAX_MASK_BYTES = 2048           ' the coverage mask buffer: thickness x segment length; U5 sets the final size (task 168)
+
+OBJ
 
     pixels              : "isp_hub75_screenUtils"
     digits[MAX_DIGITS]  : "isp_hub75_morph7seg"
     timeBase            : "isp_hub75_morphTime"     ' motion constants only: DEFAULT_MOVE_MS and the EASE_ styles
     morphStatus         : "isp_hub75_morphStatus"   ' the status codes the setters return (a refused call changes nothing, spec R-10.2)
+    morphColor          : "isp_hub75_morphColor"    ' the group's intensity ramp
+    morphMask           : "isp_hub75_morphMask"     ' the group's segment coverage mask
 
-VAR { instance variable }
+VAR ' per group
 
     long    numberDigits
     long    groupType
@@ -62,6 +60,15 @@ VAR { instance variable }
     long    digitHeight
     long    digitWidth
     long    segmentThickness
+    long    segmentLength
+
+    ' segment shape and motion profile (set before placement; the profile also after)
+    long    endStyle            ' morphMask.END_SQUARE or END_ANGLED
+    long    crossSection        ' morphMask.SECTION_FLAT or SECTION_TUBE
+    long    motionProfile       ' timeBase.PROFILE_EDGE or PROFILE_TAIL
+    long    tailPixels          ' PROFILE_TAIL's tail when bTailSet ...
+    long    bTailSet            ' ... TRUE once setTailLength() set it; FALSE: a quarter of the segment's length
+    long    ramp[morphColor.RAMP_LEVELS]
     long    digitHspace
 
     ' display delay times
@@ -85,6 +92,7 @@ VAR { instance variable }
     long    bHoldRunning        ' TRUE from that animate() until nextTimeCycle() starts the next value
 
     ' flags
+    byte    mask[MAX_MASK_BYTES]
     byte    showSecondIndicator
     byte    isSetup
 
@@ -107,54 +115,105 @@ PUB initialize(nChainIndex, nPhysicalRows, nPhysicalColumns) | digitIndex
     moveEaseStyle := timeBase.EASE_LINEAR
     holdDurationMs := DEFAULT_HOLD_MS
     bHoldRunning := FALSE
+    endStyle := morphMask.END_ANGLED
+    crossSection := morphMask.SECTION_FLAT
+    motionProfile := timeBase.DEFAULT_PROFILE
+    bTailSet := FALSE
 
-PUB placeDigitGroup(row, column, grpType, nbrDigits, segThickness, segLength, initialValue, rgbColor) : grpWidth, grpHeight | currCol, digitIdx
-    '' Locate a desired digit group on our screen. Draw initial segements if {initialValue} is NOT off
+PUB placeDigitGroup(row, column, grpType, nbrDigits, segThickness, segLength, initialValue, rgbColor) : grpWidth, grpHeight | currCol, digitIdx, status, nCols, nRows
+    '' Locate a desired digit group on our screen. Draw initial segements if {initialValue} is NOT off.
+    '' Returns 0, 0 and places nothing when the segment shape is refused (placeGroup() replaces this in task 168).
     digitHspace := (segLength > 7) ? GAP_LARGE_DIGITS : 1
-    groupType := grpType
-    numberDigits := nbrDigits
-    currValue := initialValue
-    valueCap := 1
-    repeat nbrDigits
-        valueCap := valueCap * 10
-    maxValueDivisor := valueCap / 10    ' e.g., if we are 3 digits then maxDiv is 100
-    valueCap := valueCap - 1
-    debug("mG:placeDigit rc=(", udec_(row), ",", udec_(column), ") ", udec(grpType), udec(nbrDigits), udec(initialValue), udec(valueCap), ", RGB=(", uhex_long_(rgbColor),")")
-
-    ensureIsSetup()
-
-    digitWidth, digitHeight, segmentThickness := calcDigitSizeFmSegLength(segLength, segThickness)
-    'debug("* Seg-len 5,2: ", udec_long(digitWidth), udec_long(digitHeight))
-
-    grpWidth := (digitWidth + digitHspace) * nbrDigits
-    if groupType == GRP_CLOCK
-        grpWidth := grpWidth + 2 + 1    ' add-in width of dots
-        dotRow := row + (segLength / 2)
-        dotCol := column + (digitWidth + digitHspace) * 2
-        dotVOffset := segLength + 1
-    grpHeight := digitHeight + 1
-
-    if groupType == GRP_CLOCK
-        hours := currValue / 60
-        minutes := currValue // 60
-        initValue[0] := hours / 10
-        initValue[1] := hours // 10
-        initValue[2] := minutes / 10
-        initValue[3] := minutes // 10
-        showSecondIndicator := TRUE
+    status, nCols, nRows := morphMask.buildMask(@mask, MAX_MASK_BYTES, segThickness, segLength << digits.SUBPIXEL_SHIFT, endStyle, crossSection)
+    if status <> morphStatus.SUCCESS
+        debug("mG: segment shape refused, status=", sdec_(status), " thickness=", udec_(segThickness), " length=", udec_(segLength))
     else
-        updateInitsFromValue(currValue)
+        groupType := grpType
+        numberDigits := nbrDigits
+        currValue := initialValue
+        valueCap := 1
+        repeat nbrDigits
+            valueCap := valueCap * 10
+        maxValueDivisor := valueCap / 10    ' e.g., if we are 3 digits then maxDiv is 100
+        valueCap := valueCap - 1
+        debug("mG:placeDigit rc=(", udec_(row), ",", udec_(column), ") ", udec(grpType), udec(nbrDigits), udec(initialValue), udec(valueCap), ", RGB=(", uhex_long_(rgbColor),")")
 
-    currCol := column
-    repeat digitIdx from 0 to nbrDigits - 1
-        ' FIXME; UNDONE calculate initial values (mod 10!) - all decimal
-        digits[digitIdx].placeDigit(row, currCol, digitWidth, digitHeight, initValue[digitIdx], rgbColor)
-        currCol := currCol + digitWidth + digitHspace
-        if groupType == GRP_CLOCK && digitIdx == 1
-            currCol := currCol + 2 + 1  ' add in dot width
+        ensureIsSetup()
 
-    if groupType == GRP_CLOCK
-        showSecondsDots( 0 )
+        morphColor.buildRamp(@ramp, chainIndex, rgbColor)
+        segmentThickness := segThickness
+        segmentLength := segLength
+        digitWidth, digitHeight := digits[0].digitSize(segLength, segThickness)
+
+        grpWidth := (digitWidth + digitHspace) * nbrDigits
+        if groupType == GRP_CLOCK
+            grpWidth := grpWidth + 2 + 1    ' add-in width of dots
+            dotRow := row + (segLength / 2)
+            dotCol := column + (digitWidth + digitHspace) * 2
+            dotVOffset := segLength + 1
+        grpHeight := digitHeight + 1
+
+        if groupType == GRP_CLOCK
+            hours := currValue / 60
+            minutes := currValue // 60
+            initValue[0] := hours / 10
+            initValue[1] := hours // 10
+            initValue[2] := minutes / 10
+            initValue[3] := minutes // 10
+            showSecondIndicator := TRUE
+        else
+            updateInitsFromValue(currValue)
+
+        currCol := column
+        repeat digitIdx from 0 to nbrDigits - 1
+            digits[digitIdx].placeDigit(row, currCol, segLength, segThickness, initValue[digitIdx], @mask, @ramp, tailX256())
+            currCol := currCol + digitWidth + digitHspace
+            if groupType == GRP_CLOCK && digitIdx == 1
+                currCol := currCol + 2 + 1  ' add in dot width
+
+        if groupType == GRP_CLOCK
+            showSecondsDots( 0 )
+
+PUB setSegmentStyle(segEndStyle, segCrossSection) : status
+'' Set the segment shape the next placement builds: its end style and cross-section (spec R-4.3, R-4.4).
+''
+'' @param segEndStyle - morphMask.END_SQUARE or morphMask.END_ANGLED (END_ANGLED when never set)
+'' @param segCrossSection - morphMask.SECTION_FLAT (used when never set) or morphMask.SECTION_TUBE
+'' @returns status - morphStatus.SUCCESS, or E_UNKNOWN_END_STYLE or E_UNKNOWN_CROSS_SECTION with nothing changed
+
+    if segEndStyle <> morphMask.END_SQUARE and segEndStyle <> morphMask.END_ANGLED
+        status := morphStatus.E_UNKNOWN_END_STYLE
+    elseif segCrossSection <> morphMask.SECTION_FLAT and segCrossSection <> morphMask.SECTION_TUBE
+        status := morphStatus.E_UNKNOWN_CROSS_SECTION
+    else
+        endStyle := segEndStyle
+        crossSection := segCrossSection
+        status := morphStatus.SUCCESS
+
+PUB setProfile(profile) : status
+'' Set how a moving segment's lit part ends: one anti-aliased edge pixel, or a gradient tail (spec R-5.3).
+''
+'' @param profile - timeBase.PROFILE_EDGE or timeBase.PROFILE_TAIL (timeBase.DEFAULT_PROFILE when never set)
+'' @returns status - morphStatus.SUCCESS, or morphStatus.E_UNKNOWN_PROFILE with nothing changed
+
+    status := morphStatus.E_UNKNOWN_PROFILE
+    if profile == timeBase.PROFILE_EDGE or profile == timeBase.PROFILE_TAIL
+        motionProfile := profile
+        applyTail()
+        status := morphStatus.SUCCESS
+
+PUB setTailLength(tailLengthPixels) : status
+'' Set PROFILE_TAIL's tail length in pixels (a quarter of the segment's length when never set). Longer than the segment is allowed.
+''
+'' @param tailLengthPixels - the tail, timeBase.MIN_TAIL_PIXELS or more
+'' @returns status - morphStatus.SUCCESS, or morphStatus.E_BAD_TAIL_LENGTH with nothing changed
+
+    status := morphStatus.E_BAD_TAIL_LENGTH
+    if tailLengthPixels >= timeBase.MIN_TAIL_PIXELS
+        tailPixels := tailLengthPixels
+        bTailSet := TRUE
+        applyTail()
+        status := morphStatus.SUCCESS
 
 PUB setMoveDuration(durationMs) : status
 '' Set how long every segment move of this group takes: the same real time for every segment length (spec R-5.4).
@@ -248,7 +307,7 @@ PRI ensureIsSetup()
     if not isSetup
         initialSetup()
 
-PRI initialSetup() | byte segIndex, orientation, segRow, segCol, segW, segL
+PRI initialSetup()
     ' Perform initial setup
     isSetup := TRUE
     hours24 := hours := minutes := 0
@@ -328,13 +387,25 @@ PRI applyMotion() | digitIdx
     repeat digitIdx from 0 to LAST_DIGIT
         digits[digitIdx].setMotion(moveDurationMs, moveEaseStyle)
 
-PRI calcDigitSizeFmSegLength(segmentLength, segmentWidth) : digWidth, digHeight, segWidth
-    ' FIXME: UNDONE assumes segmentWidth of 1
-    segWidth := segmentWidth
-    digWidth := segmentLength + (2 * segmentWidth)
-    digHeight := (segmentLength * 2) + (3 * segmentWidth)
+PRI tailX256() : tailLen
+' The snake tail every digit draws with, in 1/256 pixel: one pixel for PROFILE_EDGE; for PROFILE_TAIL the set
+' length, or a quarter of the segment's length.
 
-PRI showSecondsDots(lightDark) | red, green, blue, targetColor
+    if motionProfile == timeBase.PROFILE_EDGE
+        tailLen := timeBase.MIN_TAIL_PIXELS
+    elseif bTailSet
+        tailLen := tailPixels
+    else
+        tailLen := (segmentLength / timeBase.TAIL_DIVISOR) #> timeBase.MIN_TAIL_PIXELS
+    tailLen <<= digits.SUBPIXEL_SHIFT
+
+PRI applyTail() | digitIdx
+' Give every digit the group's tail.
+
+    repeat digitIdx from 0 to LAST_DIGIT
+        digits[digitIdx].setTail(tailX256())
+
+PRI showSecondsDots(lightDark) | targetColor
    ' lightDarkv[0,1] where 1 means bright color
     if lightDark & 1 > 0    ' > 0 is 1/4 ON  -  & 1 > 0  is 1/2 ON
         targetColor := $00006F
@@ -352,7 +423,7 @@ PRI drawSecondsDot(row, column, rgbColor)
     pixels.drawPixelAtRC(chainIndex, row+1, column+1, rgbColor)
 
 
-CON { license }
+CON ' license
 
 {{
 

@@ -1,0 +1,372 @@
+'' =================================================================================================
+''
+''   File....... test_hub75_morphRender.spin2
+''   Purpose.... Board test of the segment renderer: every transition ends on the rest pixels, refusals, edges, timing
+''   Authors.... Stephen M Moraco
+''               -- see below for terms of use
+''   E-mail..... stephen@ironsheep.biz
+''   Started.... Oct 2026
+''   Updated.... 12 Oct 2026
+''
+'' =================================================================================================
+
+{ Task 166: proves the renderer (isp_hub75_morph7seg drawing, isp_hub75_morphSegment motion) on the quad.
+
+  The probe is the screen buffer: a checksum of every byte of the digit's area, read back through
+  screenUtils.pixelAddressAtRC(). "At rest" is the digit placed fresh with a value: its segments turn on
+  at once, with no motion. Every transition must end on exactly those pixels (spec R-5.7).
+
+  Sections:
+    1. per configuration (thin edge profile, thick angled tail profile, thick tube with a tail longer
+       than the segment): the rest checksum of each digit 0-9, then all 90 transitions from rest, each
+       sampled mid-move (it must differ from the end) and at its end (it must equal the rest checksum)
+    2. an interrupted move: a new value mid-flight still ends on the new value's rest pixels (R-5.5)
+    3. the column slides in both directions on and off, including the two the table never uses
+    4. refused commands: a style the segment cannot do changes nothing on the screen
+    5. a digit touching the display's right and bottom edges
+    6. timing: one segment's frames per profile, and a dense frame of six thick digits all moving
+
+  Falsification: compile with -D MORPH_BREAK_RENDER and the renderer's end state is damaged (one mask
+  byte changes after the rest checksums are taken); every end-equals-rest check must then FAIL.
+}
+
+CON ' ---- Timing ----
+
+  CLK_FREQ = 335_000_000                                        ' system freq as a constant
+  _clkfreq = CLK_FREQ                                           ' set system clock
+
+CON ' ---- Digit under test ----
+
+  DIGIT_ROW = 4
+  DIGIT_COLUMN = 4
+  MOVE_MS = 300
+  MID_MS = MOVE_MS / 2
+  START_MS = 1000                                               ' injected frame times start here (only differences count)
+  GAP_MS = 1000                                                 ' each transition starts this far after the previous one
+  NUM_DIGITS = 10
+  LAST_DIGIT_VALUE = NUM_DIGITS - 1
+  NUM_TRANSITIONS = NUM_DIGITS * (NUM_DIGITS - 1)
+  MASK_BYTES = 2048
+  CHECK_MULTIPLIER = 31                                         ' rolling checksum: sum x 31 + byte, so a moved pixel changes it
+  ONE_MORE = 1
+
+CON ' ---- Configurations ----
+
+  NUM_CONFIGS = 3
+  ' thin: thickness 1, length 6, square, flat, edge profile (the 2021 look)
+  ' thick: thickness 5, length 20, angled, flat, tail profile (tail 5)
+  ' tube: thickness 8, length 24, angled, tube, tail 40 (longer than the segment)
+  EDGE_TAIL_X256 = 256
+  THICK_CONFIG = 1                                              ' the configuration the single cases use
+  NUM_PROFILES = 2                                              ' the timing section's profiles: edge, then tail
+
+CON ' ---- Slides, refusals, edges ----
+
+  SLOT_G = 0                                                    ' segment slots: G=0, F=1, E=2, D=3, C=4, B=5, A=6
+  SLOT_F = 1
+  SLOT_E = 2
+  SLOT_C = 4
+  SLOT_B = 5
+  SLOT_A = 6
+  INTERRUPT_FROM = 1
+  INTERRUPT_VIA = 7
+  INTERRUPT_TO = 3
+  EDGE_FROM = 8
+  EDGE_TO = 0
+
+CON ' ---- Timing section ----
+
+  TIMED_THICKNESS = 9
+  TIMED_LENGTH = 40
+  TIMED_TAIL_X256 = 10 * 256
+  TIMED_FRAMES = 20
+  FRAME_STEP_MS = MOVE_MS / TIMED_FRAMES
+  DENSE_DIGITS = 6
+  DENSE_THICKNESS = 6
+  DENSE_LENGTH = 22
+  DENSE_GAP = 4
+  DENSE_ROW = 40
+  DENSE_FROM = 8                                                ' 8 -> 1: A, D, E, F and G all snake or slide off at once
+  DENSE_TO = 1
+
+CON ' ---- Falsification hook ----
+
+  BREAK_BITS = $FF                                              ' ... by flipping every bit
+  BREAK_BYTE = 3                                                ' -D MORPH_BREAK_RENDER: this mask byte is changed after the rest checksums
+
+OBJ
+
+    color       : "isp_hub75_color"
+    display     : "isp_hub75_display"
+    pixels      : "isp_hub75_screenUtils"
+    hub75Bffrs  : "isp_hub75_hwBufferAccess"
+    utils       : "test_hub75_morphUtils"
+    morphColor  : "isp_hub75_morphColor"
+    morphMask   : "isp_hub75_morphMask"
+    morphStatus : "isp_hub75_morphStatus"
+    digit       : "isp_hub75_morph7seg"
+    seg         : "isp_hub75_morphSegment"                  ' command constants only
+    dense[DENSE_DIGITS] : "isp_hub75_morph7seg"
+
+DAT ' configurations: thickness, length, end style, cross-section, tail (1/256 px), name
+
+  cfgThickness    long    1, 5, 8
+  cfgLength       long    6, 20, 24
+  cfgEnd          long    morphMask.END_SQUARE, morphMask.END_ANGLED, morphMask.END_ANGLED
+  cfgSection      long    morphMask.SECTION_FLAT, morphMask.SECTION_FLAT, morphMask.SECTION_TUBE
+  cfgTail         long    EDGE_TAIL_X256, 5 * 256, 40 * 256
+  cfgNames        word    @nameThin, @nameThick, @nameTube
+  nameThin        byte    "thin T1 L6 square edge", 0
+  nameThick       byte    "thick T5 L20 angled tail5", 0
+  nameTube        byte    "tube T8 L24 angled tail40", 0
+
+VAR
+
+    long    chainIndex
+    long    maxRows
+    long    maxColumns
+    long    nowMs
+    long    thickness
+    long    segLength
+    long    tailX256
+    long    areaWidth
+    long    areaHeight
+    long    restSum[NUM_DIGITS]
+    long    ramp[morphColor.RAMP_LEVELS]
+    byte    mask[MASK_BYTES]
+
+PUB go() | cfgIdx
+'' Run the renderer test: start the display, each configuration's transitions, then the single cases and timing.
+''
+
+    utils.beginSuite(@"morphRender segment renderer")
+    chainIndex := hub75Bffrs.indexForHub75ChainId(hub75Bffrs.HUB75_ADAPTER_1)
+    display.start(display.HUB75_ADAPTER_1)
+    maxColumns := hub75Bffrs.maxDisplayColumns(chainIndex)
+    maxRows := hub75Bffrs.maxDisplayRows(chainIndex)
+    morphColor.buildRamp(@ramp, chainIndex, color.cOrange)
+    digit.initialize(chainIndex, maxRows, maxColumns)
+    nowMs := START_MS
+
+    repeat cfgIdx from 0 to NUM_CONFIGS - ONE_MORE
+        useConfig(cfgIdx)
+        checkTransitions(@@cfgNames[cfgIdx])
+    useConfig(THICK_CONFIG)
+    checkInterrupt()
+    checkSlides()
+    checkRefusals()
+    checkDisplayEdge()
+    checkTiming()
+    display.commitScreenToPanelSet()
+    utils.finish()
+
+PRI useConfig(cfgIdx) | status, nCols, nRows
+
+    thickness := cfgThickness[cfgIdx]
+    segLength := cfgLength[cfgIdx]
+    tailX256 := cfgTail[cfgIdx]
+    status, nCols, nRows := morphMask.buildMask(@mask, MASK_BYTES, thickness, segLength << digit.SUBPIXEL_SHIFT, cfgEnd[cfgIdx], cfgSection[cfgIdx])
+    areaWidth, areaHeight := digit.digitSize(segLength, thickness)
+    debug("CONFIG   ", zstr_(@@cfgNames[cfgIdx]), "  status=", sdec_(status), "  digit=", udec_(areaWidth), "x", udec_(areaHeight))
+
+PRI checkTransitions(pName) | fromValue, toValue, endMismatches, midSame, midSum
+
+    ' the rest pixels of each digit, placed fresh (segments on at once)
+    repeat fromValue from 0 to LAST_DIGIT_VALUE
+        placeAt(DIGIT_ROW, DIGIT_COLUMN, fromValue)
+        restSum[fromValue] := areaSum(DIGIT_ROW, DIGIT_COLUMN)
+#IFDEF MORPH_BREAK_RENDER
+    mask[BREAK_BYTE] ^= BREAK_BITS
+#ENDIF
+    endMismatches := 0
+    midSame := 0
+    repeat fromValue from 0 to LAST_DIGIT_VALUE
+        repeat toValue from 0 to LAST_DIGIT_VALUE
+            if toValue <> fromValue
+                placeAt(DIGIT_ROW, DIGIT_COLUMN, fromValue)
+                digit.setValue(toValue)
+                frame(0)                                            ' stamps the moves' start
+                frame(MID_MS)
+                midSum := areaSum(DIGIT_ROW, DIGIT_COLUMN)
+                frame(MOVE_MS - MID_MS)
+                if areaSum(DIGIT_ROW, DIGIT_COLUMN) <> restSum[toValue]
+                    endMismatches++
+                    debug("MISMATCH ", zstr_(pName), "  ", udec_(fromValue), " -> ", udec_(toValue))
+                if midSum == restSum[toValue]
+                    midSame++
+#IFDEF MORPH_BREAK_RENDER
+    mask[BREAK_BYTE] ^= BREAK_BITS
+#ENDIF
+    debug("TRANS    ", zstr_(pName), "  ran=", udec_(NUM_TRANSITIONS), "  end_mismatches=", udec_(endMismatches), "  mid_equal_end=", udec_(midSame))
+    utils.checkEqual(endMismatches, pName, 0)
+    utils.checkEqual(midSame, @"  ... and mid-move differs from the end in every transition", 0)
+
+PRI checkInterrupt()
+
+    placeAt(DIGIT_ROW, DIGIT_COLUMN, INTERRUPT_TO)
+    restSum[INTERRUPT_TO] := areaSum(DIGIT_ROW, DIGIT_COLUMN)
+    placeAt(DIGIT_ROW, DIGIT_COLUMN, INTERRUPT_FROM)
+    digit.setValue(INTERRUPT_VIA)
+    frame(0)
+    frame(MID_MS)
+    digit.setValue(INTERRUPT_TO)                                    ' mid-flight: the 1 -> 7 moves snap to their end first
+    frame(0)
+    frame(MOVE_MS)
+    utils.checkEqual(areaSum(DIGIT_ROW, DIGIT_COLUMN), @"interrupted 1 -> 7 -> 3 ends on 3's rest pixels", restSum[INTERRUPT_TO])
+
+PRI checkSlides() | blankSum, eOnlySum
+
+    placeAt(DIGIT_ROW, DIGIT_COLUMN, digit.DIGIT_HIDDEN)
+    blankSum := areaSum(DIGIT_ROW, DIGIT_COLUMN)
+    utils.checkEqual(blankSum, @"a hidden digit's area is black (checksum 0)", 0)
+    digit.commandSegment(SLOT_E, seg.CMD_TURN_ON + seg.CMD_IMMEDIATE)
+    frame(0)
+    eOnlySum := areaSum(DIGIT_ROW, DIGIT_COLUMN)
+    slideCase(SLOT_E, seg.CMD_TURN_OFF + seg.CMD_COL_TO_RT, blankSum, @"E slides off to the right (table): ends blank")
+    slideCase(SLOT_E, seg.CMD_TURN_ON + seg.CMD_COL_TO_LT, eOnlySum, @"E slides on from the right (table): ends at home")
+    slideCase(SLOT_E, seg.CMD_TURN_OFF + seg.CMD_COL_TO_LT, blankSum, @"E slides off to the left (unused): ends blank")
+    slideCase(SLOT_E, seg.CMD_TURN_ON + seg.CMD_COL_TO_RT, eOnlySum, @"E slides on from the left (unused): ends at home")
+
+PRI slideCase(slot, command, expectedSum, pName)
+
+    utils.checkEqual(digit.commandSegment(slot, command), @"  slide command accepted", morphStatus.SUCCESS)
+    frame(0)
+    frame(MID_MS)
+    frame(MOVE_MS - MID_MS)
+    utils.checkEqual(areaSum(DIGIT_ROW, DIGIT_COLUMN), pName, expectedSum)
+
+PRI checkRefusals() | beforeSum
+
+    placeAt(DIGIT_ROW, DIGIT_COLUMN, EDGE_FROM)
+    beforeSum := areaSum(DIGIT_ROW, DIGIT_COLUMN)
+    refuse(SLOT_B, seg.CMD_TURN_OFF + seg.CMD_LT_TO_RT, @"refuse LT_TO_RT on vertical B")
+    refuse(SLOT_C, seg.CMD_TURN_OFF + seg.CMD_COL_TO_RT, @"refuse a column slide on C")
+    refuse(SLOT_A, seg.CMD_TURN_OFF + seg.CMD_TOP_DOWN, @"refuse TOP_DOWN on horizontal A")
+    refuse(SLOT_G, seg.CMD_TURN_OFF + seg.CMD_UNKNOWN, @"refuse an unknown style on G")
+    frame(0)
+    frame(MOVE_MS)
+    utils.checkEqual(areaSum(DIGIT_ROW, DIGIT_COLUMN), @"  ... and the refused commands drew nothing", beforeSum)
+
+PRI refuse(slot, command, pName)
+
+    utils.checkEqual(digit.commandSegment(slot, command), pName, morphStatus.E_BAD_COMMAND)
+
+PRI checkDisplayEdge() | row, column, restEdgeSum
+
+    row := maxRows - areaHeight
+    column := maxColumns - areaWidth
+    placeAt(row, column, EDGE_TO)
+    restEdgeSum := areaSum(row, column)
+    placeAt(row, column, EDGE_FROM)
+    digit.setValue(EDGE_TO)
+    frame(0)
+    frame(MID_MS)
+    frame(MOVE_MS - MID_MS)
+    utils.checkEqual(areaSum(row, column), @"a digit touching the right and bottom edges: 8 -> 0 ends on 0's rest pixels", restEdgeSum)
+    clearArea(row, column)
+
+PRI checkTiming() | status, nCols, nRows, startTick, ticks, digitIdx, column, profileIdx
+
+    status, nCols, nRows := morphMask.buildMask(@mask, MASK_BYTES, TIMED_THICKNESS, TIMED_LENGTH << digit.SUBPIXEL_SHIFT, morphMask.END_ANGLED, morphMask.SECTION_FLAT)
+    repeat profileIdx from 0 to NUM_PROFILES - ONE_MORE
+        tailX256 := profileIdx == 0 ? EDGE_TAIL_X256 : TIMED_TAIL_X256
+        thickness := TIMED_THICKNESS
+        segLength := TIMED_LENGTH
+        placeAt(DIGIT_ROW, DIGIT_COLUMN, digit.DIGIT_HIDDEN)
+        digit.commandSegment(SLOT_A, seg.CMD_TURN_ON + seg.CMD_LT_TO_RT)
+        frame(0)
+        ticks := 0
+        repeat TIMED_FRAMES - ONE_MORE
+            nowMs += FRAME_STEP_MS
+            startTick := getct()
+            digit.animate(nowMs)
+            ticks += getct() - startTick
+        debug("TIME     one segment (T9 L40) per frame, ", zstr_(profileIdx == 0 ? @"edge profile" : @"tail profile 10"), "  avg_us=", udec_(muldiv64(ticks / (TIMED_FRAMES - ONE_MORE), utils.MICROS_PER_SECOND, clkfreq)))
+    clearArea(DIGIT_ROW, DIGIT_COLUMN)
+
+    status, nCols, nRows := morphMask.buildMask(@mask, MASK_BYTES, DENSE_THICKNESS, DENSE_LENGTH << digit.SUBPIXEL_SHIFT, morphMask.END_ANGLED, morphMask.SECTION_FLAT)
+    column := DIGIT_COLUMN
+    repeat digitIdx from 0 to DENSE_DIGITS - ONE_MORE
+        dense[digitIdx].initialize(chainIndex, maxRows, maxColumns)
+        areaWidth, areaHeight := dense[digitIdx].placeDigit(DENSE_ROW, column, DENSE_LENGTH, DENSE_THICKNESS, DENSE_FROM, @mask, @ramp, TIMED_TAIL_X256)
+        dense[digitIdx].setMotion(MOVE_MS, 0)
+        dense[digitIdx].animate(nowMs)
+        column += areaWidth + DENSE_GAP
+    repeat digitIdx from 0 to DENSE_DIGITS - ONE_MORE
+        dense[digitIdx].setValue(DENSE_TO)
+        dense[digitIdx].animate(nowMs)
+    ticks := 0
+    repeat TIMED_FRAMES - ONE_MORE
+        nowMs += FRAME_STEP_MS
+        startTick := getct()
+        repeat digitIdx from 0 to DENSE_DIGITS - ONE_MORE
+            dense[digitIdx].animate(nowMs)
+        ticks += getct() - startTick
+    debug("TIME     dense frame: 6 digits T6 L22 (8 -> 1, 5 segments each) all moving, tail 10  avg_us=", udec_(muldiv64(ticks / (TIMED_FRAMES - ONE_MORE), utils.MICROS_PER_SECOND, clkfreq)))
+
+PRI placeAt(row, column, value)
+' Clear the area, place the digit fresh showing value, and draw it (one frame).
+
+    clearArea(row, column)
+    digit.placeDigit(row, column, segLength, thickness, value, @mask, @ramp, tailX256)
+    digit.setMotion(MOVE_MS, 0)
+    frame(0)
+
+PRI frame(advanceMs)
+' Advance the injected time and animate the digit once.
+
+    nowMs += advanceMs
+    digit.animate(nowMs)
+
+PRI clearArea(row, column) | pixRow, pixCol, pPixel, idx
+' Black the digit's area byte by byte through pixelAddressAtRC(), the same path areaSum() reads: the test's probe
+' stays independent of the drawing path it checks (no driver fill and no digit drawing).
+
+    repeat pixRow from row to (row + areaHeight - ONE_MORE) <# (maxRows - ONE_MORE)
+        repeat pixCol from column to (column + areaWidth - ONE_MORE) <# (maxColumns - ONE_MORE)
+            pPixel := pixels.pixelAddressAtRC(chainIndex, pixRow, pixCol)
+            if pPixel <> hub75Bffrs.NO_PIXEL
+                idx := 0
+                repeat hub75Bffrs.bytesPerColor(chainIndex)
+                    BYTE[pPixel][idx++] := 0
+
+PRI areaSum(row, column) : sum | pixRow, pixCol, pPixel, idx
+' Rolling checksum of every byte of the digit's area (clipped to the display).
+
+    sum := 0
+    repeat pixRow from row to (row + areaHeight - ONE_MORE) <# (maxRows - ONE_MORE)
+        repeat pixCol from column to (column + areaWidth - ONE_MORE) <# (maxColumns - ONE_MORE)
+            pPixel := pixels.pixelAddressAtRC(chainIndex, pixRow, pixCol)
+            if pPixel <> hub75Bffrs.NO_PIXEL
+                idx := 0
+                repeat hub75Bffrs.bytesPerColor(chainIndex)
+                    sum := sum * CHECK_MULTIPLIER + BYTE[pPixel][idx++]
+
+CON ' ---- License ----
+
+{{
+
+ -------------------------------------------------------------------------------------------------
+  MIT License
+
+  Copyright (c) 2021 Iron Sheep Productions, LLC
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+ =================================================================================================
+}}

@@ -49,6 +49,14 @@ CON ' motion settings shared by every level (group, digit, segment)
   '   EASE_SMOOTH - smoothstep, 3p^2 - 2p^3: starts and ends slowly, with no jump in speed at either end
   #0, EASE_LINEAR, EASE_SMOOTH
 
+  ' how a moving segment's lit part ends (morphCounters.setProfile(); spec R-5.3):
+  '   PROFILE_EDGE - solid, then one fractional edge pixel (plan profile A)
+  '   PROFILE_TAIL - solid, then a gradient tail several pixels long (plan profile C)
+  #0, PROFILE_EDGE, PROFILE_TAIL
+  DEFAULT_PROFILE = PROFILE_TAIL
+  TAIL_DIVISOR = 4                                              ' PROFILE_TAIL's tail when the caller sets none: a quarter of the segment's length
+  MIN_TAIL_PIXELS = 1                                           ' the shortest tail: one pixel (PROFILE_EDGE's edge)
+
 DAT ' shared clock (one copy for the program; see the notes above)
 
   prevTick        long    0                                     ' the counter at the last update()

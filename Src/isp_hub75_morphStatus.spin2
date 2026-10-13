@@ -33,6 +33,9 @@ CON ' status codes (a new code takes the next unused negative value; a value is 
   E_UNKNOWN_END_STYLE = -5                                      ' an end style that is not isp_hub75_morphMask's END_SQUARE or END_ANGLED
   E_UNKNOWN_CROSS_SECTION = -6                                  ' a cross-section that is not isp_hub75_morphMask's SECTION_FLAT or SECTION_TUBE
   E_MASK_TOO_LARGE = -7                                         ' a segment mask that needs more bytes than the buffer given for it
+  E_UNKNOWN_PROFILE = -8                                        ' a motion profile that is not isp_hub75_morphTime's PROFILE_EDGE or PROFILE_TAIL
+  E_BAD_TAIL_LENGTH = -9                                        ' a tail shorter than isp_hub75_morphTime's MIN_TAIL_PIXELS
+  E_BAD_COMMAND = -10                                           ' a segment command byte whose style is unknown or not one this segment can do
 
 PUB null()
 '' This is not a top level object
