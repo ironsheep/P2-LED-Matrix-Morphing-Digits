@@ -92,7 +92,8 @@ CON ' ---- Group under test ----
 
   GROUP_ROW = 60
   GROUP_COLUMN = 100
-  GROUP_DIGITS = 1
+  GROUP_AREA_WIDTH = 17                                         ' the area that fits segment length 15 at stroke 1: a digit 17 x 33
+  GROUP_AREA_HEIGHT = 33
   GROUP_SEG_LENGTH = 15                                         ' segment A: 15 pixels
   GROUP_START_VALUE = 0                                         ' 0 -> 1: segment A snakes off left to right
   GROUP_A_COLUMN = GROUP_COLUMN + 1                             ' segment A starts one pixel right of the digit's left edge
@@ -292,9 +293,9 @@ PRI checkEasing() | injectMs
 PRI checkGroupSetters() | injectMs, bAllComplete
     ' the group's setters: accepted values, refused values, then the 0 -> 1 transition shows nothing changed
 
-    group.initialize(chainIndex, maxRows, maxColumns)
     group.setProfile(timeBase.PROFILE_EDGE)
-    group.placeDigitGroup(GROUP_ROW, GROUP_COLUMN, group.GRP_UP_COUNTER, GROUP_DIGITS, SEG_THICKNESS, GROUP_SEG_LENGTH, GROUP_START_VALUE, color.cGreen)
+    group.setThickness(SEG_THICKNESS)
+    group.placeGroup(hub75Bffrs.HUB75_ADAPTER_1, GROUP_COLUMN, GROUP_ROW, GROUP_AREA_WIDTH, GROUP_AREA_HEIGHT, group.GRP_UP_COUNTER, group.LAYOUT_1_DIGIT, group.ROT_0, color.cGreen, GROUP_START_VALUE)
     group.animate(INJECT_BASE_MS)                               ' draws the placed digit
     utils.checkEqual(groupALit(), @"probe: digit 0 shows segment A fully lit", GROUP_SEG_LENGTH)
 

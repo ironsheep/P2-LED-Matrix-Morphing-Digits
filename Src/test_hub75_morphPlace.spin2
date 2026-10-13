@@ -1,0 +1,304 @@
+'' =================================================================================================
+''
+''   File....... test_hub75_morphPlace.spin2
+''   Purpose.... Board test of placeGroup(): fit and centre in an area, overlap refusal, removal, every refusal
+''   Authors.... Stephen M Moraco
+''               -- see below for terms of use
+''   E-mail..... stephen@ironsheep.biz
+''   Started.... Oct 2026
+''   Updated.... 12 Oct 2026
+''
+'' =================================================================================================
+
+{ Task 168: proves isp_hub75_morphCounters.placeGroup() and removeGroup() (spec R-8.1-8.7, R-10.1, R-10.2).
+
+  The probe is the screen buffer. A clock showing 20:08 lights its group's whole box: digit 2's lower-left
+  vertical sits on the box's left edge, 8's verticals on its right, and the top and bottom segments on its
+  top and bottom rows. So the lit pixels' bounding box, read back through pixelAddressAtRC(), is the group as
+  drawn: it must have the size placeGroup() returned, and equal margins (within one pixel) inside the area.
+
+  Sections:
+    1. a 4-digit HH:MM clock in the whole 256 x 128, and in 128 x 64, 64 x 32 and 32 x 32 areas
+    2. a portrait 48 x 128 area at ROT_270; an odd 100 x 37 area; thickness 1 in the whole display; the
+       smallest area that places a one-digit group (reported)
+    3. refusals, each drawing nothing and changing nothing: area too small, unknown adapter, an area off the
+       display, an empty area, unknown type, a layout of the wrong kind, a value out of range
+    4. overlap: one pixel of overlap is refused, edge-to-edge is accepted; removeGroup() morphs the group out,
+       and once it has finished its area can be placed again
+
+  Falsification: compile with -D MORPH_BREAK_PLACE and the expected sizes are taken one pixel wide and the
+  "overlapping" area is moved one pixel to touching; the fit and overlap checks must then FAIL.
+}
+
+CON ' ---- Timing ----
+
+  CLK_FREQ = 335_000_000                                        ' system freq as a constant
+  _clkfreq = CLK_FREQ                                           ' set system clock
+
+CON ' ---- Values and areas ----
+
+  #0, AREA_LEFT_IDX, AREA_TOP_IDX, AREA_WIDTH_IDX, AREA_HEIGHT_IDX
+  AREA_FIELDS = AREA_HEIGHT_IDX + 1
+  BYTES_PER_LONG = 4
+
+  CLOCK_VALUE = 20 * 60 + 8                                     ' 20:08: its lit pixels fill the group's box (see above)
+  NUM_SIZES = 4
+  BAD_ADAPTER = 99
+  BAD_TYPE = 99
+  OVERLAP_LEFT = 20                                             ' group A's area ...
+  OVERLAP_TOP = 20
+  OVERLAP_WIDTH = 60
+  OVERLAP_HEIGHT = 40
+  ONE = 1
+  START_MS = 10_000
+  STEP_MS = 50
+  MAX_REMOVE_STEPS = 100                                        ' a morph-out of 300 ms ends long before this many 50 ms frames
+  SMALL_AREA_LIMIT = 16                                         ' the search for the smallest area tries sides up to this
+  FOUR_DIGITS = 9999
+  PORTRAIT_LEFT = 100                                           ' section 2's areas
+  PORTRAIT_WIDTH = 48
+  ODD_LEFT = 50
+  ODD_TOP = 40
+  ODD_WIDTH = 100
+  ODD_HEIGHT = 37
+  SMALL_LEFT = 200                                              ' the smallest-area search, and its neighbours
+  SMALL_TOP = 100
+  NEIGHBOUR_LEFT = 220
+  SMALL_VALUE = 8
+  KEEP_WIDTH = 128                                              ' the group kept placed through the refusals
+  KEEP_HEIGHT = 64
+  REFUSE_TOP = 70                                               ' where the refused areas would have gone
+  REFUSE_WIDTH = 100
+  REFUSE_HEIGHT = 40
+  TINY_WIDTH = 10
+  TINY_HEIGHT = 5
+  OFF_LEFT = 250
+  OFF_WIDTH = 20
+  OFF_HEIGHT = 10
+  A_VALUE = 88
+  C_VALUE = 11
+
+OBJ
+
+    color       : "isp_hub75_color"
+    display     : "isp_hub75_display"
+    pixels      : "isp_hub75_screenUtils"
+    hub75Bffrs  : "isp_hub75_hwBufferAccess"
+    utils       : "test_hub75_morphUtils"
+    morphStatus : "isp_hub75_morphStatus"
+    groupA      : "isp_hub75_morphCounters"
+    groupB      : "isp_hub75_morphCounters"
+    groupC      : "isp_hub75_morphCounters"
+    probe       : "test_hub75_morphProbe"
+
+DAT ' areas for section 1: left, top, width, height
+
+  sizeAreas       long    0, 0, 256, 128
+                  long    64, 32, 128, 64
+                  long    96, 48, 64, 32
+                  long    112, 48, 32, 32
+  sizeNames       word    @nm256, @nm128, @nm64, @nm32
+  nm256           byte    "clock in 256 x 128", 0
+  nm128           byte    "clock in 128 x 64", 0
+  nm64            byte    "clock in 64 x 32", 0
+  nm32            byte    "clock in 32 x 32", 0
+
+VAR
+
+    long    chainIndex
+    long    maxRows
+    long    maxColumns
+    long    nowMs
+
+PUB go() | idx, pArea
+'' Run the placement test.
+''
+
+    utils.beginSuite(@"morphPlace placeGroup and removeGroup")
+    chainIndex := hub75Bffrs.indexForHub75ChainId(hub75Bffrs.HUB75_ADAPTER_1)
+    display.start(display.HUB75_ADAPTER_1)
+    maxColumns := hub75Bffrs.maxDisplayColumns(chainIndex)
+    maxRows := hub75Bffrs.maxDisplayRows(chainIndex)
+    nowMs := START_MS
+
+    repeat idx from 0 to NUM_SIZES - ONE
+        pArea := @sizeAreas + idx * AREA_FIELDS * BYTES_PER_LONG
+        checkFit(@@sizeNames[idx], LONG[pArea][AREA_LEFT_IDX], LONG[pArea][AREA_TOP_IDX], LONG[pArea][AREA_WIDTH_IDX], LONG[pArea][AREA_HEIGHT_IDX], groupA.ROT_0)
+    checkFit(@"clock in portrait 48 x 128 at ROT_270", PORTRAIT_LEFT, 0, PORTRAIT_WIDTH, maxRows, groupA.ROT_270)
+    checkFit(@"clock in odd 100 x 37", ODD_LEFT, ODD_TOP, ODD_WIDTH, ODD_HEIGHT, groupA.ROT_0)
+    groupA.setThickness(ONE)
+    checkFit(@"clock at thickness 1 in 256 x 128", 0, 0, maxColumns, maxRows, groupA.ROT_0)
+    groupA.useAutoThickness()
+    removeWaitA()                                               ' A holds the whole display: free it first
+    findSmallest()
+    checkRefusals()
+    checkOverlap()
+    display.commitScreenToPanelSet()
+    utils.finish()
+
+PRI checkFit(pName, left, top, width, height, rot) | status, usedW, usedH, litLeft, litTop, litRight, litBottom
+' Place the 20:08 clock in an area and read back where its pixels landed.
+
+    display.clearScreen()
+    status, usedW, usedH := groupA.placeGroup(hub75Bffrs.HUB75_ADAPTER_1, left, top, width, height, groupA.GRP_CLOCK, groupA.LAYOUT_HH_MM, rot, color.cOrange, CLOCK_VALUE)
+    frame()
+#IFDEF MORPH_BREAK_PLACE
+    usedW += ONE
+#ENDIF
+    litLeft, litTop, litRight, litBottom := probe.litBox(chainIndex, left, top, width, height)
+    debug("FIT      ", zstr_(pName), "  status=", sdec_(status), "  used=", udec_(usedW), "x", udec_(usedH), "  lit=(", sdec_(litLeft), ",", sdec_(litTop), ")-(", sdec_(litRight), ",", sdec_(litBottom), ")")
+    utils.checkEqual(status, pName, morphStatus.SUCCESS)
+    utils.checkEqual(usedW <= width and usedH <= height, @"  ... the size used fits the area", TRUE)
+    utils.checkEqual(litRight - litLeft + ONE == usedW and litBottom - litTop + ONE == usedH, @"  ... the lit pixels span exactly the size used", TRUE)
+    utils.checkEqual(abs ((litLeft - left) - (left + width - ONE - litRight)) <= ONE and abs ((litTop - top) - (top + height - ONE - litBottom)) <= ONE, @"  ... centred within one pixel", TRUE)
+
+PRI findSmallest() | status, bestW, bestH, areaW, areaH
+' The smallest area (width by height) that places a one-digit counter: reported, then its neighbours refused.
+
+    bestW := bestH := 0
+    repeat areaH from ONE to SMALL_AREA_LIMIT
+        repeat areaW from ONE to SMALL_AREA_LIMIT
+            if bestW == 0
+                status, _, _ := groupB.placeGroup(hub75Bffrs.HUB75_ADAPTER_1, SMALL_LEFT, SMALL_TOP, areaW, areaH, groupB.GRP_UP_COUNTER, groupB.LAYOUT_1_DIGIT, groupB.ROT_0, color.cGreen, SMALL_VALUE)
+                if status == morphStatus.SUCCESS
+                    bestW := areaW
+                    bestH := areaH
+    debug("SMALLEST one digit places in ", udec_(bestW), " x ", udec_(bestH))
+    utils.checkEqual(bestW * bestH > 0, @"smallest area for a one-digit group found (see SMALLEST)", TRUE)
+    status, _, _ := groupC.placeGroup(hub75Bffrs.HUB75_ADAPTER_1, NEIGHBOUR_LEFT, SMALL_TOP, bestW - ONE, bestH, groupC.GRP_UP_COUNTER, groupC.LAYOUT_1_DIGIT, groupC.ROT_0, color.cGreen, SMALL_VALUE)
+    utils.checkEqual(status, @"  ... one column narrower is too small", morphStatus.E_AREA_TOO_SMALL)
+    status, _, _ := groupC.placeGroup(hub75Bffrs.HUB75_ADAPTER_1, NEIGHBOUR_LEFT, SMALL_TOP, bestW, bestH - ONE, groupC.GRP_UP_COUNTER, groupC.LAYOUT_1_DIGIT, groupC.ROT_0, color.cGreen, SMALL_VALUE)
+    utils.checkEqual(status, @"  ... one row shorter is too small", morphStatus.E_AREA_TOO_SMALL)
+    removeWaitB()
+
+PRI checkRefusals() | beforeSum
+
+    ' group A stays placed through every refused call
+    display.clearScreen()
+    groupA.placeGroup(hub75Bffrs.HUB75_ADAPTER_1, 0, 0, KEEP_WIDTH, KEEP_HEIGHT, groupA.GRP_CLOCK, groupA.LAYOUT_HH_MM, groupA.ROT_0, color.cOrange, CLOCK_VALUE)
+    frame()
+    beforeSum := screenSum()
+    refuse(@"refuse an area too small (clock in 10 x 5)", hub75Bffrs.HUB75_ADAPTER_1, 0, REFUSE_TOP, TINY_WIDTH, TINY_HEIGHT, groupA.GRP_CLOCK, groupA.LAYOUT_HH_MM, CLOCK_VALUE, morphStatus.E_AREA_TOO_SMALL)
+    refuse(@"refuse an unknown adapter", BAD_ADAPTER, 0, REFUSE_TOP, REFUSE_WIDTH, REFUSE_HEIGHT, groupA.GRP_CLOCK, groupA.LAYOUT_HH_MM, CLOCK_VALUE, morphStatus.E_UNKNOWN_ADAPTER)
+    refuse(@"refuse an area off the display", hub75Bffrs.HUB75_ADAPTER_1, OFF_LEFT, REFUSE_TOP, OFF_WIDTH, OFF_HEIGHT, groupA.GRP_CLOCK, groupA.LAYOUT_HH_MM, CLOCK_VALUE, morphStatus.E_BAD_AREA)
+    refuse(@"refuse an empty area", hub75Bffrs.HUB75_ADAPTER_1, 0, REFUSE_TOP, 0, OFF_HEIGHT, groupA.GRP_CLOCK, groupA.LAYOUT_HH_MM, CLOCK_VALUE, morphStatus.E_BAD_AREA)
+    refuse(@"refuse an unknown type", hub75Bffrs.HUB75_ADAPTER_1, 0, REFUSE_TOP, REFUSE_WIDTH, REFUSE_HEIGHT, BAD_TYPE, groupA.LAYOUT_4_DIGITS, 0, morphStatus.E_UNKNOWN_TYPE)
+    refuse(@"refuse a clock with a digits layout", hub75Bffrs.HUB75_ADAPTER_1, 0, REFUSE_TOP, REFUSE_WIDTH, REFUSE_HEIGHT, groupA.GRP_CLOCK, groupA.LAYOUT_4_DIGITS, 0, morphStatus.E_UNKNOWN_LAYOUT)
+    refuse(@"refuse a counter with a clock layout", hub75Bffrs.HUB75_ADAPTER_1, 0, REFUSE_TOP, REFUSE_WIDTH, REFUSE_HEIGHT, groupA.GRP_UP_COUNTER, groupA.LAYOUT_HH_MM, 0, morphStatus.E_UNKNOWN_LAYOUT)
+    refuse(@"refuse 10000 on four digits", hub75Bffrs.HUB75_ADAPTER_1, 0, REFUSE_TOP, REFUSE_WIDTH, REFUSE_HEIGHT, groupA.GRP_UP_COUNTER, groupA.LAYOUT_4_DIGITS, FOUR_DIGITS + ONE, morphStatus.E_VALUE_OUT_OF_RANGE)
+    refuse(@"refuse 24:00 on a clock", hub75Bffrs.HUB75_ADAPTER_1, 0, REFUSE_TOP, REFUSE_WIDTH, REFUSE_HEIGHT, groupA.GRP_CLOCK, groupA.LAYOUT_HH_MM, groupA.MAX_CLOCK_MINUTES + ONE, morphStatus.E_VALUE_OUT_OF_RANGE)
+    frame()
+    utils.checkEqual(screenSum(), @"  ... the refused calls drew nothing and moved nothing", beforeSum)
+    utils.checkEqual(groupA.isPlaced(), @"  ... and the group is still placed", TRUE)
+    utils.checkEqual(groupC.removeGroup(), @"removeGroup refuses a group that is not placed", morphStatus.E_NOT_PLACED)
+    removeWaitA()
+
+PRI refuse(pName, adapter, left, top, width, height, grpType, layout, value, expected) | status
+
+    status, _, _ := groupA.placeGroup(adapter, left, top, width, height, grpType, layout, groupA.ROT_0, color.cOrange, value)
+    utils.checkEqual(status, pName, expected)
+
+PRI checkOverlap() | status, sumB, overlapLeft
+
+    display.clearScreen()
+    status, _, _ := groupA.placeGroup(hub75Bffrs.HUB75_ADAPTER_1, OVERLAP_LEFT, OVERLAP_TOP, OVERLAP_WIDTH, OVERLAP_HEIGHT, groupA.GRP_UP_COUNTER, groupA.LAYOUT_2_DIGITS, groupA.ROT_0, color.cOrange, A_VALUE)
+    frame()
+    utils.checkEqual(status, @"group A placed", morphStatus.SUCCESS)
+    overlapLeft := OVERLAP_LEFT + OVERLAP_WIDTH - ONE                ' shares A's right column
+#IFDEF MORPH_BREAK_PLACE
+    overlapLeft += ONE
+#ENDIF
+    sumB := areaSum(overlapLeft, OVERLAP_TOP, OVERLAP_WIDTH, OVERLAP_HEIGHT)
+    status, _, _ := groupB.placeGroup(hub75Bffrs.HUB75_ADAPTER_1, overlapLeft, OVERLAP_TOP, OVERLAP_WIDTH, OVERLAP_HEIGHT, groupB.GRP_UP_COUNTER, groupB.LAYOUT_2_DIGITS, groupB.ROT_0, color.cGreen, A_VALUE)
+    frame()
+    utils.checkEqual(status, @"group B overlapping A by one column is refused", morphStatus.E_AREA_OVERLAP)
+    utils.checkEqual(areaSum(overlapLeft, OVERLAP_TOP, OVERLAP_WIDTH, OVERLAP_HEIGHT), @"  ... and drew nothing", sumB)
+    utils.checkEqual(groupB.isPlaced(), @"  ... and is not placed", FALSE)
+    status, _, _ := groupB.placeGroup(hub75Bffrs.HUB75_ADAPTER_1, OVERLAP_LEFT + OVERLAP_WIDTH, OVERLAP_TOP, OVERLAP_WIDTH, OVERLAP_HEIGHT, groupB.GRP_UP_COUNTER, groupB.LAYOUT_2_DIGITS, groupB.ROT_0, color.cGreen, A_VALUE)
+    frame()
+    utils.checkEqual(status, @"group B touching A edge to edge is placed", morphStatus.SUCCESS)
+    status, _, _ := groupC.placeGroup(hub75Bffrs.HUB75_ADAPTER_1, OVERLAP_LEFT, OVERLAP_TOP, OVERLAP_WIDTH, OVERLAP_HEIGHT, groupC.GRP_UP_COUNTER, groupC.LAYOUT_2_DIGITS, groupC.ROT_0, color.cTeal, C_VALUE)
+    utils.checkEqual(status, @"group C in A's area while A is placed is refused", morphStatus.E_AREA_OVERLAP)
+    utils.checkEqual(groupA.removeGroup(), @"removeGroup starts A's morph-out", morphStatus.SUCCESS)
+    frame()
+    status, _, _ := groupC.placeGroup(hub75Bffrs.HUB75_ADAPTER_1, OVERLAP_LEFT, OVERLAP_TOP, OVERLAP_WIDTH, OVERLAP_HEIGHT, groupC.GRP_UP_COUNTER, groupC.LAYOUT_2_DIGITS, groupC.ROT_0, color.cTeal, C_VALUE)
+    utils.checkEqual(status, @"  ... C is still refused while A morphs out", morphStatus.E_AREA_OVERLAP)
+    waitRemovedA()
+    utils.checkEqual(groupA.isPlaced(), @"  ... A's morph-out completes and frees its area", FALSE)
+    utils.checkEqual(areaSum(OVERLAP_LEFT, OVERLAP_TOP, OVERLAP_WIDTH, OVERLAP_HEIGHT), @"  ... and leaves A's area dark", 0)
+    status, _, _ := groupC.placeGroup(hub75Bffrs.HUB75_ADAPTER_1, OVERLAP_LEFT, OVERLAP_TOP, OVERLAP_WIDTH, OVERLAP_HEIGHT, groupC.GRP_UP_COUNTER, groupC.LAYOUT_2_DIGITS, groupC.ROT_0, color.cTeal, C_VALUE)
+    utils.checkEqual(status, @"  ... then C places in the freed area", morphStatus.SUCCESS)
+    removeWaitB()
+    removeWaitC()
+
+PRI removeWaitA()
+' Remove group A and animate until its morph-out completes (Spin2 cannot pass an object, so one per group).
+
+    groupA.removeGroup()
+    waitRemovedA()
+
+PRI removeWaitB() | steps
+
+    groupB.removeGroup()
+    steps := 0
+    repeat while groupB.isPlaced() and steps++ < MAX_REMOVE_STEPS
+        frame()
+
+PRI removeWaitC() | steps
+
+    groupC.removeGroup()
+    steps := 0
+    repeat while groupC.isPlaced() and steps++ < MAX_REMOVE_STEPS
+        frame()
+
+PRI waitRemovedA() | steps
+' Animate until group A's morph-out completes (or MAX_REMOVE_STEPS frames; the check after it reports which).
+
+    steps := 0
+    repeat while groupA.isPlaced() and steps++ < MAX_REMOVE_STEPS
+        frame()
+
+PRI frame()
+' Draw every group once at the next frame time.
+
+    nowMs += STEP_MS
+    groupA.animate(nowMs)
+    groupB.animate(nowMs)
+    groupC.animate(nowMs)
+
+PRI areaSum(left, top, width, height) : sum
+
+    sum := probe.areaChecksum(chainIndex, left, top, width, height)
+
+PRI screenSum() : sum
+
+    sum := areaSum(0, 0, maxColumns, maxRows)
+
+CON ' ---- License ----
+
+{{
+
+ -------------------------------------------------------------------------------------------------
+  MIT License
+
+  Copyright (c) 2021 Iron Sheep Productions, LLC
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+ =================================================================================================
+}}

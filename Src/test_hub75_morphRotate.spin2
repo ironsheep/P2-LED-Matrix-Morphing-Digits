@@ -10,7 +10,7 @@
 ''
 '' =================================================================================================
 
-{ Task 167: proves group rotation (isp_hub75_morphCounters.setRotation(), spec R-7.1-7.3) on the quad.
+{ Task 167: proves group rotation (isp_hub75_morphCounters.placeGroup()'s rotation, spec R-7.1-7.3) on the quad.
 
   The reference is the same group drawn unturned (ROT_0): its pixels are read back into refPixels, by
   group coordinate. A turned group must put every one of those pixels where the turn sends it, worked out
@@ -26,7 +26,7 @@
     2. each rotation straddling the panel seams (column 128, row 64), and touching the display's right and
        bottom edges
     3. all four rotations placed side by side at once
-    4. an unknown rotation is refused with E_UNKNOWN_ROTATION and the setting stays what it was
+    4. a placement with an unknown rotation is refused with E_UNKNOWN_ROTATION and changes nothing on the display
 
   By eye (compile with -D MORPH_BYEYE): four groups, one per rotation, count up from 1 with 1 s moves for
   BYEYE_MS (1 -> 2 -> 3 ...); in each group the segments must move in its turned direction.
@@ -61,8 +61,10 @@ CON ' ---- Group under test ----
   MIXED_GAP = 4                                                 ' space between the side-by-side groups
   MIXED_ROW = 70
   BAD_ROTATION = 4                                              ' no rotation has this value
+  DIGIT_INSET = (SEG_THICKNESS + 1) / 2                         ' the digit is L + 2 ceil(T/2) wide, 2W - T tall (morph7seg)
+  AREA_WIDTH = SEG_LENGTH + 2 * DIGIT_INSET                     ' a one-digit group's area that fits exactly that digit
+  AREA_HEIGHT = 2 * AREA_WIDTH - SEG_THICKNESS
   ONE = 1
-  HALF = 2                                                      ' a seam-straddling group is centred on the seam
   MIN_LIT_PIXELS = 50                                           ' an 8 of thickness 3 lights far more than this
 
 CON ' ---- By-eye section ----
@@ -70,7 +72,6 @@ CON ' ---- By-eye section ----
   BYEYE_MS = 40_000
   BYEYE_MOVE_MS = 1_000
   BYEYE_HOLD_MS = 1_000
-  BYEYE_LENGTH = 20
   BYEYE_THICKNESS = 4
   BYEYE_FROM = 1
   BYEYE_SPACING = 64                                            ' one group per quarter of the display's width
@@ -97,7 +98,7 @@ VAR
     byte    refRest[MAX_GROUP_PIXELS * BYTES_PER_PIXEL]
     byte    refMid[MAX_GROUP_PIXELS * BYTES_PER_PIXEL]
 
-PUB go() | rot, mismatches, row, column, placedW, placedH
+PUB go() | rot, mismatches, row, column, placedW, placedH, status
 '' Run the rotation test: references at ROT_0, then each turn in open space, at the seams and edges, side by side.
 ''
 
@@ -107,7 +108,8 @@ PUB go() | rot, mismatches, row, column, placedW, placedH
     maxColumns := hub75Bffrs.maxDisplayColumns(chainIndex)
     maxRows := hub75Bffrs.maxDisplayRows(chainIndex)
     repeat rot from 0 to LAST_ROTATION
-        group[rot].initialize(chainIndex, maxRows, maxColumns)
+        group[rot].setThickness(SEG_THICKNESS)
+        group[rot].setProfile(timeBase.PROFILE_TAIL)
     nowMs := START_MS
 
     ' references: the unturned group at rest and half way through 6 -> 7
@@ -135,8 +137,8 @@ PUB go() | rot, mismatches, row, column, placedW, placedH
     ' the panel seams, and the display's right and bottom edges
     repeat rot from group.ROT_0 to group.ROT_270
         display.clearScreen()
-        row := SEAM_ROW - turnedHeight(rot) / HALF
-        column := SEAM_COLUMN - turnedWidth(rot) / HALF
+        row := SEAM_ROW - turnedHeight(rot) / group.HALF
+        column := SEAM_COLUMN - turnedWidth(rot) / group.HALF
         placeAndRest(0, rot, row, column, REST_VALUE)
         utils.checkEqual(compare(@refRest, rot, row, column), rotationName(rot, @"across both seams: pixels off"), 0)
         display.clearScreen()
@@ -158,12 +160,14 @@ PUB go() | rot, mismatches, row, column, placedW, placedH
         column += turnedWidth(rot) + MIXED_GAP
     utils.checkEqual(mismatches, @"four turns side by side: pixels off", 0)
 
-    ' refusal
-    utils.checkEqual(group[0].setRotation(group.ROT_180), @"setRotation accepts ROT_180", morphStatus.SUCCESS)
-    utils.checkEqual(group[0].setRotation(BAD_ROTATION), @"setRotation refuses an unknown rotation", morphStatus.E_UNKNOWN_ROTATION)
+    ' refusal: an unknown rotation changes nothing
     display.clearScreen()
-    placeAndRestKeep(0, OPEN_ROW, OPEN_COLUMN, REST_VALUE)
-    utils.checkEqual(compare(@refRest, group.ROT_180, OPEN_ROW, OPEN_COLUMN), @"  ... and the refused call left ROT_180 in place", 0)
+    placeAndRest(0, group.ROT_180, OPEN_ROW, OPEN_COLUMN, REST_VALUE)
+    status, placedW, placedH := group[0].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, OPEN_COLUMN, OPEN_ROW, AREA_WIDTH, AREA_HEIGHT, group.GRP_UP_COUNTER, group.LAYOUT_1_DIGIT, BAD_ROTATION, color.cOrange, MOVE_FROM)
+    utils.checkEqual(status, @"placeGroup refuses an unknown rotation", morphStatus.E_UNKNOWN_ROTATION)
+    nowMs += GAP_MS
+    group[0].animate(nowMs)
+    utils.checkEqual(compare(@refRest, group.ROT_180, OPEN_ROW, OPEN_COLUMN), @"  ... and the refused call left the ROT_180 group as it was", 0)
 
     display.commitScreenToPanelSet()
 #IFDEF MORPH_BYEYE
@@ -171,17 +175,16 @@ PUB go() | rot, mismatches, row, column, placedW, placedH
 #ENDIF
     utils.finish()
 
-PRI placeAndRest(grpIdx, rot, row, column, value) : width, height
+PRI placeAndRest(grpIdx, rot, row, column, value) : width, height | status, areaW, areaH
+' Place group grpIdx turned rot, in the area that fits its digit exactly (top-left at row, column), showing
+' value at rest, and draw it.
 
-    group[grpIdx].setRotation(rot)
-    width, height := placeAndRestKeep(grpIdx, row, column, value)
-
-PRI placeAndRestKeep(grpIdx, row, column, value) : width, height
-' Place group grpIdx (its rotation as set) showing value at rest, and draw it.
-
-    group[grpIdx].setProfile(timeBase.PROFILE_TAIL)
-    width, height := group[grpIdx].placeDigitGroup(row, column, group.GRP_UP_COUNTER, ONE, SEG_THICKNESS, SEG_LENGTH, value, color.cOrange)
+    areaW := (rot == group.ROT_90 or rot == group.ROT_270) ? AREA_HEIGHT : AREA_WIDTH
+    areaH := (rot == group.ROT_90 or rot == group.ROT_270) ? AREA_WIDTH : AREA_HEIGHT
     group[grpIdx].setMoveDuration(MOVE_MS)
+    status, width, height := group[grpIdx].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, column, row, areaW, areaH, group.GRP_UP_COUNTER, group.LAYOUT_1_DIGIT, rot, color.cOrange, value)
+    if status <> morphStatus.SUCCESS
+        debug("PLACE    refused  status=", sdec_(status))
     nowMs += GAP_MS
     group[grpIdx].animate(nowMs)
 
@@ -199,7 +202,7 @@ PRI litPixels(pRef) : nLit | idx
 
     nLit := 0
     repeat idx from 0 to groupWidth * groupHeight - ONE
-        if BYTE[pRef][idx * BYTES_PER_PIXEL] | BYTE[pRef][idx * BYTES_PER_PIXEL + ONE] | BYTE[pRef][idx * BYTES_PER_PIXEL + HALF]
+        if BYTE[pRef][idx * BYTES_PER_PIXEL] | BYTE[pRef][idx * BYTES_PER_PIXEL + ONE] | BYTE[pRef][idx * BYTES_PER_PIXEL + group.HALF]
             nLit++
 
 PRI turnedWidth(rot) : width
@@ -266,10 +269,11 @@ PRI showByEye() | rot, column, startMs
     display.clearScreen()
     column := OPEN_COLUMN
     repeat rot from group.ROT_0 to group.ROT_270
-        group[rot].setRotation(rot)
+        group[rot].removeGroup()
+        group[rot].setThickness(BYEYE_THICKNESS)
         group[rot].setMoveDuration(BYEYE_MOVE_MS)
         group[rot].setHoldDuration(BYEYE_HOLD_MS)
-        group[rot].placeDigitGroup(OPEN_ROW, column, group.GRP_UP_COUNTER, ONE, BYEYE_THICKNESS, BYEYE_LENGTH, BYEYE_FROM, color.cOrange)
+        group[rot].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, column, OPEN_ROW, BYEYE_SPACING, maxRows - OPEN_ROW, group.GRP_UP_COUNTER, group.LAYOUT_1_DIGIT, rot, color.cOrange, BYEYE_FROM)
         column += BYEYE_SPACING
     debug("BYEYE    four groups (ROT_0, ROT_90, ROT_180, ROT_270, left to right) counting up for ", udec_(BYEYE_MS), " ms")
     timeBase.reset()

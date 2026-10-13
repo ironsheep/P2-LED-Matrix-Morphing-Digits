@@ -37,6 +37,15 @@ CON ' status codes (a new code takes the next unused negative value; a value is 
   E_BAD_TAIL_LENGTH = -9                                        ' a tail shorter than isp_hub75_morphTime's MIN_TAIL_PIXELS
   E_BAD_COMMAND = -10                                           ' a segment command byte whose style is unknown or not one this segment can do
   E_UNKNOWN_ROTATION = -11                                      ' a rotation that is not isp_hub75_morphCounters' ROT_0, ROT_90, ROT_180 or ROT_270
+  E_UNKNOWN_TYPE = -12                                          ' a group type that is not one of isp_hub75_morphCounters' GRP_ types
+  E_UNKNOWN_LAYOUT = -13                                        ' a layout that is not one of isp_hub75_morphCounters' LAYOUT_ values, or not one for the group's type
+  E_AREA_TOO_SMALL = -14                                        ' an area too small for the group's digits (or for its fixed stroke)
+  E_AREA_OVERLAP = -15                                          ' an area that shares a pixel with a placed group's area on the same display
+  E_TOO_MANY_GROUPS = -16                                       ' every entry of the placed-area table is in use (isp_hub75_morphCounters' MAX_GROUPS)
+  E_BAD_AREA = -17                                              ' an empty area, or one that does not lie on the display
+  E_UNKNOWN_ADAPTER = -18                                       ' an adapter that is not HUB75_ADAPTER_1, _2 or _3
+  E_VALUE_OUT_OF_RANGE = -19                                    ' a value outside what the group can show
+  E_NOT_PLACED = -20                                            ' a call that needs a placed group, on one that is not placed
 
 PUB null()
 '' This is not a top level object

@@ -1,7 +1,7 @@
 '' =================================================================================================
 ''
 ''   File....... isp_hub75_morphCounters.spin2
-''   Purpose.... Manage groups of morphing 7-segment digits
+''   Purpose.... One group of morphing 7-segment digits: placed in an area, sized and centred to fit, turned, removed
 ''   Authors.... Stephen M Moraco
 ''               -- Copyright (c) 2021 Iron Sheep Productions, LLC
 ''               -- see below for terms of use
@@ -11,6 +11,22 @@
 ''   Version.... v1.0.0
 ''
 '' =================================================================================================
+
+{ A group is a row of digits (a counter, a value or a clock) drawn in one area of one display.
+
+  Usage:
+    1. optional settings before placement: setSegmentStyle(), setThickness(), setProfile(), setTailLength(),
+       setMoveDuration(), setHoldDuration(), setEasing()
+    2. status, width, height := placeGroup(adapter, left, top, width, height, type, layout, rotation, color, value)
+       - the group finds the largest digits that fit the area (turned), centres itself, and returns the size
+         it used; it never draws outside the area (spec R-8.1-8.4)
+       - an area that shares a pixel with another placed group's area on the same display is refused (R-8.5)
+    3. every frame: animate(nowMs); when isHoldComplete(nowMs), nextTimeCycle() starts the next value
+    4. removeGroup(): the digits morph out; the area is free once that completes (isPlaced() turns FALSE)
+
+  Every call that can be refused returns a status from isp_hub75_morphStatus, and a refused call changes
+  nothing (R-10.1, R-10.2).
+}
 
 CON ' library version -- values are written by tools/stamp_version.sh, never edit by hand
 
@@ -34,71 +50,110 @@ CON ' group rotation (spec R-7.1): the names and meanings match the driver's con
     ' two combine (R-7.3).
     #0, ROT_0, ROT_90, ROT_180, ROT_270
 
-CON ' group types and sizes
+CON ' group types: how the value changes (spec R-3.1)
 
-#0, GRP_UNKNOWN, GRP_CLOCK, GRP_UP_COUNTER, GRP_DOWN_COUNTER, GRP_DIGITS, GRP_DIGITS_RANDOM
+    #0, GRP_UNKNOWN, GRP_CLOCK, GRP_UP_COUNTER, GRP_DOWN_COUNTER, GRP_DIGITS, GRP_DIGITS_RANDOM
 
-MAX_DIGITS = 6
-LAST_DIGIT = MAX_DIGITS - 1         ' index of the last digit slot (digits[] runs from 0)
+CON ' layouts: how the group looks (digits, and colons between clock fields)
 
-GAP_LARGE_DIGITS = 4
+    #1, LAYOUT_1_DIGIT, LAYOUT_2_DIGITS, LAYOUT_3_DIGITS, LAYOUT_4_DIGITS, LAYOUT_5_DIGITS, LAYOUT_6_DIGITS
+    #20, LAYOUT_MM_SS, LAYOUT_HH_MM, LAYOUT_HH_MM_SS
 
-CON ' the group's segment shape and color (one mask and one ramp serve every digit)
+    MAX_DIGITS = 6
+    LAST_DIGIT = MAX_DIGITS - 1     ' index of the last digit slot (digits[] runs from 0)
+    MAX_COLONS = 2
+    FIELD_DIGITS = 2                ' a clock field (hours, minutes, seconds) is two digits
+    MINUTES_PER_HOUR = 60
+    HOURS_PER_DAY = 24
+    MAX_CLOCK_MINUTES = HOURS_PER_DAY * MINUTES_PER_HOUR - 1    ' a clock's value: minutes since midnight
+    DECIMAL_BASE = 10
 
+CON ' sizing a group to its area (spec R-8.1)
+
+    MIN_SEGMENT_LENGTH = 2          ' the shortest segment placement will use: a digit 4 x 7 at thickness 1
+    AUTO_THICKNESS_DIVISOR = 4      ' with no setThickness(): thickness = segment length / 4, rounded, at least 1 ...
+    AUTO_THICKNESS_ROUND = AUTO_THICKNESS_DIVISOR / 2
+    GAP_DIVISOR = 4                 ' space between digits: a quarter of a digit's width, at least MIN_GAP
+    MIN_GAP = 1
+    MIN_DOT = 2                     ' a colon dot is the stroke's thickness square, at least MIN_DOT
+    DIM_PERCENT = 25                ' the colon's dim phase: this percent of the group's color
     NEXT_PIXEL = 1                  ' one pixel further on
-    DOT_PIXELS = 4                  ' a seconds dot is 2 x 2: pixel index bit 0 is its column, bit 1 its row
-    DOT_SIDE_MASK = 1
-    DOT_SIDE_SHIFT = 1
-    MAX_MASK_BYTES = 2048           ' the coverage mask buffer: thickness x segment length; U5 sets the final size (task 168)
+    ONE_STEP = 1                    ' a counter's step
+    HALF = 2
+    MAX_MASK_BYTES = 2048           ' the coverage mask buffer: thickness x segment length
+
+CON ' the placed-area table: one entry per placed group, shared by every group object (spec R-8.5)
+
+    MAX_GROUPS = 10                 ' groups placed at once. Measured (task 168, 2026-10-12, pnut-ts -m on the simple demo): one
+                                    '   group's VAR is 9_224 bytes; the quad's 8-bit driver and a program around it leave room
+                                    '   for 10 with 8 KB of hub to spare. Spec R-9.5: the README states this maximum.
+    #0, AREA_IN_USE, AREA_CHAIN, AREA_LEFT, AREA_TOP, AREA_RIGHT, AREA_BOTTOM
+    AREA_LONGS = AREA_BOTTOM + 1
+    NO_SLOT = -1                    ' claimArea(): no entry found yet
 
 OBJ
 
     pixels              : "isp_hub75_screenUtils"
+    hub75Bffrs          : "isp_hub75_hwBufferAccess"    ' adapter ids and the display's size
     digits[MAX_DIGITS]  : "isp_hub75_morph7seg"
     timeBase            : "isp_hub75_morphTime"     ' motion constants only: DEFAULT_MOVE_MS and the EASE_ styles
     morphStatus         : "isp_hub75_morphStatus"   ' the status codes the setters return (a refused call changes nothing, spec R-10.2)
     morphColor          : "isp_hub75_morphColor"    ' the group's intensity ramp
     morphMask           : "isp_hub75_morphMask"     ' the group's segment coverage mask
+    colorUtils          : "isp_hub75_colorUtils"    ' the colon's dim color
+
+DAT ' placed areas, one table for every group object of the program (AREA_ fields, inclusive display coordinates)
+
+    areaTable       long    0[MAX_GROUPS * AREA_LONGS]
 
 VAR ' per group
 
-    long    numberDigits
+    long    bDefaultsSet        ' TRUE once the settings below hold their defaults (done on first use)
+    long    bPlaced             ' TRUE from placement until removeGroup()'s morph-out completes
+    long    bRemoving           ' TRUE while removeGroup()'s morph-out runs
+    long    areaSlot            ' this group's entry in areaTable (meaningful while bPlaced)
+    long    chainIndex
     long    groupType
+    long    groupLayout
+    long    numberDigits
     long    currValue
     long    valueCap
     long    maxValueDivisor
-    long    chainIndex
+    long    groupColor
 
-    ' calc values
-    long    digitHeight
+    ' sizes from placement
     long    digitWidth
-    long    segmentThickness
     long    segmentLength
+    long    digitGap
+    long    dotSize
+    long    colonCount
+    long    colonX[MAX_COLONS]  ' each colon's dots: left column, and the two dots' top rows (group coordinates)
+    long    dotUpperY
+    long    dotLowerY
 
-    ' segment shape and motion profile (set before placement; the profile also after)
+    ' settings
+    long    rotation            ' ROT_0 .. ROT_270 (from placement)
     long    endStyle            ' morphMask.END_SQUARE or END_ANGLED
     long    crossSection        ' morphMask.SECTION_FLAT or SECTION_TUBE
+    long    fixedThickness      ' the stroke thickness when bThicknessSet ...
+    long    bThicknessSet       ' ... TRUE once setThickness() set it; FALSE: sized with the digits
     long    motionProfile       ' timeBase.PROFILE_EDGE or PROFILE_TAIL
     long    tailPixels          ' PROFILE_TAIL's tail when bTailSet ...
     long    bTailSet            ' ... TRUE once setTailLength() set it; FALSE: a quarter of the segment's length
     long    ramp[morphColor.RAMP_LEVELS]
-    long    digitHspace
-
-    ' display delay times
-    long    digitVal
-
-    ' variables when CLOCK is type
-    long    hours
-    long    hours24
-    long    minutes
-    long    rotation            ' ROT_0 .. ROT_270 (setRotation(); applied at placement)
-    long    maxPhysicalRows     ' the display, as mounted
-    long    maxPhysicalCols
+    long    bMaskBuilt          ' TRUE once mask holds the shape below (kept when placed again at that shape)
+    long    maskThickness
+    long    maskLength
+    long    maskEnd
+    long    maskSection
+    long    bRampBuilt          ' TRUE once ramp holds this adapter's color below
+    long    rampChain
+    long    rampColor
     long    drawCtx[digits.CTX_LONGS]   ' this group's drawing context, shared by its digits (morph7seg CTX_ fields)
-    long    dotRow
-    long    dotCol
-    long    dotVOffset
 
+    ' clock
+    long    hours
+    long    minutes
     long    initValue[MAX_DIGITS]
 
     ' time-based motion and cadence
@@ -108,107 +163,159 @@ VAR ' per group
     long    holdStartMs         ' nowMs of the animate() that saw the transition complete
     long    bHoldRunning        ' TRUE from that animate() until nextTimeCycle() starts the next value
 
-    ' flags
     byte    mask[MAX_MASK_BYTES]
-    byte    showSecondIndicator
-    byte    isSetup
 
 PUB null()
-    '' This is NOT a top level object
+'' This is NOT a top level object
+''
 
 PUB versionString() : pVersion
-    '' Return the address of the zero-terminated library version text, e.g. "v1.0.0"
+'' Return the address of the zero-terminated library version text, e.g. "v1.0.0"
+''
+'' @returns pVersion - hub address of the version text
+
     pVersion := @"v1.0.0"     ' MORPH_VERSION_STR -- written by tools/stamp_version.sh
 
-PUB initialize(nChainIndex, nPhysicalRows, nPhysicalColumns) | digitIndex
-    '' init this opbject so it knows nothing but knows it knows nothing ;-)
-    isSetup := FALSE
-    groupType := GRP_UNKNOWN
-    chainIndex := nChainIndex
-    maxPhysicalRows := nPhysicalRows
-    maxPhysicalCols := nPhysicalColumns
-    rotation := ROT_0
-    repeat digitIndex from 0 to MAX_DIGITS -1
-        digits[digitIndex].initialize(nChainIndex, nPhysicalRows, nPhysicalColumns)
-    ' the segments default to the same motion when they are initialized
-    moveDurationMs := timeBase.DEFAULT_MOVE_MS
-    moveEaseStyle := timeBase.EASE_LINEAR
-    holdDurationMs := DEFAULT_HOLD_MS
-    bHoldRunning := FALSE
-    endStyle := morphMask.END_ANGLED
-    crossSection := morphMask.SECTION_FLAT
-    motionProfile := timeBase.DEFAULT_PROFILE
-    bTailSet := FALSE
+PUB placeGroup(adapter, areaLeft, areaTop, areaWidth, areaHeight, grpType, layout, groupRotation, rgbColor, initialValue) : status, usedWidth, usedHeight | chain, rows, columns, segLength, thickness, groupWidth, groupHeight, slot, digitIdx, maxValue, tail
+'' Place this group in an area of an adapter's display: it takes the largest digits that fit the area (turned),
+'' centres itself in it and starts showing initialValue. Placing a group that is already placed moves it (its
+'' old pixels are not erased: removeGroup() morphs them out). A refused call changes nothing.
+''
+'' @param adapter - the display: hub75Bffrs.HUB75_ADAPTER_1, _2 or _3 (one started with display.start())
+'' @param areaLeft, areaTop - the area's top-left pixel on that display, as mounted
+'' @param areaWidth, areaHeight - the area's size in pixels (both at least 1; the area must lie on the display)
+'' @param grpType - GRP_CLOCK, GRP_UP_COUNTER, GRP_DOWN_COUNTER, GRP_DIGITS or GRP_DIGITS_RANDOM
+'' @param layout - LAYOUT_1_DIGIT .. LAYOUT_6_DIGITS for counters and values; LAYOUT_HH_MM for a clock
+'' @param groupRotation - ROT_0, ROT_90 (clockwise), ROT_180 or ROT_270 (counter-clockwise)
+'' @param rgbColor - the group's color, $RRGGBB
+'' @param initialValue - counters and values: 0 to 10^digits - 1; a clock: minutes since midnight, 0 to MAX_CLOCK_MINUTES
+'' @returns status - morphStatus.SUCCESS, or E_UNKNOWN_ADAPTER, E_BAD_AREA, E_UNKNOWN_TYPE, E_UNKNOWN_LAYOUT,
+''   E_UNKNOWN_ROTATION, E_VALUE_OUT_OF_RANGE, E_AREA_TOO_SMALL, E_AREA_OVERLAP or E_TOO_MANY_GROUPS
+'' @returns usedWidth, usedHeight - the size the group uses on the display (0, 0 when refused)
 
-PUB placeDigitGroup(row, column, grpType, nbrDigits, segThickness, segLength, initialValue, rgbColor) : grpWidth, grpHeight | currCol, digitIdx, status, nCols, nRows
-    '' Locate a desired digit group on our screen. Draw initial segements if {initialValue} is NOT off.
-    '' Returns 0, 0 and places nothing when the segment shape is refused (placeGroup() replaces this in task 168).
-    digitHspace := (segLength > 7) ? GAP_LARGE_DIGITS : 1
-    status, nCols, nRows := morphMask.buildMask(@mask, MAX_MASK_BYTES, segThickness, segLength << digits.SUBPIXEL_SHIFT, endStyle, crossSection)
-    if status <> morphStatus.SUCCESS
-        debug("mG: segment shape refused, status=", sdec_(status), " thickness=", udec_(segThickness), " length=", udec_(segLength))
+' Local Variables:
+' @local chain - the adapter's chain index
+' @local rows, columns - the adapter's display, as mounted
+' @local segLength, thickness - the digits' segment length and stroke chosen to fit
+' @local groupWidth, groupHeight - the group's size, unturned
+' @local slot - the areaTable entry the group will hold
+' @local digitIdx - the digit being placed
+' @local maxValue - the largest value the type and layout show
+' @local tail - the snake tail every digit draws with
+
+    ensureDefaults()
+    usedWidth := usedHeight := 0
+    status := morphStatus.SUCCESS
+    if adapter <> hub75Bffrs.HUB75_ADAPTER_1 and adapter <> hub75Bffrs.HUB75_ADAPTER_2 and adapter <> hub75Bffrs.HUB75_ADAPTER_3
+        status := morphStatus.E_UNKNOWN_ADAPTER
     else
+        chain := hub75Bffrs.indexForHub75ChainId(adapter)
+        rows := hub75Bffrs.maxDisplayRows(chain)
+        columns := hub75Bffrs.maxDisplayColumns(chain)
+        if areaWidth < NEXT_PIXEL or areaHeight < NEXT_PIXEL or areaLeft < 0 or areaTop < 0 or areaLeft + areaWidth > columns or areaTop + areaHeight > rows
+            status := morphStatus.E_BAD_AREA
+        elseif grpType < GRP_CLOCK or grpType > GRP_DIGITS_RANDOM
+            status := morphStatus.E_UNKNOWN_TYPE
+        elseif not isLayoutFor(grpType, layout)
+            status := morphStatus.E_UNKNOWN_LAYOUT
+        elseif groupRotation < ROT_0 or groupRotation > ROT_270
+            status := morphStatus.E_UNKNOWN_ROTATION
+        else
+            maxValue := maxValueFor(grpType, layout)
+            if initialValue < 0 or initialValue > maxValue
+                status := morphStatus.E_VALUE_OUT_OF_RANGE
+        if status == morphStatus.SUCCESS
+            segLength, thickness, groupWidth, groupHeight := fitDigits(layout, groupRotation, areaWidth, areaHeight)
+            if segLength == 0
+                status := morphStatus.E_AREA_TOO_SMALL
+            else
+                status, slot := claimArea(chain, areaLeft, areaTop, areaLeft + areaWidth - NEXT_PIXEL, areaTop + areaHeight - NEXT_PIXEL)
+
+    if status == morphStatus.SUCCESS                                ' nothing has changed before this line
+        areaSlot := slot
+        bPlaced := TRUE
+        bRemoving := FALSE
+        bHoldRunning := FALSE
         groupType := grpType
-        numberDigits := nbrDigits
+        groupLayout := layout
+        rotation := groupRotation
+        groupColor := rgbColor
+        numberDigits := layoutDigits(layout)
         currValue := initialValue
-        valueCap := 1
-        repeat nbrDigits
-            valueCap := valueCap * 10
-        maxValueDivisor := valueCap / 10    ' e.g., if we are 3 digits then maxDiv is 100
-        valueCap := valueCap - 1
-        debug("mG:placeDigit rc=(", udec_(row), ",", udec_(column), ") ", udec(grpType), udec(nbrDigits), udec(initialValue), udec(valueCap), ", RGB=(", uhex_long_(rgbColor),")")
-
-        ensureIsSetup()
-
-        morphColor.buildRamp(@ramp, chainIndex, rgbColor)
-        segmentThickness := segThickness
-        segmentLength := segLength
-        digitWidth, digitHeight := digits[0].digitSize(segLength, segThickness)
-
-        grpWidth := (digitWidth + digitHspace) * nbrDigits
+        valueCap := maxValue
+        maxValueDivisor := (valueCap + NEXT_PIXEL) / DECIMAL_BASE
+        if not bMaskBuilt or maskThickness <> thickness or maskLength <> segLength or maskEnd <> endStyle or maskSection <> crossSection
+            morphMask.buildMask(@mask, MAX_MASK_BYTES, thickness, segLength << digits.SUBPIXEL_SHIFT, endStyle, crossSection)
+            maskThickness, maskLength, maskEnd, maskSection := thickness, segLength, endStyle, crossSection
+            bMaskBuilt := TRUE                                      ' a group placed again at the same shape keeps its mask
+        if not bRampBuilt or rampChain <> chain or rampColor <> rgbColor
+            morphColor.buildRamp(@ramp, chain, rgbColor)
+            rampChain, rampColor := chain, rgbColor
+            bRampBuilt := TRUE                                      ' ... and in the same color, its ramp
+        chainIndex := chain
+        setSizes(layout, segLength, thickness)
+        usedWidth, usedHeight := turnedSize(groupWidth, groupHeight)
+        setDrawContext(areaTop + (areaHeight - usedHeight) / HALF, areaLeft + (areaWidth - usedWidth) / HALF, groupWidth, groupHeight)
+        clipToArea(areaLeft, areaTop, areaLeft + areaWidth - NEXT_PIXEL, areaTop + areaHeight - NEXT_PIXEL)
         if groupType == GRP_CLOCK
-            grpWidth := grpWidth + 2 + 1    ' add-in width of dots
-            dotRow := segLength / 2                                 ' group coordinates
-            dotCol := (digitWidth + digitHspace) * 2
-            dotVOffset := segLength + 1
-        grpHeight := digitHeight + 1
-        setDrawContext(row, column, grpWidth, grpHeight)            ' the group's turn and its place on the display
-
-        if groupType == GRP_CLOCK
-            hours := currValue / 60
-            minutes := currValue // 60
-            initValue[0] := hours / 10
-            initValue[1] := hours // 10
-            initValue[2] := minutes / 10
-            initValue[3] := minutes // 10
-            showSecondIndicator := TRUE
+            hours := currValue / MINUTES_PER_HOUR
+            minutes := currValue // MINUTES_PER_HOUR
+            repeat digitIdx from 0 to numberDigits - NEXT_PIXEL
+                initValue[digitIdx] := clockDigit(digitIdx)
         else
             updateInitsFromValue(currValue)
-
-        currCol := 0                                                ' digits are placed in group coordinates
-        repeat digitIdx from 0 to nbrDigits - 1
+        tail := tailX256()
+        repeat digitIdx from 0 to numberDigits - NEXT_PIXEL
+            digits[digitIdx].initialize(chainIndex, rows, columns)
+            digits[digitIdx].setMotion(moveDurationMs, moveEaseStyle)
             digits[digitIdx].setContext(@drawCtx)
-            digits[digitIdx].placeDigit(0, currCol, segLength, segThickness, initValue[digitIdx], @mask, @ramp, tailX256())
-            currCol := currCol + digitWidth + digitHspace
-            if groupType == GRP_CLOCK && digitIdx == 1
-                currCol := currCol + 2 + 1  ' add in dot width
-
+            digits[digitIdx].placeDigit(0, digitX(digitIdx), segLength, thickness, initValue[digitIdx], @mask, @ramp, tail)
         if groupType == GRP_CLOCK
-            showSecondsDots( 0 )
-        if isQuarterTurn()                                          ' the size on the display: turned a quarter, it swaps
-            grpWidth, grpHeight := grpHeight, grpWidth
+            showSecondsDots(0)
+        debug("mG: placed type ", udec_(groupType), " layout ", udec_(groupLayout), " in (", sdec_(areaLeft), ",", sdec_(areaTop), ") ", udec_(areaWidth), "x", udec_(areaHeight), ": segment ", udec_(segLength), " stroke ", udec_(thickness), ", uses ", udec_(usedWidth), "x", udec_(usedHeight))
 
-PUB setRotation(groupRotation) : status
-'' Set how the next placement turns this group on the display (spec R-7.1): its digits and their motion turn
-'' with it, and a quarter turn swaps its width and height.
+PUB removeGroup() : status | digitIdx
+'' Morph every digit of this group out; the group's area is free for another group once that completes
+'' (isPlaced() then reports FALSE). animate() must keep running until it does (spec R-8.6).
 ''
-'' @param groupRotation - ROT_0 (used when never set), ROT_90 (clockwise), ROT_180 or ROT_270 (counter-clockwise)
-'' @returns status - morphStatus.SUCCESS, or morphStatus.E_UNKNOWN_ROTATION with nothing changed
+'' @returns status - morphStatus.SUCCESS, or morphStatus.E_NOT_PLACED with nothing changed
 
-    status := morphStatus.E_UNKNOWN_ROTATION
-    if groupRotation >= ROT_0 and groupRotation <= ROT_270
-        rotation := groupRotation
+    status := morphStatus.E_NOT_PLACED
+    if bPlaced and not bRemoving
+        repeat digitIdx from 0 to numberDigits - NEXT_PIXEL
+            digits[digitIdx].morphOut()
+        if groupType == GRP_CLOCK
+            drawColons(0)                                           ' the colon goes dark at once
+        bRemoving := TRUE
         status := morphStatus.SUCCESS
+
+PUB isPlaced() : bIsPlaced
+'' Return TRUE while this group holds an area: from placement until removeGroup()'s morph-out completes.
+''
+'' @returns bIsPlaced - TRUE while the group is placed
+
+    bIsPlaced := bPlaced
+
+PUB setThickness(thicknessPixels) : status
+'' Fix the stroke thickness the next placement uses, instead of sizing it with the digits (spec R-8.2). Placement
+'' then takes the largest digits whose segments are at least this long.
+''
+'' @param thicknessPixels - the stroke, morphMask.MIN_THICKNESS or more
+'' @returns status - morphStatus.SUCCESS, or morphStatus.E_BAD_THICKNESS with nothing changed
+
+    ensureDefaults()
+    status := morphStatus.E_BAD_THICKNESS
+    if thicknessPixels >= morphMask.MIN_THICKNESS
+        fixedThickness := thicknessPixels
+        bThicknessSet := TRUE
+        status := morphStatus.SUCCESS
+
+PUB useAutoThickness()
+'' Size the stroke with the digits again at the next placement (the default): about a quarter of the segment's length.
+''
+
+    ensureDefaults()
+    bThicknessSet := FALSE
 
 PUB setSegmentStyle(segEndStyle, segCrossSection) : status
 '' Set the segment shape the next placement builds: its end style and cross-section (spec R-4.3, R-4.4).
@@ -217,6 +324,7 @@ PUB setSegmentStyle(segEndStyle, segCrossSection) : status
 '' @param segCrossSection - morphMask.SECTION_FLAT (used when never set) or morphMask.SECTION_TUBE
 '' @returns status - morphStatus.SUCCESS, or E_UNKNOWN_END_STYLE or E_UNKNOWN_CROSS_SECTION with nothing changed
 
+    ensureDefaults()
     if segEndStyle <> morphMask.END_SQUARE and segEndStyle <> morphMask.END_ANGLED
         status := morphStatus.E_UNKNOWN_END_STYLE
     elseif segCrossSection <> morphMask.SECTION_FLAT and segCrossSection <> morphMask.SECTION_TUBE
@@ -232,6 +340,7 @@ PUB setProfile(profile) : status
 '' @param profile - timeBase.PROFILE_EDGE or timeBase.PROFILE_TAIL (timeBase.DEFAULT_PROFILE when never set)
 '' @returns status - morphStatus.SUCCESS, or morphStatus.E_UNKNOWN_PROFILE with nothing changed
 
+    ensureDefaults()
     status := morphStatus.E_UNKNOWN_PROFILE
     if profile == timeBase.PROFILE_EDGE or profile == timeBase.PROFILE_TAIL
         motionProfile := profile
@@ -244,6 +353,7 @@ PUB setTailLength(tailLengthPixels) : status
 '' @param tailLengthPixels - the tail, timeBase.MIN_TAIL_PIXELS or more
 '' @returns status - morphStatus.SUCCESS, or morphStatus.E_BAD_TAIL_LENGTH with nothing changed
 
+    ensureDefaults()
     status := morphStatus.E_BAD_TAIL_LENGTH
     if tailLengthPixels >= timeBase.MIN_TAIL_PIXELS
         tailPixels := tailLengthPixels
@@ -257,6 +367,7 @@ PUB setMoveDuration(durationMs) : status
 '' @param durationMs - Duration of each move in ms, MIN_MOVE_MS to MAX_TIME_MS (timeBase.DEFAULT_MOVE_MS when never set); a move in flight follows it from the next animate()
 '' @returns status - morphStatus.SUCCESS, or morphStatus.E_OUT_OF_RANGE with nothing changed
 
+    ensureDefaults()
     status := morphStatus.E_OUT_OF_RANGE
     if durationMs >= MIN_MOVE_MS && durationMs <= MAX_TIME_MS
         moveDurationMs := durationMs
@@ -269,6 +380,7 @@ PUB setHoldDuration(holdMs) : status
 '' @param holdMs - Hold in ms, MIN_HOLD_MS to MAX_TIME_MS (DEFAULT_HOLD_MS when never set)
 '' @returns status - morphStatus.SUCCESS, or morphStatus.E_OUT_OF_RANGE with nothing changed
 
+    ensureDefaults()
     status := morphStatus.E_OUT_OF_RANGE
     if holdMs >= MIN_HOLD_MS && holdMs <= MAX_TIME_MS
         holdDurationMs := holdMs
@@ -280,6 +392,7 @@ PUB setEasing(easeStyle) : status
 '' @param easeStyle - Easing style, timeBase.EASE_LINEAR (constant speed, used when never set) or timeBase.EASE_SMOOTH (slow start and end)
 '' @returns status - morphStatus.SUCCESS, or morphStatus.E_UNKNOWN_EASING with nothing changed
 
+    ensureDefaults()
     status := morphStatus.E_UNKNOWN_EASING
     if easeStyle == timeBase.EASE_LINEAR || easeStyle == timeBase.EASE_SMOOTH
         moveEaseStyle := easeStyle
@@ -310,12 +423,16 @@ PUB animate(nowMs) : movingCount | digitIdx
 ' @local digitIdx - Index of the digit being drawn
 
     movingCount := 0
-    if numberDigits > 0             ' only the digits this group uses; an unused digit never moves
-        repeat digitIdx from 0 to numberDigits - 1
+    if bPlaced
+        repeat digitIdx from 0 to numberDigits - NEXT_PIXEL
             movingCount += digits[digitIdx].animate(nowMs)
-    if movingCount == 0 && bHoldRunning == FALSE     ' this pass drew the last of the transition: start the hold
-        holdStartMs := nowMs
-        bHoldRunning := TRUE
+        if movingCount == 0
+            if bRemoving                                    ' the morph-out has finished: free the area (R-8.6)
+                areaTable[areaSlot * AREA_LONGS + AREA_IN_USE] := FALSE
+                bPlaced := bRemoving := FALSE
+            elseif bHoldRunning == FALSE                    ' this pass drew the last of the transition: start the hold
+                holdStartMs := nowMs
+                bHoldRunning := TRUE
 
 PUB isHoldComplete(nowMs) : bHoldDone
 '' Return TRUE when this group's transition has completed and its hold has passed, so the caller may start the next value.
@@ -327,54 +444,26 @@ PUB isHoldComplete(nowMs) : bHoldDone
     if bHoldRunning == TRUE
         bHoldDone := (nowMs - holdStartMs) >= holdDurationMs          ' times compared by subtraction: wrap-safe
 
-PRI updateInitsFromValue(desiredValue) | currDivisor, digitIdx, digitValue, remainingValue
-    currDivisor := maxValueDivisor
-    remainingValue := desiredValue
-    repeat digitIdx from numberDigits - 1 to 0
-        digitValue := remainingValue / currDivisor
-        remainingValue -= digitValue * currDivisor
-        initValue[(numberDigits - 1) - digitIdx] := digitValue
-        if currDivisor == 1     ' safety, should never happen
-            quit
-        currDivisor /= 10
-
-PRI ensureIsSetup()
-    ' Do intial setup, if not yet done
-    if not isSetup
-        initialSetup()
-
-PRI initialSetup()
-    ' Perform initial setup
-    isSetup := TRUE
-    hours24 := hours := minutes := 0
-    showSecondIndicator := FALSE
-    if groupType == GRP_CLOCK
-        showSecondIndicator := TRUE
-
-PUB isConfigured() : bStatus
-    '' return T/F were T means this counter is active
-    bStatus := (groupType <> GRP_UNKNOWN)
-
 PUB nextTimeCycle() | bShowCurrValue
-    '' step this counter by one
-    'debug("mG:-nxTimCyc(", udec_(groupType), ")")
+'' Start the group's next value: a clock's next minute, a counter's next count, a random value's next draw.
+''
     bHoldRunning := FALSE       ' a new transition: animate() starts the next hold when it completes
-    bShowCurrValue := TRUE
-    case groupType
+    bShowCurrValue := bPlaced and not bRemoving
+    case (bShowCurrValue ? groupType : GRP_UNKNOWN)
         GRP_CLOCK:
-            currValue := currValue + 1
-            if currValue > 1259
+            currValue += ONE_STEP
+            if currValue > MAX_CLOCK_MINUTES
                 currValue := 0
-            hours := currValue / 60
-            minutes := currValue // 60
+            hours := currValue / MINUTES_PER_HOUR
+            minutes := currValue // MINUTES_PER_HOUR
             bShowCurrValue := FALSE ' nope, were doing that next
             updateDigitsFromTime(hours, minutes)
         GRP_UP_COUNTER:
-            currValue := currValue + 1
+            currValue += ONE_STEP
             if currValue > valueCap
                 currValue := 0
         GRP_DOWN_COUNTER:
-            currValue := currValue - 1
+            currValue -= ONE_STEP
             if currValue < 0
                 currValue := valueCap
         GRP_DIGITS:
@@ -384,35 +473,235 @@ PUB nextTimeCycle() | bShowCurrValue
             if currValue < 0
                 currValue := 0 - currValue
             if currValue > valueCap
-                currValue //= (valueCap + 1)
-        other:
-            debug("- BAD Group Type")
-            abort
+                currValue //= (valueCap + ONE_STEP)
+        other:                      ' not placed: nothing to step
 
     if bShowCurrValue
         updateDigitsFromValue(currValue)
 
-PRI updateDigitsFromTime(timeHours, timeMinutes)
-    digits[0].setValue(timeHours / 10)
-    digits[1].setValue(timeHours // 10)
-    digits[2].setValue(timeMinutes / 10)
-    digits[3].setValue(timeMinutes // 10)
-    showSecondsDots( timeMinutes // 4 )
+PRI updateInitsFromValue(desiredValue) | digitIdx
+' A value's decimal digits, most significant first, into initValue[].
 
-PRI updateDigitsFromValue(desiredValue) | currDivisor, digitIdx, digitValue, remainingValue
-    currDivisor := maxValueDivisor
-    remainingValue := desiredValue
-    'debug("mG: ", udec(remainingValue), udec(currDivisor), udec(valueCap))
-    repeat digitIdx from numberDigits - 1 to 0
-        digitValue := remainingValue / currDivisor
-        remainingValue -= digitValue * currDivisor
-        'debug("mG:  ", udec(digitValue), udec(remainingValue))
-        digits[(numberDigits - 1) - digitIdx].setValue(digitValue)
-        if currDivisor >= 10     ' safety, should never happen
-            currDivisor /= 10
-        'debug("mG:  ", udec(currDivisor))
+    repeat digitIdx from 0 to numberDigits - NEXT_PIXEL
+        initValue[digitIdx] := digitOfValue(desiredValue, digitIdx)
 
-    'repeat ' stop to eval debug
+PRI digitOfValue(value, digitIdx) : digitValue | divisor
+' One decimal digit of a value, counted from the most significant of the group's digits.
+
+    divisor := maxValueDivisor
+    repeat digitIdx
+        divisor /= DECIMAL_BASE
+    digitValue := (value / divisor) // DECIMAL_BASE
+
+PRI ensureDefaults()
+' Give the settings their defaults on first use (a group object's variables start at zero).
+
+    if bDefaultsSet <> TRUE
+        moveDurationMs := timeBase.DEFAULT_MOVE_MS
+        moveEaseStyle := timeBase.EASE_LINEAR
+        holdDurationMs := DEFAULT_HOLD_MS
+        endStyle := morphMask.END_ANGLED
+        crossSection := morphMask.SECTION_FLAT
+        motionProfile := timeBase.DEFAULT_PROFILE
+        bTailSet := FALSE
+        bThicknessSet := FALSE
+        bDefaultsSet := TRUE
+
+PRI isLayoutFor(grpType, layout) : bFits
+' TRUE when this layout belongs to this type: a clock's fields, or a counter's or value's digits.
+
+    if grpType == GRP_CLOCK
+        bFits := layout == LAYOUT_HH_MM
+    else
+        bFits := layout >= LAYOUT_1_DIGIT and layout <= LAYOUT_6_DIGITS
+
+PRI layoutDigits(layout) : nDigits
+' The digits a layout shows.
+
+    case layout
+        LAYOUT_1_DIGIT..LAYOUT_6_DIGITS:
+            nDigits := layout - LAYOUT_1_DIGIT + NEXT_PIXEL
+        LAYOUT_MM_SS, LAYOUT_HH_MM:
+            nDigits := FIELD_DIGITS * HALF
+        LAYOUT_HH_MM_SS:
+            nDigits := FIELD_DIGITS * (MAX_COLONS + NEXT_PIXEL)
+        other:
+            nDigits := 0
+
+PRI layoutColons(layout) : nColons
+' The colons a layout shows: one between each pair of clock fields.
+
+    case layout
+        LAYOUT_MM_SS, LAYOUT_HH_MM:
+            nColons := NEXT_PIXEL
+        LAYOUT_HH_MM_SS:
+            nColons := MAX_COLONS
+        other:
+            nColons := 0
+
+PRI maxValueFor(grpType, layout) : maxValue
+' The largest value a group of this type and layout shows.
+
+    if grpType == GRP_CLOCK
+        maxValue := MAX_CLOCK_MINUTES
+    else
+        maxValue := NEXT_PIXEL
+        repeat layoutDigits(layout)
+            maxValue *= DECIMAL_BASE
+        maxValue -= NEXT_PIXEL
+
+PRI autoThickness(segLength) : thickness
+' The stroke placement sizes with a segment of this length: about a quarter of it, at least morphMask.MIN_THICKNESS.
+
+    thickness := ((segLength + AUTO_THICKNESS_ROUND) / AUTO_THICKNESS_DIVISOR) #> morphMask.MIN_THICKNESS
+
+PRI gapFor(widthOfDigit) : gap
+' The space between digits: a quarter of a digit's width, at least MIN_GAP.
+
+    gap := (widthOfDigit / GAP_DIVISOR) #> MIN_GAP
+
+PRI dotFor(thickness) : dot
+' A colon dot's side: the stroke's thickness, at least MIN_DOT.
+
+    dot := thickness #> MIN_DOT
+
+PRI groupSize(layout, segLength, thickness) : groupWidth, groupHeight | width, nDigits
+' A layout's size, unturned, with digits of this segment length and stroke: the digits, the gaps between them,
+' and for each colon one dot and one more gap.
+
+    width, groupHeight := digits[0].digitSize(segLength, thickness)
+    nDigits := layoutDigits(layout)
+    groupWidth := nDigits * width + (nDigits - NEXT_PIXEL) * gapFor(width) + layoutColons(layout) * (dotFor(thickness) + gapFor(width))
+
+PRI fitDigits(layout, groupRotation, areaWidth, areaHeight) : segLength, thickness, groupWidth, groupHeight | fitWidth, fitHeight, tryLength, tryThickness, tryWidth, tryHeight
+' The longest segment (and its stroke, and the group's unturned size) that fits the area once turned; zeros when
+' none fits.
+
+' Local Variables:
+' @local fitWidth, fitHeight - the area as the unturned group sees it
+' @local tryLength, tryThickness - the size being tried
+' @local tryWidth, tryHeight - its group, unturned
+
+    fitWidth := areaWidth
+    fitHeight := areaHeight
+    if isQuarterTurnFor(groupRotation)
+        fitWidth := areaHeight
+        fitHeight := areaWidth
+    segLength := thickness := groupWidth := groupHeight := 0
+    tryLength := (fitHeight / HALF) <# digits.MAX_SEGMENT_LENGTH    ' a digit is at least 2L tall
+    repeat while tryLength >= MIN_SEGMENT_LENGTH and segLength == 0
+        tryThickness := bThicknessSet ? fixedThickness : autoThickness(tryLength)
+        if tryThickness <= tryLength and morphMask.maskBytes(tryThickness, tryLength << digits.SUBPIXEL_SHIFT) <= MAX_MASK_BYTES
+            tryWidth, tryHeight := groupSize(layout, tryLength, tryThickness)
+            if tryWidth <= fitWidth and tryHeight <= fitHeight
+                segLength, thickness, groupWidth, groupHeight := tryLength, tryThickness, tryWidth, tryHeight
+        tryLength--
+
+PRI setSizes(layout, segLength, thickness) | digitHeight, halfHeight
+' Record the placed sizes: digit, gap, colon dots and their places (group coordinates, unturned).
+
+' Local Variables:
+' @local digitHeight - the digits' height
+' @local halfHeight - half of it: each colon dot is centred in its half
+
+    segmentLength := segLength
+    digitWidth, digitHeight := digits[0].digitSize(segLength, thickness)
+    digitGap := gapFor(digitWidth)
+    dotSize := dotFor(thickness)
+    colonCount := layoutColons(layout)
+    halfHeight := digitHeight / HALF
+    dotUpperY := (halfHeight - dotSize) / HALF
+    dotLowerY := halfHeight + (digitHeight - halfHeight - dotSize) / HALF
+    colonX[0] := digitX(FIELD_DIGITS - NEXT_PIXEL) + digitWidth + digitGap
+    colonX[NEXT_PIXEL] := digitX(FIELD_DIGITS * HALF - NEXT_PIXEL) + digitWidth + digitGap
+
+PRI digitX(digitIdx) : column
+' A digit's left column in the group (unturned): the digits before it, their gaps, and any colons between.
+
+    column := digitIdx * (digitWidth + digitGap) + ((digitIdx / FIELD_DIGITS) <# colonCount) * (dotSize + digitGap)
+
+PRI turnedSize(groupWidth, groupHeight) : width, height
+' The group's size on the display: a quarter turn swaps it.
+
+    width := groupWidth
+    height := groupHeight
+    if isQuarterTurn()
+        width := groupHeight
+        height := groupWidth
+
+PRI claimArea(chain, left, top, right, bottom) : status, slot | idx, pEntry
+' Find this group a free areaTable entry (its own, when it is already placed) after checking the area against
+' every other placed area on the same display: sharing a pixel is refused; touching is allowed (spec R-8.5).
+' Writes the entry only when the claim succeeds.
+
+    status := morphStatus.SUCCESS
+    slot := bPlaced ? areaSlot : NO_SLOT
+    repeat idx from 0 to MAX_GROUPS - NEXT_PIXEL
+        pEntry := @areaTable + idx * AREA_LONGS * digits.BYTES_PER_LONG
+        if LONG[pEntry][AREA_IN_USE] and not (bPlaced and idx == areaSlot)
+            if LONG[pEntry][AREA_CHAIN] == chain and left <= LONG[pEntry][AREA_RIGHT] and right >= LONG[pEntry][AREA_LEFT] and top <= LONG[pEntry][AREA_BOTTOM] and bottom >= LONG[pEntry][AREA_TOP]
+                debug("mG: area (", sdec_(left), ",", sdec_(top), ")-(", sdec_(right), ",", sdec_(bottom), ") overlaps placed area (", sdec_(LONG[pEntry][AREA_LEFT]), ",", sdec_(LONG[pEntry][AREA_TOP]), ")-(", sdec_(LONG[pEntry][AREA_RIGHT]), ",", sdec_(LONG[pEntry][AREA_BOTTOM]), ")")
+                status := morphStatus.E_AREA_OVERLAP
+        elseif not LONG[pEntry][AREA_IN_USE] and slot < 0
+            slot := idx
+    if status == morphStatus.SUCCESS and slot < 0
+        status := morphStatus.E_TOO_MANY_GROUPS
+    if status == morphStatus.SUCCESS
+        pEntry := @areaTable + slot * AREA_LONGS * digits.BYTES_PER_LONG
+        LONG[pEntry][AREA_IN_USE] := TRUE
+        LONG[pEntry][AREA_CHAIN] := chain
+        LONG[pEntry][AREA_LEFT] := left
+        LONG[pEntry][AREA_TOP] := top
+        LONG[pEntry][AREA_RIGHT] := right
+        LONG[pEntry][AREA_BOTTOM] := bottom
+
+PRI clipToArea(left, top, right, bottom)
+' The group never draws outside its area (spec R-8.4): the context's clip rectangle is the area.
+
+    drawCtx[digits.CTX_CLIP_LEFT] := left
+    drawCtx[digits.CTX_CLIP_TOP] := top
+    drawCtx[digits.CTX_CLIP_RIGHT] := right
+    drawCtx[digits.CTX_CLIP_BOTTOM] := bottom
+
+PRI showSecondsDots(lightDark)
+' Draw the clock's colon dots, bright or dim (task 169 draws them through the segment pipeline).
+
+    drawColons(lightDark & NEXT_PIXEL ? groupColor : colorUtils.reducedBrightnessOfCValue(groupColor, DIM_PERCENT))
+
+PRI drawColons(rgbColor) | colonIdx, dotX, dotY
+' Fill every colon dot with one color (black clears them), in group coordinates through the group's turn.
+
+    repeat colonIdx from 0 to colonCount - NEXT_PIXEL
+        repeat dotY from 0 to dotSize - NEXT_PIXEL
+            repeat dotX from 0 to dotSize - NEXT_PIXEL
+                drawGroupPixel(colonX[colonIdx] + dotX, dotUpperY + dotY, rgbColor)
+                drawGroupPixel(colonX[colonIdx] + dotX, dotLowerY + dotY, rgbColor)
+
+PRI drawGroupPixel(groupX, groupY, rgbColor) | screenX, screenY
+
+    screenX, screenY := groupToScreen(groupX, groupY)
+    pixels.drawPixelAtRC(chainIndex, screenY, screenX, rgbColor)
+
+PRI updateDigitsFromTime(timeHours, timeMinutes) | digitIdx
+' Show a clock's hours and minutes.
+
+    hours := timeHours
+    minutes := timeMinutes
+    repeat digitIdx from 0 to numberDigits - NEXT_PIXEL
+        digits[digitIdx].setValue(clockDigit(digitIdx))
+    showSecondsDots(timeMinutes & NEXT_PIXEL)
+
+PRI clockDigit(digitIdx) : digitValue | fieldValue
+' One digit of the clock's time, HH:MM from the left: each field's tens, then its units.
+
+    fieldValue := (digitIdx < FIELD_DIGITS) ? hours : minutes
+    digitValue := (digitIdx // FIELD_DIGITS == 0) ? fieldValue / DECIMAL_BASE : fieldValue // DECIMAL_BASE
+
+PRI updateDigitsFromValue(desiredValue) | digitIdx
+' Show a value: its decimal digits, most significant first.
+
+    repeat digitIdx from 0 to numberDigits - NEXT_PIXEL
+        digits[digitIdx].setValue(digitOfValue(desiredValue, digitIdx))
 
 PRI applyMotion() | digitIdx
 ' Hand the group's move duration and easing to every digit (and so to every segment).
@@ -441,33 +730,11 @@ PRI applyTail() | digitIdx
     repeat digitIdx from 0 to LAST_DIGIT
         digits[digitIdx].setTail(tailX256())
 
-PRI showSecondsDots(lightDark) | targetColor
-   ' lightDarkv[0,1] where 1 means bright color
-    if lightDark & 1 > 0    ' > 0 is 1/4 ON  -  & 1 > 0  is 1/2 ON
-        targetColor := $00006F
-    else
-        targetColor := $0080FF
-
-    drawSecondsDot(dotRow, dotCol, targetColor)
-    drawSecondsDot(dotRow + dotVOffset, dotCol, targetColor)
-
-PRI drawSecondsDot(row, column, rgbColor) | dotPixel, screenX, screenY
-    ' place a 2 x 2 dot at (row, column) in group coordinates, through the group's turn (task 169 draws it in the pipeline)
-    repeat dotPixel from 0 to DOT_PIXELS - NEXT_PIXEL
-        screenX, screenY := groupToScreen(column + (dotPixel & DOT_SIDE_MASK), row + (dotPixel >> DOT_SIDE_SHIFT))
-        pixels.drawPixelAtRC(chainIndex, screenY, screenX, rgbColor)
-
-PRI setDrawContext(row, column, groupWidth, groupHeight) | screenWidth, screenHeight
-' Fill the group's drawing context: the transform from group coordinates (unturned, groupWidth x groupHeight)
-' to the display, whose turned bounding box has its top-left at (row, column), and the clip rectangle: that box,
-' held to the display.
-
-' Local Variables:
-' @local screenWidth, screenHeight - the group's size on the display
+PRI setDrawContext(row, column, groupWidth, groupHeight)
+' Fill the group's drawing transform: from group coordinates (unturned, groupWidth x groupHeight) to the
+' display, the turned group's top-left at (row, column). clipToArea() sets the clip rectangle.
 
     longfill(@drawCtx, 0, digits.CTX_LONGS)
-    screenWidth := groupWidth
-    screenHeight := groupHeight
     case rotation
         ROT_0:
             drawCtx[digits.CTX_XX] := NEXT_PIXEL                    ' x = column + gx, y = row + gy
@@ -489,18 +756,16 @@ PRI setDrawContext(row, column, groupWidth, groupHeight) | screenWidth, screenHe
             drawCtx[digits.CTX_X0] := column
             drawCtx[digits.CTX_YX] := -NEXT_PIXEL
             drawCtx[digits.CTX_Y0] := row + groupWidth - NEXT_PIXEL
-    if isQuarterTurn()
-        screenWidth := groupHeight
-        screenHeight := groupWidth
-    drawCtx[digits.CTX_CLIP_LEFT] := column #> 0
-    drawCtx[digits.CTX_CLIP_TOP] := row #> 0
-    drawCtx[digits.CTX_CLIP_RIGHT] := (column + screenWidth - NEXT_PIXEL) <# (maxPhysicalCols - NEXT_PIXEL)
-    drawCtx[digits.CTX_CLIP_BOTTOM] := (row + screenHeight - NEXT_PIXEL) <# (maxPhysicalRows - NEXT_PIXEL)
 
 PRI isQuarterTurn() : bQuarter
 ' TRUE when the group is turned 90 degrees either way: its width and height swap on the display.
 
-    bQuarter := rotation == ROT_90 or rotation == ROT_270
+    bQuarter := isQuarterTurnFor(rotation)
+
+PRI isQuarterTurnFor(groupRotation) : bQuarter
+' TRUE when this rotation turns a group 90 degrees either way.
+
+    bQuarter := groupRotation == ROT_90 or groupRotation == ROT_270
 
 PRI groupToScreen(groupX, groupY) : screenX, screenY
 ' A group pixel's place on the display, through the group's turn.

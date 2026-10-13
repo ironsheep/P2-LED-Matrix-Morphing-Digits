@@ -47,7 +47,6 @@ CON ' ---- Digit under test ----
   LAST_DIGIT_VALUE = NUM_DIGITS - 1
   NUM_TRANSITIONS = NUM_DIGITS * (NUM_DIGITS - 1)
   MASK_BYTES = 2048
-  CHECK_MULTIPLIER = 31                                         ' rolling checksum: sum x 31 + byte, so a moved pixel changes it
   ONE_MORE = 1
 
 CON ' ---- Configurations ----
@@ -106,6 +105,7 @@ OBJ
     morphStatus : "isp_hub75_morphStatus"
     digit       : "isp_hub75_morph7seg"
     seg         : "isp_hub75_morphSegment"                  ' command constants only
+    probe       : "test_hub75_morphProbe"
     dense[DENSE_DIGITS] : "isp_hub75_morph7seg"
 
 DAT ' configurations: thickness, length, end style, cross-section, tail (1/256 px), name
@@ -330,17 +330,10 @@ PRI clearArea(row, column) | pixRow, pixCol, pPixel, idx
                 repeat hub75Bffrs.bytesPerColor(chainIndex)
                     BYTE[pPixel][idx++] := 0
 
-PRI areaSum(row, column) : sum | pixRow, pixCol, pPixel, idx
-' Rolling checksum of every byte of the digit's area (clipped to the display).
+PRI areaSum(row, column) : sum
+' Checksum of the digit's area (clipped to the display).
 
-    sum := 0
-    repeat pixRow from row to (row + areaHeight - ONE_MORE) <# (maxRows - ONE_MORE)
-        repeat pixCol from column to (column + areaWidth - ONE_MORE) <# (maxColumns - ONE_MORE)
-            pPixel := pixels.pixelAddressAtRC(chainIndex, pixRow, pixCol)
-            if pPixel <> hub75Bffrs.NO_PIXEL
-                idx := 0
-                repeat hub75Bffrs.bytesPerColor(chainIndex)
-                    sum := sum * CHECK_MULTIPLIER + BYTE[pPixel][idx++]
+    sum := probe.areaChecksum(chainIndex, column, row, areaWidth, areaHeight)
 
 CON ' ---- License ----
 

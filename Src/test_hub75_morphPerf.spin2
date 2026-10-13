@@ -97,12 +97,17 @@ CON ' ---- Measurement settings ----
   DOWNCTR_COLUMN = 3
   RANDOM_ROW = 32
   RANDOM_COLUMN = 64 + 4
-  CLOCK_DIGITS = 4
-  DOWNCTR_DIGITS = 3
   SEG_THICKNESS = 1
   CLOCK_SEG_LENGTH = 6
   DOWNCTR_SEG_LENGTH = 15
   RANDOM_SEG_LENGTH = 9
+  ' the areas that fit those segment lengths at stroke 1 (placeGroup(), task 168): the same digits as 2021
+  CLOCK_AREA_WIDTH = 42
+  CLOCK_AREA_HEIGHT = 15
+  DOWNCTR_AREA_WIDTH = 59
+  DOWNCTR_AREA_HEIGHT = 33
+  RANDOM_AREA_WIDTH = 50
+  RANDOM_AREA_HEIGHT = 21
   CLOCK_RT_START = 12 * 60
   DOWNCTR_START = 204
   RANDOM_START = 5436
@@ -274,23 +279,23 @@ PRI measureCommits() | sampleIndex, startTick, endTick, withTicks, withoutTicks
 
 
 PRI placeGroups(maxPhysicalRows, maxPhysicalCols) | ctrIdx
-    ' place the demo's four groups exactly as the 2021 demo does
+    ' place the demo's four groups where the 2021 demo did, with the same digits
 
     repeat ctrIdx from 0 to LAST_COUNTER
-        counters[ctrIdx].initialize(chainIndex, maxPhysicalRows, maxPhysicalCols)
+        counters[ctrIdx].setThickness(SEG_THICKNESS)
 
     display.setTextFont(display.TEXT_FONT_5X7)
     display.setCursor(TEXT_ROW, TEXT_COLUMN)
     display.setColoredTextAtLnCol(TEXT_ROW, TEXT_COLUMN, string("Iron Sheep"), color.cMaroon)
     display.commitScreenToPanelSet()
 
-    counters[GRP_CLOCK_LT].placeDigitGroup(CLOCK_LT_ROW, CLOCK_LT_COLUMN, counters.GRP_CLOCK, CLOCK_DIGITS, SEG_THICKNESS, CLOCK_SEG_LENGTH, 0, color.cOrange)
+    counters[GRP_CLOCK_LT].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, CLOCK_LT_COLUMN, CLOCK_LT_ROW, CLOCK_AREA_WIDTH, CLOCK_AREA_HEIGHT, counters.GRP_CLOCK, counters.LAYOUT_HH_MM, counters.ROT_0, color.cOrange, 0)
     if maxPhysicalCols > FULL_WIDTH_COLUMNS
-        counters[GRP_CLOCK_RT].placeDigitGroup(CLOCK_RT_ROW, CLOCK_RT_COLUMN, counters.GRP_CLOCK, CLOCK_DIGITS, SEG_THICKNESS, CLOCK_SEG_LENGTH, CLOCK_RT_START, color.cGreen)
+        counters[GRP_CLOCK_RT].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, CLOCK_RT_COLUMN, CLOCK_RT_ROW, CLOCK_AREA_WIDTH, CLOCK_AREA_HEIGHT, counters.GRP_CLOCK, counters.LAYOUT_HH_MM, counters.ROT_0, color.cGreen, CLOCK_RT_START)
     if maxPhysicalRows > FULL_HEIGHT_ROWS
-        counters[GRP_DOWNCTR_2DIG].placeDigitGroup(DOWNCTR_ROW, DOWNCTR_COLUMN, counters.GRP_DOWN_COUNTER, DOWNCTR_DIGITS, SEG_THICKNESS, DOWNCTR_SEG_LENGTH, DOWNCTR_START, color.cTeal)
+        counters[GRP_DOWNCTR_2DIG].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, DOWNCTR_COLUMN, DOWNCTR_ROW, DOWNCTR_AREA_WIDTH, DOWNCTR_AREA_HEIGHT, counters.GRP_DOWN_COUNTER, counters.LAYOUT_3_DIGITS, counters.ROT_0, color.cTeal, DOWNCTR_START)
     if maxPhysicalCols > FULL_WIDTH_COLUMNS && maxPhysicalRows > FULL_HEIGHT_ROWS
-        counters[GRP_CTR_6DIG_RAND].placeDigitGroup(RANDOM_ROW, RANDOM_COLUMN, counters.GRP_DIGITS_RANDOM, CLOCK_DIGITS, SEG_THICKNESS, RANDOM_SEG_LENGTH, RANDOM_START, color.cRed)
+        counters[GRP_CTR_6DIG_RAND].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, RANDOM_COLUMN, RANDOM_ROW, RANDOM_AREA_WIDTH, RANDOM_AREA_HEIGHT, counters.GRP_DIGITS_RANDOM, counters.LAYOUT_4_DIGITS, counters.ROT_0, color.cRed, RANDOM_START)
 
     ' the demo's pacing, so the frame-rate item runs the demo's loop as the demo runs it
     counters[GRP_CLOCK_LT].setMoveDuration(CLOCK_MOVE_MS)
@@ -338,7 +343,7 @@ PRI measureFrameRate() | startTick, windowTicks, frameCount, nowMs, ctrIdx
     repeat while (getct() - startTick) +< FPS_WINDOW_TICKS
         nowMs := timeBase.update()
         repeat ctrIdx from 0 to LAST_COUNTER
-            if counters[ctrIdx].isConfigured() && counters[ctrIdx].isHoldComplete(nowMs)
+            if counters[ctrIdx].isPlaced() && counters[ctrIdx].isHoldComplete(nowMs)
                 counters[ctrIdx].nextTimeCycle()
         repeat ctrIdx from 0 to LAST_COUNTER
             counters[ctrIdx].animate(nowMs)

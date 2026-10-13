@@ -1,0 +1,114 @@
+'' =================================================================================================
+''
+''   File....... test_hub75_morphProbe.spin2
+''   Purpose.... Screen-buffer probes shared by the morphing-digit bench programs: checksums, lit pixels, lit boxes
+''   Authors.... Stephen M Moraco
+''               -- see below for terms of use
+''   E-mail..... stephen@ironsheep.biz
+''   Started.... Oct 2026
+''   Updated.... 12 Oct 2026
+''
+'' =================================================================================================
+
+{ The tests read what was drawn back from the screen buffer, pixel by pixel through the driver's one address
+  rule (screenUtils.pixelAddressAtRC()), never by asking the code under test. These are the probes they share.
+  Areas are clipped to the display; a pixel no panel holds reads as black.
+}
+
+CON ' ---- Pixel bytes and the checksum ----
+
+  #0, RED_BYTE, GREEN_BYTE, BLUE_BYTE                           ' a pixel's three bytes (the driver's writePacked() order)
+  SUM_MULTIPLIER = 31                                           ' rolling checksum: sum x 31 + the bytes, weighted, so a moved
+  GREEN_WEIGHT = 7                                              '   or recolored pixel changes it
+  BLUE_WEIGHT = 13
+  PIXEL_STEP = 1
+  NONE = -1                                                     ' litBox(): no pixel lit
+
+OBJ
+
+    pixels      : "isp_hub75_screenUtils"
+    hub75Bffrs  : "isp_hub75_hwBufferAccess"
+
+PUB null()
+'' This is not a top level object
+''
+
+PUB areaChecksum(chainIdx, left, top, width, height) : sum | row, column, lastRow, lastColumn
+'' A rolling checksum of every pixel of an area (clipped to the display).
+''
+'' @param chainIdx - the adapter's chain index
+'' @param left, top - the area's top-left pixel
+'' @param width, height - the area's size
+'' @returns sum - the checksum: equal areas give equal sums
+
+    lastRow := (top + height - PIXEL_STEP) <# (hub75Bffrs.maxDisplayRows(chainIdx) - PIXEL_STEP)
+    lastColumn := (left + width - PIXEL_STEP) <# (hub75Bffrs.maxDisplayColumns(chainIdx) - PIXEL_STEP)
+    sum := 0
+    repeat row from top #> 0 to lastRow
+        repeat column from left #> 0 to lastColumn
+            sum := sum * SUM_MULTIPLIER + pixelSum(chainIdx, row, column)
+
+PUB isLit(chainIdx, row, column) : bLit
+'' TRUE when the pixel is not black.
+''
+'' @param chainIdx - the adapter's chain index
+'' @param row, column - the pixel
+'' @returns bLit - TRUE when any of its bytes is not zero
+
+    bLit := pixelSum(chainIdx, row, column) <> 0
+
+PUB litBox(chainIdx, left, top, width, height) : litLeft, litTop, litRight, litBottom | row, column
+'' The bounding box of an area's lit pixels (NONE in every field when none is lit).
+''
+'' @param chainIdx - the adapter's chain index
+'' @param left, top - the area's top-left pixel
+'' @param width, height - the area's size
+'' @returns litLeft, litTop, litRight, litBottom - the box, inclusive
+
+    litLeft := litTop := litRight := litBottom := NONE
+    repeat row from top to top + height - PIXEL_STEP
+        repeat column from left to left + width - PIXEL_STEP
+            if isLit(chainIdx, row, column)
+                if litLeft == NONE or column < litLeft
+                    litLeft := column
+                litRight := litRight #> column
+                if litTop == NONE
+                    litTop := row
+                litBottom := row
+
+PRI pixelSum(chainIdx, row, column) : value | pPixel
+' One pixel's bytes, weighted (0 for black or for a pixel no panel holds).
+
+    value := 0
+    pPixel := pixels.pixelAddressAtRC(chainIdx, row, column)
+    if pPixel <> hub75Bffrs.NO_PIXEL
+        value := BYTE[pPixel][RED_BYTE] + BYTE[pPixel][GREEN_BYTE] * GREEN_WEIGHT + BYTE[pPixel][BLUE_BYTE] * BLUE_WEIGHT
+
+CON ' ---- License ----
+
+{{
+
+ -------------------------------------------------------------------------------------------------
+  MIT License
+
+  Copyright (c) 2021 Iron Sheep Productions, LLC
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+ =================================================================================================
+}}

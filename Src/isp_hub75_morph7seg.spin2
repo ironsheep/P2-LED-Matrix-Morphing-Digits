@@ -99,7 +99,7 @@ VAR ' per digit
     long    segRows             ' the mask's rows: thickness T
     long    pMask               ' the group's coverage mask: segRows x segCols bytes
     long    pRamp               ' the group's intensity ramp: 256 packed colors
-    long    bNeedsRender        ' TRUE when a command changed a segment since the last drawing
+    long    bNeedsRender        ' TRUE from a command until the moves it started have been drawn to their end
     long    cellRows            ' one cell's (panel's) size as mounted: blocks never cross a cell
     long    cellColumns
 
@@ -264,11 +264,11 @@ PUB animate(nowMs) : movingCount | segmentIndex
 ' @local segmentIndex - Index of the segment being moved
 
     movingCount := 0
-    if bNeedsRender or not isAnimationComplete()      ' early-out: an idle digit costs one test (R-9.3)
+    if bNeedsRender                                     ' early-out: an idle digit costs one test (R-9.3)
         repeat segmentIndex from 0 to LAST_SEGMENT
             movingCount += segments[segmentIndex].animate(nowMs)
         drawChanges()
-        bNeedsRender := FALSE
+        bNeedsRender := movingCount > 0                 ' stays TRUE while a move is in flight
 
 PUB setMotion(durationMs, easeStyle) | segmentIndex
 '' Set how every segment of this digit moves: the duration of each move and its easing.
@@ -301,6 +301,19 @@ PUB commandSegment(segmentIndex, commandBits) : status
 '' @returns status - the segment's status: morphStatus SUCCESS or E_BAD_COMMAND
 
     status := segments[segmentIndex].commandSegment(commandBits)
+    bNeedsRender := TRUE
+
+PUB morphOut() | segmentIndex
+'' Turn every lit segment off with a snake (horizontals left to right, verticals top down): the digit morphs out
+'' and ends hidden.
+''
+
+    repeat segmentIndex from 0 to LAST_SEGMENT
+        if segVertical[segmentIndex]
+            segments[segmentIndex].commandSegment(segments.CMD_TURN_OFF + segments.CMD_TOP_DOWN)
+        else
+            segments[segmentIndex].commandSegment(segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT)
+    currValue := DIGIT_HIDDEN
     bNeedsRender := TRUE
 
 PUB setContext(pGroupContext)

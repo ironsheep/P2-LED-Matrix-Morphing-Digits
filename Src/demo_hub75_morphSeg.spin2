@@ -27,6 +27,7 @@ MAX_COUNTERS = 4
 LAST_COUNTER = MAX_COUNTERS - 1
 
 #0, GRP_CLOCK_LT, GRP_CLOCK_RT, GRP_DOWNCTR_2DIG, GRP_CTR_6DIG_RAND
+THIN_STROKE = 1             ' the 2021 look: 1-pixel strokes
 
 CON ' the 2021 pacing, in real time
 
@@ -76,9 +77,9 @@ PUB start() : ok | ctrIdx, chainIndex, maxPhysicalCols, maxPhysicalRows, nowMs
     maxPhysicalCols := hub75Bffrs.maxDisplayColumns(chainIndex)
     maxPhysicalRows := hub75Bffrs.maxDisplayRows(chainIndex)
 
-    '  multiple SEVEN SEGMENT Morphing Digits DEMO
+    '  multiple SEVEN SEGMENT Morphing Digits DEMO: the 2021 thin strokes
     repeat ctrIdx from 0 to MAX_COUNTERS -1
-        counters[ctrIdx].initialize(chainIndex, maxPhysicalRows, maxPhysicalCols)
+        counters[ctrIdx].setThickness(THIN_STROKE)
 
     display.clearScreen()
 
@@ -88,16 +89,17 @@ PUB start() : ok | ctrIdx, chainIndex, maxPhysicalCols, maxPhysicalRows, nowMs
     display.setColoredTextAtLnCol(0,0, string("Iron Sheep"), color.cMaroon)
     display.commitScreenToPanelSet()
 
-    clkLtWidth, clkLtHeight := counters[GRP_CLOCK_LT].placeDigitGroup(10, 2, counters.GRP_CLOCK, 4, 1, 6, 0, color.cOrange)
+    ' the 2021 places, as areas (task 170 sizes them from the display); each area fits the 2021 segment length at stroke 1
+    _, clkLtWidth, clkLtHeight := counters[GRP_CLOCK_LT].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, 2, 10, 42, 15, counters.GRP_CLOCK, counters.LAYOUT_HH_MM, counters.ROT_0, color.cOrange, 0)
 
     if maxPhysicalCols > 64
-        clkRtWidth, clkRtHeight := counters[GRP_CLOCK_RT].placeDigitGroup(8, 64+2, counters.GRP_CLOCK, 4, 1, 6, 12 * 60, color.cGreen)
+        _, clkRtWidth, clkRtHeight := counters[GRP_CLOCK_RT].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, 66, 8, 42, 15, counters.GRP_CLOCK, counters.LAYOUT_HH_MM, counters.ROT_0, color.cGreen, 12 * 60)
 
     if maxPhysicalRows > 32
-        grpDnWidth, grpDnHeight := counters[GRP_DOWNCTR_2DIG].placeDigitGroup(28, 3, counters.GRP_DOWN_COUNTER, 3, 1, 15, 204, color.cTeal)
+        _, grpDnWidth, grpDnHeight := counters[GRP_DOWNCTR_2DIG].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, 3, 28, 59, 33, counters.GRP_DOWN_COUNTER, counters.LAYOUT_3_DIGITS, counters.ROT_0, color.cTeal, 204)
 
     if maxPhysicalCols > 64 && maxPhysicalRows > 32
-        grpRndWidth, grpRndHeight := counters[GRP_CTR_6DIG_RAND].placeDigitGroup(32, 64+4, counters.GRP_DIGITS_RANDOM, 4, 1, 9, 5436, color.cRed)
+        _, grpRndWidth, grpRndHeight := counters[GRP_CTR_6DIG_RAND].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, 68, 32, 50, 21, counters.GRP_DIGITS_RANDOM, counters.LAYOUT_4_DIGITS, counters.ROT_0, color.cRed, 5436)
 
     display.commitScreenToPanelSet()
     'repeat
@@ -113,7 +115,7 @@ PUB start() : ok | ctrIdx, chainIndex, maxPhysicalCols, maxPhysicalRows, nowMs
     repeat                                                      ' one pass is one frame
         nowMs := timeBase.update()                              ' 1. the frame's time: one counter read, and the frame is counted
         repeat ctrIdx from 0 to LAST_COUNTER                    ' 2. a group whose hold has passed takes its next value
-            if counters[ctrIdx].isConfigured() && counters[ctrIdx].isHoldComplete(nowMs)
+            if counters[ctrIdx].isPlaced() && counters[ctrIdx].isHoldComplete(nowMs)
                 counters[ctrIdx].nextTimeCycle()
         repeat ctrIdx from 0 to LAST_COUNTER                    ' 3. every group draws its moves for this frame's time
             counters[ctrIdx].animate(nowMs)
