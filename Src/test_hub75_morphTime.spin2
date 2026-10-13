@@ -1,0 +1,219 @@
+'' =================================================================================================
+''
+''   File....... test_hub75_morphTime.spin2
+''   Purpose.... Board test of the shared time base: elapsed milliseconds against an independent count of seconds, across counter wraps
+''   Authors.... Stephen M Moraco
+''               -- see below for terms of use
+''   E-mail..... stephen@ironsheep.biz
+''   Started.... Oct 2026
+''   Updated.... 12 Oct 2026
+''
+'' =================================================================================================
+
+{ Task 163, phase 1: proves isp_hub75_morphTime's time base on the board (no display is used).
+
+  The run is one 90 s timeline on this cog:
+    - a frame loop calls update() every FRAME_US (one refresh period of the quad);
+    - the reference is a chain of absolute second targets: nextTick += clkfreq, then waitct(nextTick).
+      At each whole second the total from update() is compared with seconds x 1000.
+    - from second 70 to second 80 update() is not called at all: one 10 s frame, longer than 2^31 ticks
+      (6.41 s), which a signed division would turn negative. update() must count it in full.
+    - 90 s at 335 MHz holds 7 counter wraps (one every 12.82 s); the test counts them itself.
+
+  Probe independence (sprint plan section 4). The reference shares none of the time object's arithmetic:
+  it never sums differences or divides; waitct compares the counter with an absolute target in hardware,
+  and each target is 1 s ahead, so it cannot wrap. GETMS() is a second reference: it reads the 64-bit
+  counter (its upper long never wraps in this run) and divides in the interpreter.
+  What would make all three agree while all were wrong: they share the system counter and clkfreq. If the
+  clock ran at a frequency other than the 335 MHz clkfreq claims, every figure here would agree and all
+  would be off against wall time. The guard against that is outside the P2: the host stamps every log
+  line, so the 60 s and 90 s TIMEBASE lines can be compared with the host's clock (to a few ms).
+
+  Log lines this program adds to the harness's lines (same field style):
+    PERCALL   update()  reps=<n>  total_ticks=<n>  ns_per_call=<n>          (the clock's and meter's cost per frame)
+    TIMEBASE  at_s=<n>  elapsed_ms=<n>  expected_ms=<n>  deviation_ms=<n>  wraps=<n>   (every 10 s, and the summary)
+    FPS       meter_x100=<n>  reference_x100=<n>  reference_frames=<n>  after_long_frame_x100=<n>
+}
+
+CON ' ---- Timing ----
+
+  CLK_FREQ = 335_000_000                                        ' system freq as a constant
+  _clkfreq = CLK_FREQ                                           ' set system clock
+
+CON ' ---- Run settings ----
+
+  FIRST_SECOND = 1                                              ' the first whole-second boundary after reset()
+  RUN_SECONDS = 90                                              ' 90 s holds 7 counter wraps at 335 MHz (one every 12.82 s)
+  NORMAL_CHECK_SECOND = 60                                      ' the plan's normal case: the total after 60 s
+  LONG_FRAME_START_SECOND = 70                                  ' no update() after this second's boundary ...
+  LONG_FRAME_END_SECOND = 80                                    ' ... until this one: a 10 s frame, longer than 2^31 ticks
+  REPORT_EVERY_SECONDS = 10                                     ' a TIMEBASE progress line every 10 s
+  FRAME_US = 14_070                                             ' one refresh period of the quad (performance-baseline.md: back-to-back commit)
+  GUARD_FRAMES = 2                                              ' stop framing when fewer than this many frames remain before a boundary
+  TOLERANCE_MS = 1                                              ' the plan: within 1 ms per minute
+  MIN_WRAPS = 6                                                 ' the plan: 6 or more counter wraps
+  FPS_TOLERANCE_PERCENT = 2                                     ' meter against the test's own frame count (windows differ by up to one frame in 71)
+  PERCENT = 100
+  DROP_DIVISOR = 2                                              ' after the long frame the meter must read under half its earlier figure
+  UPDATE_COST_REPS = 1000                                       ' update() calls in the cost bracket (D6: the meter's cost per frame)
+  NANOS_PER_SECOND = 1_000_000_000
+
+OBJ
+
+    utils       : "test_hub75_morphUtils"
+    timeBase    : "isp_hub75_morphTime"
+    timeOther   : "isp_hub75_morphTime"                         ' a second declaration: must share the first one's DAT clock
+
+VAR
+
+    long    startTick                                           ' the reference's zero: the counter just after reset()
+    long    startGetMs                                          ' GETMS() at the same moment
+    long    lastSeenTick                                        ' the counter at the previous sample, for counting wraps
+    long    wrapCount
+    long    maxDeviationMs
+    long    deviationAtNormal
+    long    deviationAfterLong
+    long    deviationAtEnd
+    long    elapsedAtEnd
+    long    getMsAtEnd
+    long    otherElapsedAtEnd
+    long    refFrames                                           ' update() calls the test counts itself, seconds 60 to 70
+    long    refStartTick
+    long    refRateX100
+    long    fpsBeforeLongX100
+    long    fpsAfterLongX100
+
+PUB go()
+'' Run the time-base test: begin, run the 90 s timeline, report the checks, finish.
+''
+
+    utils.beginSuite(@"morphTime time base")
+    measureUpdateCost()
+    runTimeline()
+    reportChecks()
+    utils.finish()
+
+
+PRI measureUpdateCost() | bracketStart, bracketTicks
+    ' the whole per-frame cost of the clock and the meter: UPDATE_COST_REPS calls in one bracket, loop pass included;
+    ' runs before the timeline, which starts again from reset()
+
+    timeBase.reset()
+    bracketStart := utils.timeStart()
+    repeat UPDATE_COST_REPS
+        timeBase.update()
+    bracketTicks := utils.timeReport(@"update() x1000 (total, loop pass included)", bracketStart)
+    debug("PERCALL  update()  reps=", udec_(UPDATE_COST_REPS), "  total_ticks=", udec_(bracketTicks), "  ns_per_call=", udec_(muldiv64(bracketTicks, NANOS_PER_SECOND / UPDATE_COST_REPS, clkfreq)))
+
+
+PRI runTimeline() | secondIdx, nextTick, guardTicks
+    ' frame the time object between whole-second boundaries, and compare at each boundary
+
+    guardTicks := muldiv64(clkfreq, FRAME_US * GUARD_FRAMES, utils.MICROS_PER_SECOND)
+    timeBase.reset()
+    startTick := getct()
+    startGetMs := getms()
+    lastSeenTick := startTick
+    nextTick := startTick
+    repeat secondIdx from FIRST_SECOND to RUN_SECONDS
+        nextTick += clkfreq
+        if secondIdx <= LONG_FRAME_START_SECOND || secondIdx > LONG_FRAME_END_SECOND
+            runFramesUntil(nextTick, guardTicks, secondIdx)
+        waitct(nextTick)
+        if secondIdx <= LONG_FRAME_START_SECOND || secondIdx >= LONG_FRAME_END_SECOND
+            checkBoundary(secondIdx)
+
+
+PRI runFramesUntil(targetTick, guardTicks, secondIdx)
+    ' call update() once per frame until fewer than GUARD_FRAMES frames remain before targetTick
+
+    repeat while (targetTick - sampleTick()) > guardTicks
+        waitus(FRAME_US)
+        timeBase.update()
+        if secondIdx > NORMAL_CHECK_SECOND && secondIdx <= LONG_FRAME_START_SECOND
+            refFrames++
+
+
+PRI checkBoundary(secondIdx) | boundaryTick, nowMs, deviationMs
+    ' at a whole second: one update(), compared with secondIdx x 1000 ms
+
+    boundaryTick := sampleTick()
+    nowMs := timeBase.update()
+    deviationMs := nowMs - secondIdx * timeBase.MS_PER_SECOND
+    maxDeviationMs := maxDeviationMs #> abs deviationMs
+    if secondIdx > NORMAL_CHECK_SECOND && secondIdx <= LONG_FRAME_START_SECOND
+        refFrames++
+    case secondIdx
+        NORMAL_CHECK_SECOND:
+            deviationAtNormal := deviationMs
+            refStartTick := boundaryTick
+        LONG_FRAME_START_SECOND:
+            refRateX100 := muldiv64(refFrames * timeBase.FPS_SCALE, clkfreq, boundaryTick - refStartTick)
+            fpsBeforeLongX100 := timeBase.framesPerSecondX100()
+        LONG_FRAME_END_SECOND:
+            deviationAfterLong := deviationMs
+            fpsAfterLongX100 := timeBase.framesPerSecondX100()
+        RUN_SECONDS:
+            getMsAtEnd := getms()
+            deviationAtEnd := deviationMs
+            elapsedAtEnd := nowMs
+            otherElapsedAtEnd := timeOther.elapsedMs()
+    if secondIdx // REPORT_EVERY_SECONDS == 0
+        debug("TIMEBASE  at_s=", udec_(secondIdx), "  elapsed_ms=", sdec_(nowMs), "  expected_ms=", sdec_(secondIdx * timeBase.MS_PER_SECOND), "  deviation_ms=", sdec_(deviationMs), "  wraps=", udec_(wrapCount))
+
+
+PRI sampleTick() : nowTick
+    ' read the counter; count a wrap when it reads lower (unsigned) than the previous sample
+
+    nowTick := getct()
+    if nowTick +< lastSeenTick
+        wrapCount++
+    lastSeenTick := nowTick
+
+
+PRI reportChecks() | getMsElapsed
+    ' print the summary lines, then one PASS/FAIL line per check
+
+    getMsElapsed := getMsAtEnd - startGetMs
+    debug("TIMEBASE  summary  elapsed_ms=", sdec_(elapsedAtEnd), "  expected_ms=", sdec_(RUN_SECONDS * timeBase.MS_PER_SECOND), "  max_deviation_ms=", sdec_(maxDeviationMs), "  wraps=", udec_(wrapCount), "  getms_elapsed_ms=", sdec_(getMsElapsed), "  second_instance_ms=", sdec_(otherElapsedAtEnd))
+    debug("FPS       meter_x100=", udec_(fpsBeforeLongX100), "  reference_x100=", udec_(refRateX100), "  reference_frames=", udec_(refFrames), "  after_long_frame_x100=", udec_(fpsAfterLongX100))
+
+    utils.checkEqual(abs deviationAtNormal <= TOLERANCE_MS, @"60 s: elapsed total within 1 ms of the seconds counted by waitct", TRUE)
+    utils.checkEqual(abs deviationAtEnd <= TOLERANCE_MS, @"90 s: elapsed total within 1 ms of the seconds counted by waitct", TRUE)
+    utils.checkEqual(wrapCount >= MIN_WRAPS, @"the run crossed 6 or more counter wraps", TRUE)
+    utils.checkEqual(maxDeviationMs <= TOLERANCE_MS, @"every whole second checked: deviation 1 ms or less", TRUE)
+    utils.checkEqual(abs deviationAfterLong <= TOLERANCE_MS, @"a 10 s frame (over 2^31 ticks) is counted in full", TRUE)
+    utils.checkEqual(abs (getMsElapsed - elapsedAtEnd) <= TOLERANCE_MS, @"GETMS cross-check: 64-bit counter agrees within 1 ms", TRUE)
+    utils.checkEqual(otherElapsedAtEnd, @"a second OBJ declaration sees the same total (DAT singleton)", elapsedAtEnd)
+    utils.checkEqual(abs (fpsBeforeLongX100 - refRateX100) * PERCENT <= refRateX100 * FPS_TOLERANCE_PERCENT, @"FPS meter within 2 percent of the test's own frame count", TRUE)
+    utils.checkEqual(fpsAfterLongX100 < fpsBeforeLongX100 / DROP_DIVISOR, @"FPS meter reports the drop after the long frame", TRUE)
+
+
+CON ' ---- License ----
+
+{{
+
+ -------------------------------------------------------------------------------------------------
+  MIT License
+
+  Copyright (c) 2021 Stephen Moraco
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+ -------------------------------------------------------------------------------------------------
+}}

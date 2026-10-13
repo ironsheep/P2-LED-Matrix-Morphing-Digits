@@ -1,0 +1,156 @@
+'' =================================================================================================
+''
+''   File....... isp_hub75_morphTime.spin2
+''   Purpose.... Shared time base for the morphing digits: wrap-safe elapsed milliseconds, a frame-rate meter and the motion constants
+''   Authors.... Stephen M Moraco
+''               -- see below for terms of use
+''   E-mail..... stephen@ironsheep.biz
+''   Started.... Oct 2026
+''   Updated.... 12 Oct 2026
+''   Version.... v1.0.0
+''
+'' =================================================================================================
+
+{ One clock for the whole program. Its state is in DAT, so every object that includes this file
+  (the frame loop, a group, a test) reads and writes the same total: there is one time base, not
+  one per group. Keep this object free of CON overrides: an override that changed its image
+  would give that instance its own DAT and split the clock (p2kb p2kbSpin2ObjectImageDedup).
+
+  Usage (one cog, the one that runs the frame loop; R-1.5, no cogs of our own):
+    1. reset()                  - once, before the frame loop starts (update() calls it on first use)
+    2. nowMs := update()        - once per frame, before anything is drawn: reads the counter once,
+                                  adds the time since the last call, counts the frame
+    3. pass nowMs down          - every group, digit and segment animates from this one value
+    4. framesPerSecondX100()    - the meter's figure for a live FPS group or a performance test
+
+  Wrap: getct() is the low 32 bits of the system counter and wraps every 2^32 ticks (12.82 s at
+  335 MHz). Time is added up from getct() differences, which are exact modulo 2^32, and divided
+  unsigned, so any gap shorter than one wrap is counted in full. update() must therefore run at
+  least once per wrap period; a frame loop runs it every refresh (about 14 ms on the quad). A gap
+  longer than one wrap loses whole wraps (12.82 s each at 335 MHz) and cannot be detected here.
+
+  Units: milliseconds as a LONG. The total passes 2^31 after 24.8 days and 2^32 after 49.7 days;
+  compare two times by subtracting them (later - earlier), never with < or >, and the difference
+  stays right for any span under 24.8 days.
+}
+
+CON ' time base units
+
+  MS_PER_SECOND = 1000                                          ' converts clkfreq (ticks per second) to ticks per millisecond
+  FPS_SCALE = 100                                               ' the frame rate is reported times this (two decimals)
+  FPS_WINDOW_MS = 1000                                          ' the meter publishes a new figure once per window of at least this length
+
+CON ' motion settings shared by every level (group, digit, segment)
+
+  DEFAULT_MOVE_MS = 300                                         ' a move's duration when the caller sets none (spec R-5.4's example)
+
+  ' how a move's position follows its time (morphCounters.setEasing()):
+  '   EASE_LINEAR - constant speed: the position is the fraction of the duration that has passed (the 2021 look)
+  '   EASE_SMOOTH - smoothstep, 3p^2 - 2p^3: starts and ends slowly, with no jump in speed at either end
+  #0, EASE_LINEAR, EASE_SMOOTH
+
+DAT ' shared clock (one copy for the program; see the notes above)
+
+  prevTick        long    0                                     ' the counter at the last update()
+  leftoverTicks   long    0                                     ' ticks below one millisecond, carried to the next update()
+  msTotal         long    0                                     ' milliseconds since reset()
+  ticksPerMs      long    0                                     ' clkfreq / MS_PER_SECOND; 0 means reset() has not run
+  windowStartMs   long    0                                     ' msTotal when the current meter window began
+  windowFrames    long    0                                     ' update() calls in the current meter window
+  fpsLatestX100   long    0                                     ' frames per second x FPS_SCALE over the last completed window
+
+PUB null()
+'' This is NOT a top level object.
+''
+
+PUB reset()
+'' Start the time base at zero and clear the frame-rate meter.
+''
+
+    ticksPerMs := clkfreq / MS_PER_SECOND
+    prevTick := getct()
+    leftoverTicks := 0
+    msTotal := 0
+    windowStartMs := 0
+    windowFrames := 0
+    fpsLatestX100 := 0
+
+
+PUB update() : nowMs | nowTick, deltaTicks, carryTicks, windowMs
+'' Read the system counter once, add the time since the last call, count one frame and return the total.
+''
+'' @returns nowMs - Milliseconds since reset(); compare times by subtracting them
+
+' Local Variables:
+' @local nowTick - The system counter now
+' @local deltaTicks - Ticks since the last call, modulo 2^32: exact for any gap shorter than one counter wrap
+' @local carryTicks - Ticks below one millisecond, this call's and the ones carried from earlier calls
+' @local windowMs - Length of the current meter window so far
+
+    if ticksPerMs == 0
+        reset()                                                 ' first use without reset(): the time base starts now
+    nowTick := getct()
+    deltaTicks := nowTick - prevTick
+    prevTick := nowTick
+    ' unsigned divide and remainder: a gap of 2^31 ticks or more (6.41 s at 335 MHz) is still positive
+    msTotal += deltaTicks +/ ticksPerMs
+    carryTicks := (deltaTicks +// ticksPerMs) + leftoverTicks
+    if carryTicks +>= ticksPerMs
+        msTotal++
+        carryTicks -= ticksPerMs
+    leftoverTicks := carryTicks
+    nowMs := msTotal
+
+    ' frame-rate meter: a counter and a compare per frame; the division runs once per window
+    windowFrames++
+    windowMs := msTotal - windowStartMs
+    if windowMs >= FPS_WINDOW_MS
+        fpsLatestX100 := muldiv64(windowFrames, FPS_SCALE * MS_PER_SECOND, windowMs)
+        windowStartMs := msTotal
+        windowFrames := 0
+
+
+PUB elapsedMs() : nowMs
+'' Return the total as of the last update(), without reading the counter (the current frame's time).
+''
+'' @returns nowMs - Milliseconds since reset(); compare times by subtracting them
+
+    nowMs := msTotal
+
+
+PUB framesPerSecondX100() : rateX100
+'' Return the frame rate over the last completed meter window, times FPS_SCALE (7107 means 71.07 frames per second).
+''
+'' @returns rateX100 - Frames per second x FPS_SCALE; 0 until the first window of FPS_WINDOW_MS completes
+
+    rateX100 := fpsLatestX100
+
+
+CON ' license
+
+{{
+
+ -------------------------------------------------------------------------------------------------
+  MIT License
+
+  Copyright (c) 2021 Stephen Moraco
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+ -------------------------------------------------------------------------------------------------
+}}

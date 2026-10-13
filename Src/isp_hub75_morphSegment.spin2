@@ -7,7 +7,7 @@
 ''               -- see below for terms of use
 ''   E-mail..... stephen@ironsheep.biz
 ''   Started.... Jan 2021
-''   Updated.... 21 Jan 2021
+''   Updated.... 12 Oct 2026
 ''   Version.... v1.0.0
 ''
 '' =================================================================================================
@@ -57,10 +57,20 @@ CON { segment states, segment names, orientations and such }
 '
 ' --------------------------------------------------------------------------------------------------
 
+CON ' time-based motion: integer fixed point, no floats per frame
+
+    PROGRESS_ONE = 32768        ' Q15: a move's progress runs from 0 up to this value (the whole move)
+    FIRST_STEP = 1              ' steps are numbered from 1; the command itself draws step 1
+    LAST_STEP_COUNT = 1         ' the 2021 renderer counts stepCount down; it draws the move's last step at this count
+    STILL_MOVING = 1            ' animate() returns this count while the segment's move is in progress, 0 once at rest
+    SMOOTH_SQUARE_GAIN = 3      ' smoothstep 3p^2 - 2p^3: the factor of the p^2 term
+    SMOOTH_CUBE_GAIN = 2        ' smoothstep 3p^2 - 2p^3: the factor of the p^3 term
+
 OBJ
     pixels      : "isp_hub75_screenUtils"
     color       : "isp_hub75_color"
     colorUtils  : "isp_hub75_colorUtils"
+    timeBase    : "isp_hub75_morphTime"     ' motion constants only: DEFAULT_MOVE_MS and the EASE_ styles
 
 VAR
     ' configuration
@@ -85,6 +95,13 @@ VAR
     long    segStartY
     ' color
     long    segRgbColor    ' TODO add next color for when ea. digit value can be a diff color
+    ' time-based motion: the position of a move follows (nowMs - moveStartMs) / moveDurationMs
+    long    moveDurationMs  ' how long every move of this segment takes, in ms
+    long    moveEaseStyle   ' timeBase.EASE_LINEAR or timeBase.EASE_SMOOTH
+    long    moveStartMs     ' nowMs of the first animate() after the command (stamped there, lazily)
+    long    totalSteps      ' steps in the current move: segLength, segLength - 1 for a column slide, 1 for IMMEDIATE
+    long    drawnStep       ' the step last drawn, FIRST_STEP to totalSteps
+    long    bStartPending   ' TRUE from a command until the next animate() stamps moveStartMs
 
 
 PUB null()
@@ -95,6 +112,8 @@ PUB initialize(nChainIndex, nPhysicalRows, nPhysicalColumns)
     chainIndex := nChainIndex
     maxPhysicalCols := nPhysicalColumns
     maxPhysicalRows := nPhysicalRows
+    moveDurationMs := timeBase.DEFAULT_MOVE_MS
+    moveEaseStyle := timeBase.EASE_LINEAR
 
 PUB placeSegment(row, column, orientation, segmentWidth, segmentLength, initialState, rgbColor) | nmInitState, nmSeg, bIsHoriz
     '' Locate a desired segment on our screen. Draw initial segement if state is NOT off
@@ -137,8 +156,20 @@ PUB placeSegment(row, column, orientation, segmentWidth, segmentLength, initialS
     if initialState <> currentState
         updateSegmentToState(initialState)
 
-PUB commandSegment(commandBits) | bTurnOn, nmStyle, nmSeg, nmOnOff
-    '' Start the segment moving if NOT busy
+PUB commandSegment(commandBits) | bTurnOn, nmStyle, nmSeg
+'' Start a move of this segment and draw its first step; a move still in flight is first snapped to its end.
+''
+'' @param commandBits - Command byte %GGG_AAAT: the style (MASK_STYLE) and on/off (MASK_ONOFF); the segment ID bits are not used here
+
+' Local Variables:
+' @local bTurnOn - TRUE when the command turns the segment on
+' @local nmStyle - Name of the command's style, for the debug trace
+' @local nmSeg - Name of this segment, for the debug trace
+
+    ' A move in flight ends where it was going (spec R-5.7): its last step is drawn in its own style, and the
+    ' new command is then judged against the true state. Before this, an opposite command was silently dropped.
+    if not isMovementComplete()
+        finishMove()
     bTurnOn := (commandBits & MASK_ONOFF) == CMD_TURN_ON
     animateStyle := (commandBits & MASK_STYLE)
     nmStyle := nameOfCommand(animateStyle)
@@ -169,6 +200,10 @@ PUB commandSegment(commandBits) | bTurnOn, nmStyle, nmSeg, nmOnOff
         else
             nextState := STATE_TURNING_OFF
             desiredEndState := STATE_OFF
+        ' the command draws step 1 now; the next animate() stamps the move's start time
+        totalSteps := stepCount
+        drawnStep := FIRST_STEP
+        bStartPending := TRUE
         moveSegmentToState(nextState)
 
 PUB hideSegment()
@@ -188,10 +223,58 @@ PUB isMovementComplete() : status
     '' Return T/F where T means that all movement for this segment is complete
     status := (desiredEndState == currentState)
 
-PUB animateStep()
-    '' Do one animation step, if one is pending
+PUB animate(nowMs) : movingCount | moveElapsedMs, progress, targetStep
+'' Draw this segment's move at its position for time nowMs; nothing is drawn when no move is pending or the step is unchanged.
+''
+'' @param nowMs - The frame's time in ms, from isp_hub75_morphTime.update(): the same value for every group, digit and segment of a frame
+'' @returns movingCount - 1 when the move is still in progress after this call, 0 when the segment is at rest
+
+' Local Variables:
+' @local moveElapsedMs - Time since the move's first animate(), in ms (0 on that call)
+' @local progress - Share of the move done, Q15 (PROGRESS_ONE is the whole move), after easing
+' @local targetStep - The step that belongs to nowMs, FIRST_STEP to totalSteps
+
     if not isMovementComplete()
-        updateSegmentToState(nextState)
+        if bStartPending
+            moveStartMs := nowMs
+            bStartPending := FALSE
+        moveElapsedMs := (nowMs - moveStartMs) #> 0                     ' times compared by subtraction: wrap-safe
+        if moveElapsedMs >= moveDurationMs
+            targetStep := totalSteps                                    ' done: the last step completes the state
+        else
+            progress := easedProgress(muldiv64(moveElapsedMs, PROGRESS_ONE, moveDurationMs))
+            targetStep := FIRST_STEP + muldiv64(progress, totalSteps - FIRST_STEP, PROGRESS_ONE)
+        if targetStep <> drawnStep                                      ' R-9.3: no step change, no drawing
+            ' a late frame jumps straight to the step for its time: motion never slows down (R-5.4)
+            drawnStep := targetStep
+            if targetStep == totalSteps
+                finishMove()
+            else
+                stepCount := (totalSteps - targetStep) + LAST_STEP_COUNT
+                updateSegmentToState(nextState)
+    movingCount := 0
+    if not isMovementComplete()
+        movingCount := STILL_MOVING
+
+PUB setMotion(durationMs, easeStyle)
+'' Set how this segment moves: the duration of every move and its easing; a move in flight follows them from the next animate().
+''
+'' @param durationMs - Duration of each move in ms; morphCounters.setMoveDuration() checks the range
+'' @param easeStyle - Easing style, timeBase.EASE_LINEAR or timeBase.EASE_SMOOTH; morphCounters.setEasing() checks it
+
+    moveDurationMs := durationMs
+    moveEaseStyle := easeStyle
+
+PRI easedProgress(linearProgress) : shapedProgress
+' Shape a move's linear progress by this segment's easing style (Q15 in, Q15 out, integers only).
+'
+' @param linearProgress - Share of the move's time that has passed, 0 to PROGRESS_ONE - 1
+' @returns shapedProgress - Share of the move's distance to draw, 0 to PROGRESS_ONE - 1
+
+    shapedProgress := linearProgress
+    if moveEaseStyle == timeBase.EASE_SMOOTH
+        ' 3p^2 - 2p^3 as p^2 x (3 - 2p): p^2 is at most 2^30, the 64-bit product at most 1.1 x 10^14 (muldiv64 is unsigned)
+        shapedProgress := muldiv64(linearProgress * linearProgress, SMOOTH_SQUARE_GAIN * PROGRESS_ONE - SMOOTH_CUBE_GAIN * linearProgress, PROGRESS_ONE * PROGRESS_ONE)
 
 PRI moveSegmentToState(newNextState) | nmEndState, nmNextState
     '' Start sequence of segment updates to desired state (on/off)
@@ -211,6 +294,11 @@ PRI moveSegmentToState(newNextState) | nmEndState, nmNextState
         updateSegmentToState(nextState)
     else
         debug("  -- already in newNextState?")
+
+PRI finishMove()
+    ' End the move in flight: draw its last step, which completes the state. Shared by a snap (commandSegment) and the final step (animate).
+    stepCount := LAST_STEP_COUNT
+    updateSegmentToState(nextState)
 
 PRI updateSegmentToState(newState) | nmCurrState, nmNewState, nmEndState, nmSeg
     nmCurrState := nameOfState(currentState)

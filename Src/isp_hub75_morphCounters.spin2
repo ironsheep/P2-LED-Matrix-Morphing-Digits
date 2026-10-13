@@ -7,7 +7,7 @@
 ''               -- see below for terms of use
 ''   E-mail..... stephen@ironsheep.biz
 ''   Started.... Jan 2021
-''   Updated.... 24 Jan 2021
+''   Updated.... 12 Oct 2026
 ''   Version.... v1.0.0
 ''
 '' =================================================================================================
@@ -24,11 +24,27 @@ CON { public control values }
     WITH_WRAP = TRUE
     WITHOUT_WRAP = FALSE
 
+CON ' status codes: SUCCESS or a negative error (a refused call changes nothing, spec R-10.2)
+
+    SUCCESS = 0
+    E_OUT_OF_RANGE = -1             ' a move or hold duration outside MIN_MOVE_MS / MIN_HOLD_MS to MAX_TIME_MS
+    E_UNKNOWN_EASING = -2           ' an easing style that is not timeBase.EASE_LINEAR or timeBase.EASE_SMOOTH
+
+CON ' motion and cadence settings of a group
+
+    MIN_MOVE_MS = 1                 ' a move lasts at least 1 ms (animate() divides by the duration)
+    MIN_HOLD_MS = 0                 ' no hold: the next value may start on the frame after a transition completes
+    MAX_TIME_MS = 86_400_000        ' one day, the longest move or hold accepted: times are compared by subtraction,
+                                    '   which is right for spans under 24.8 days (isp_hub75_morphTime)
+    DEFAULT_HOLD_MS = 200           ' hold after each transition when the caller sets none: the 2021 demo held 8 to 10
+                                    '   loop passes, 178 to 222 ms (Docs/analysis/morph-time-design.md section d)
+
 CON { Display constants }
 
 #0, GRP_UNKNOWN, GRP_CLOCK, GRP_UP_COUNTER, GRP_DOWN_COUNTER, GRP_DIGITS, GRP_DIGITS_RANDOM
 
 MAX_DIGITS = 6
+LAST_DIGIT = MAX_DIGITS - 1         ' index of the last digit slot (digits[] runs from 0)
 
 GAP_LARGE_DIGITS = 4
 
@@ -36,11 +52,11 @@ OBJ { Objects we use }
 
     pixels              : "isp_hub75_screenUtils"
     digits[MAX_DIGITS]  : "isp_hub75_morph7seg"
+    timeBase            : "isp_hub75_morphTime"     ' motion constants only: DEFAULT_MOVE_MS and the EASE_ styles
 
 VAR { instance variable }
 
     long    numberDigits
-    long    segmentPeriod
     long    groupType
     long    currValue
     long    valueCap
@@ -54,7 +70,6 @@ VAR { instance variable }
     long    digitHspace
 
     ' display delay times
-    long    digitPeriod
     long    digitVal
 
     ' variables when CLOCK is type
@@ -67,10 +82,16 @@ VAR { instance variable }
 
     long    initValue[MAX_DIGITS]
 
+    ' time-based motion and cadence
+    long    moveDurationMs      ' every segment move of the group takes this long, in ms
+    long    moveEaseStyle       ' timeBase.EASE_LINEAR or timeBase.EASE_SMOOTH
+    long    holdDurationMs      ' the group holds a value this long after its transition completes, in ms
+    long    holdStartMs         ' nowMs of the animate() that saw the transition complete
+    long    bHoldRunning        ' TRUE from that animate() until nextTimeCycle() starts the next value
+
     ' flags
     byte    showSecondIndicator
     byte    isSetup
-    byte    busyCount
 
 PUB null()
     '' This is NOT a top level object
@@ -86,6 +107,11 @@ PUB initialize(nChainIndex, nPhysicalRows, nPhysicalColumns) | digitIndex
     chainIndex := nChainIndex
     repeat digitIndex from 0 to MAX_DIGITS -1
         digits[digitIndex].initialize(nChainIndex, nPhysicalRows, nPhysicalColumns)
+    ' the segments default to the same motion when they are initialized
+    moveDurationMs := timeBase.DEFAULT_MOVE_MS
+    moveEaseStyle := timeBase.EASE_LINEAR
+    holdDurationMs := DEFAULT_HOLD_MS
+    bHoldRunning := FALSE
 
 PUB placeDigitGroup(row, column, grpType, nbrDigits, segThickness, segLength, initialValue, rgbColor) : grpWidth, grpHeight | currCol, digitIdx
     '' Locate a desired digit group on our screen. Draw initial segements if {initialValue} is NOT off
@@ -135,6 +161,82 @@ PUB placeDigitGroup(row, column, grpType, nbrDigits, segThickness, segLength, in
     if groupType == GRP_CLOCK
         showSecondsDots( 0 )
 
+PUB setMoveDuration(durationMs) : status
+'' Set how long every segment move of this group takes: the same real time for every segment length (spec R-5.4).
+''
+'' @param durationMs - Duration of each move in ms, MIN_MOVE_MS to MAX_TIME_MS (timeBase.DEFAULT_MOVE_MS when never set); a move in flight follows it from the next animate()
+'' @returns status - SUCCESS, or E_OUT_OF_RANGE with nothing changed
+
+    status := E_OUT_OF_RANGE
+    if durationMs >= MIN_MOVE_MS && durationMs <= MAX_TIME_MS
+        moveDurationMs := durationMs
+        applyMotion()
+        status := SUCCESS
+
+PUB setHoldDuration(holdMs) : status
+'' Set how long this group holds each value after its transition completes, before isHoldComplete() reports TRUE.
+''
+'' @param holdMs - Hold in ms, MIN_HOLD_MS to MAX_TIME_MS (DEFAULT_HOLD_MS when never set)
+'' @returns status - SUCCESS, or E_OUT_OF_RANGE with nothing changed
+
+    status := E_OUT_OF_RANGE
+    if holdMs >= MIN_HOLD_MS && holdMs <= MAX_TIME_MS
+        holdDurationMs := holdMs
+        status := SUCCESS
+
+PUB setEasing(easeStyle) : status
+'' Set how the position of every segment move of this group follows its time.
+''
+'' @param easeStyle - Easing style, timeBase.EASE_LINEAR (constant speed, used when never set) or timeBase.EASE_SMOOTH (slow start and end)
+'' @returns status - SUCCESS, or E_UNKNOWN_EASING with nothing changed
+
+    status := E_UNKNOWN_EASING
+    if easeStyle == timeBase.EASE_LINEAR || easeStyle == timeBase.EASE_SMOOTH
+        moveEaseStyle := easeStyle
+        applyMotion()
+        status := SUCCESS
+
+PUB isAnimationComplete() : bComplete | digitIdx
+'' Return TRUE when no segment of this group is moving. A pure query: asking does not change the answer.
+''
+'' @returns bComplete - TRUE when every digit of the group has finished its moves
+
+' Local Variables:
+' @local digitIdx - Index of the digit being asked
+
+    bComplete := TRUE
+    repeat digitIdx from 0 to LAST_DIGIT
+        if not digits[digitIdx].isAnimationComplete()
+            bComplete := FALSE
+            quit
+
+PUB animate(nowMs) : movingCount | digitIdx
+'' Draw every moving segment of this group at its position for time nowMs, and start the hold when the transition completes.
+''
+'' @param nowMs - The frame's time in ms, from isp_hub75_morphTime.update(): the same value for every group, digit and segment of a frame
+'' @returns movingCount - Number of this group's segments still moving after this call; 0 when the transition is complete
+
+' Local Variables:
+' @local digitIdx - Index of the digit being drawn
+
+    movingCount := 0
+    if numberDigits > 0             ' only the digits this group uses; an unused digit never moves
+        repeat digitIdx from 0 to numberDigits - 1
+            movingCount += digits[digitIdx].animate(nowMs)
+    if movingCount == 0 && bHoldRunning == FALSE     ' this pass drew the last of the transition: start the hold
+        holdStartMs := nowMs
+        bHoldRunning := TRUE
+
+PUB isHoldComplete(nowMs) : bHoldDone
+'' Return TRUE when this group's transition has completed and its hold has passed, so the caller may start the next value.
+''
+'' @param nowMs - The frame's time in ms, from isp_hub75_morphTime.update(): the same value for every group, digit and segment of a frame
+'' @returns bHoldDone - TRUE once the hold duration has passed since animate() saw the transition complete
+
+    bHoldDone := FALSE
+    if bHoldRunning == TRUE
+        bHoldDone := (nowMs - holdStartMs) >= holdDurationMs          ' times compared by subtraction: wrap-safe
+
 PRI updateInitsFromValue(desiredValue) | currDivisor, digitIdx, digitValue, remainingValue
     currDivisor := maxValueDivisor
     remainingValue := desiredValue
@@ -154,9 +256,6 @@ PRI ensureIsSetup()
 PRI initialSetup() | byte segIndex, orientation, segRow, segCol, segW, segL
     ' Perform initial setup
     isSetup := TRUE
-    busyCount := 0
-    segmentPeriod := 0     ' 8 x 100ths of a second
-    digitPeriod := 13    ' 90     ' 12 x 100ths of a second
     hours24 := hours := minutes := 0
     showSecondIndicator := FALSE
     if groupType == GRP_CLOCK
@@ -169,6 +268,7 @@ PUB isConfigured() : bStatus
 PUB nextTimeCycle() | bShowCurrValue
     '' step this counter by one
     'debug("mG:-nxTimCyc(", udec_(groupType), ")")
+    bHoldRunning := FALSE       ' a new transition: animate() starts the next hold when it completes
     bShowCurrValue := TRUE
     case groupType
         GRP_CLOCK:
@@ -224,31 +324,14 @@ PRI updateDigitsFromValue(desiredValue) | currDivisor, digitIdx, digitValue, rem
 
     'repeat ' stop to eval debug
 
-PUB isAnimationComplete() : completeStatus | digitIdx
-    '' return T/F where T means this countera animations are complete
-    'debug("mG:-cmplt? (", udec_(groupType), ")")
-    completeStatus := TRUE
-    repeat digitIdx from 0 to MAX_DIGITS - 1
-        if not digits[digitIdx].isAnimationComplete()
-            completeStatus := FALSE
-            quit
-    if completeStatus == TRUE && busyCount > 0
-        completeStatus := FALSE
-        'debug("mG:-BUSY (", udec_(groupType), ")")
-        if busyCount > 0
-            busyCount := busyCount - 1
+PRI applyMotion() | digitIdx
+' Hand the group's move duration and easing to every digit (and so to every segment).
 
-PUB animateStep() | digitIdx
-    '' animate each digit in this counter
-    if not isAnimationComplete()
-        repeat digitIdx from 0 to MAX_DIGITS - 1
-            if not digits[digitIdx].isAnimationComplete()
-                digits[digitIdx].animateStep()
+' Local Variables:
+' @local digitIdx - Index of the digit being set
 
-        if isAnimationComplete()
-            'debug("mG:-DLY! (", udec_(groupType), ")")
-            busyCount := 40
-
+    repeat digitIdx from 0 to LAST_DIGIT
+        digits[digitIdx].setMotion(moveDurationMs, moveEaseStyle)
 
 PRI calcDigitSizeFmSegLength(segmentLength, segmentWidth) : digWidth, digHeight, segWidth
     ' FIXME: UNDONE assumes segmentWidth of 1

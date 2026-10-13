@@ -7,7 +7,7 @@
 ''               -- see below for terms of use
 ''   E-mail..... stephen@ironsheep.biz
 ''   Started.... Jan 2021
-''   Updated.... 21 Jan 2021
+''   Updated.... 12 Oct 2026
 ''   Version.... v1.0.0
 ''
 '' =================================================================================================
@@ -20,6 +20,7 @@ CON { public control values }
     WITH_WRAP = TRUE
     WITHOUT_WRAP = FALSE
     MAX_SEGMENTS = 7
+    LAST_SEGMENT = MAX_SEGMENTS - 1     ' index of the last segment slot (segments[] runs from 0)
 
 OBJ
 
@@ -114,12 +115,31 @@ PUB isAnimationComplete() : status | segmentIndex
             status := FALSE
             quit   ' we have our answer, abort loop
 
-PUB animateStep() | segmentIndex
-    '' Have each sement do 1 animation step, if one is pending
-    if not isAnimationComplete()
-        repeat segmentIndex from 0 to 6
-            if not segments[segmentIndex].isMovementComplete()
-                segments[segmentIndex].animateStep()
+PUB animate(nowMs) : movingCount | segmentIndex
+'' Draw every moving segment of this digit at its position for time nowMs (a segment that is not moving draws nothing).
+''
+'' @param nowMs - The frame's time in ms, from isp_hub75_morphTime.update(): the same value for every group, digit and segment of a frame
+'' @returns movingCount - Number of this digit's segments still moving after this call; 0 when the digit is at rest
+
+' Local Variables:
+' @local segmentIndex - Index of the segment being drawn
+
+    movingCount := 0
+    if not isAnimationComplete()      ' early-out: an idle digit draws nothing
+        repeat segmentIndex from 0 to LAST_SEGMENT
+            movingCount += segments[segmentIndex].animate(nowMs)
+
+PUB setMotion(durationMs, easeStyle) | segmentIndex
+'' Set how every segment of this digit moves: the duration of each move and its easing.
+''
+'' @param durationMs - Duration of each move in ms; morphCounters.setMoveDuration() checks the range
+'' @param easeStyle - Easing style, timeBase.EASE_LINEAR or timeBase.EASE_SMOOTH; morphCounters.setEasing() checks it
+
+' Local Variables:
+' @local segmentIndex - Index of the segment being set
+
+    repeat segmentIndex from 0 to LAST_SEGMENT
+        segments[segmentIndex].setMotion(durationMs, easeStyle)
 
 PRI ensureIsSetup()
     ' Do intial setup, if not yet done

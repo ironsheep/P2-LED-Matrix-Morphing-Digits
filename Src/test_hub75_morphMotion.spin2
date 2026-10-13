@@ -1,0 +1,358 @@
+'' =================================================================================================
+''
+''   File....... test_hub75_morphMotion.spin2
+''   Purpose.... Board test of time-based motion: move duration at two frame rates, a long frame, mid-move commands, setters
+''   Authors.... Stephen M Moraco
+''               -- see below for terms of use
+''   E-mail..... stephen@ironsheep.biz
+''   Started.... Oct 2026
+''   Updated.... 12 Oct 2026
+''
+'' =================================================================================================
+
+{ Task 163, phase 2: proves the animate(nowMs) contract on the quad.
+
+  The probe is the screen buffer itself. A horizontal segment turning on left to right lights one more pixel per
+  step, so the number of lit pixels in its row IS the step the renderer drew (turning off, it is length - step).
+  litCount() reads those pixels back through screenUtils.pixelAddressAtRC(); it never asks the segment.
+  Time comes from isp_hub75_morphTime; the move-duration checks also read getct() themselves, an independent
+  count of the same interval.
+
+  Sections:
+    1. a 300 ms move takes 300 ms, never less and at most one frame more, at the natural (commit-paced) frame
+       rate and at a slower rate forced by a waitms() in every frame
+    2. a frame forced long (LONG_FRAME_MS) during a 3 s move: the next frame draws the step for the time that
+       has passed (a jump of many steps), and the frame-rate meter's figure drops
+    3. a command arriving mid-move snaps the move in flight to its end, then starts the new move
+    4. smoothstep easing puts the segment where 3p^2 - 2p^3 says (expected steps worked out by hand below)
+    5. the group setters refuse out-of-range values with an error code and change nothing (R-10.2)
+
+  Log lines this program adds to the harness's lines (same field style):
+    MOVE      <name>  move_ms=<n>  measured_ms=<n>  ticks_ms=<n>  frames=<n>  max_frame_ms=<n>
+    LONGFRAME step_before=<n>  expected_before=<n>  step_after=<n>  expected_after=<n>  elapsed_after_ms=<n>  fps_before_x100=<n>  fps_after_x100=<n>
+}
+
+CON ' ---- Timing ----
+
+  CLK_FREQ = 335_000_000                                        ' system freq as a constant
+  _clkfreq = CLK_FREQ                                           ' set system clock
+
+CON ' ---- Test segment and moves ----
+
+  SEG_ROW = 40                                                  ' the test segment: a horizontal top segment ...
+  SEG_COLUMN = 8
+  SEG_LENGTH = 31                                               ' ... of 31 pixels: 31 steps, 30 step intervals
+  SEG_STEP_INTERVALS = SEG_LENGTH - 1
+  SEG_THICKNESS = 1
+  MOVE_MS = 300                                                 ' the plan's verify case
+  HALF_MOVE_MS = MOVE_MS / 2
+  QUARTER_MOVE_MS = MOVE_MS / 4
+  THREE_QUARTER_MOVE_MS = MOVE_MS - QUARTER_MOVE_MS
+  SLOW_FRAME_EXTRA_MS = 40                                      ' added to every frame of the slow run: about 18 frames/s instead of 71
+  NO_EXTRA_MS = 0
+  TIMING_SLACK_MS = 1                                           ' getct and the time base floor the same interval to whole ms separately
+  ONE_MS = 1                                                    ' the smallest step past a limit
+  STEP_AT_HALF_MOVE = 1 + SEG_STEP_INTERVALS / 2                ' p = 0.5: step 1 + 15 = 16
+
+CON ' ---- Long frame ----
+
+  LONG_MOVE_MS = 3000                                           ' 100 ms per step: the jump is easy to see
+  LEAD_IN_MS = 2100                                             ' natural idle frames first: at least one whole meter window at the natural rate
+  BEFORE_LONG_MS = 500                                          ' natural frames of the move before the long frame
+  LONG_FRAME_MS = 1500                                          ' longer than the meter's window, so the update() after it closes the window that holds it
+  MIN_SKIP_STEPS = 10                                           ' the long frame must advance at least this many steps (one step per frame would advance 1)
+  STEP_TOLERANCE = 1                                            ' exact-ratio expectation against the code's Q15 truncation: one step apart at a boundary
+  DROP_DIVISOR = 2                                              ' after the long frame the meter must read under half its natural figure
+
+CON ' ---- Injected times and easing ----
+
+  INJECT_BASE_MS = 100_000                                      ' injected times start here (any value: only differences count)
+  INJECT_GAP_MS = 10_000                                        ' each injected move starts this far after the previous one
+  ' smoothstep, worked out by hand for 30 step intervals: step = 1 + floor(30 x (3p^2 - 2p^3))
+  SMOOTH_STEP_AT_QUARTER = 5                                    ' p = 0.25: 3/16 - 2/64 = 0.15625, x 30 = 4.69
+  SMOOTH_STEP_AT_THREE_QUARTERS = 26                            ' p = 0.75: 27/16 - 54/64 = 0.84375, x 30 = 25.31
+  LINEAR_STEP_AT_QUARTER = 8                                    ' p = 0.25: x 30 = 7.5 (smoothstep must differ from this)
+
+CON ' ---- Group under test ----
+
+  GROUP_ROW = 60
+  GROUP_COLUMN = 100
+  GROUP_DIGITS = 1
+  GROUP_SEG_LENGTH = 15                                         ' segment A: 15 steps, 14 step intervals
+  GROUP_START_VALUE = 0                                         ' 0 -> 1: segment A snakes off left to right, so its lit count is 15 - step
+  GROUP_A_COLUMN = GROUP_COLUMN + 1                             ' segment A starts one pixel right of the digit's left edge
+  GROUP_SMOOTH_STEP_AT_QUARTER = 3                              ' p = 0.25: 1 + floor(14 x 0.15625 = 2.19)
+  HOLD_MS = 200
+  UNKNOWN_EASING_STYLE = 99                                     ' no easing style has this value
+  REPEAT_ASKS = 3                                               ' a pure query asked this many times gives one answer
+
+OBJ
+
+    color       : "isp_hub75_color"
+    display     : "isp_hub75_display"
+    pixels      : "isp_hub75_screenUtils"
+    hub75Bffrs  : "isp_hub75_hwBufferAccess"
+    utils       : "test_hub75_morphUtils"
+    timeBase    : "isp_hub75_morphTime"
+    seg         : "isp_hub75_morphSegment"
+    group       : "isp_hub75_morphCounters"
+
+VAR
+
+    long    chainIndex
+    long    maxRows
+    long    maxColumns
+
+PUB go()
+'' Run the motion test: start the display, run each section, finish.
+''
+
+    utils.beginSuite(@"morphMotion time-based motion")
+    chainIndex := hub75Bffrs.indexForHub75ChainId(hub75Bffrs.HUB75_ADAPTER_1)
+    display.start(display.HUB75_ADAPTER_1)
+    maxColumns := hub75Bffrs.maxDisplayColumns(chainIndex)
+    maxRows := hub75Bffrs.maxDisplayRows(chainIndex)
+    display.clearScreen()
+    display.commitScreenToPanelSet()
+    timeBase.reset()
+
+    seg.initialize(chainIndex, maxRows, maxColumns)
+    seg.placeSegment(SEG_ROW, SEG_COLUMN, seg.SOR_TOP_A, SEG_THICKNESS, SEG_LENGTH, seg.STATE_OFF, color.cRed)
+    utils.checkEqual(segmentLit(), @"probe: the placed segment reads all dark", 0)
+
+    checkMoveTiming(@"natural frame rate, turning on", NO_EXTRA_MS, seg.CMD_TURN_ON | seg.CMD_LT_TO_RT, SEG_LENGTH)
+    checkMoveTiming(@"slow frame rate, turning off", SLOW_FRAME_EXTRA_MS, seg.CMD_TURN_OFF | seg.CMD_LT_TO_RT, 0)
+    checkLongFrame()
+    checkSnap()
+    checkEasing()
+    checkGroupSetters()
+
+    utils.finish()
+
+
+PRI checkMoveTiming(pName, extraMs, command, endLit) | nowMs, startMs, prevMs, maxFrameMs, frameCount, startTick, endTick, measuredMs, tickMs
+    ' run a MOVE_MS move in a real frame loop (update, animate, commit) and time it from the frame that stamps its start
+    ' to the frame that completes it
+
+    seg.setMotion(MOVE_MS, timeBase.EASE_LINEAR)
+    seg.commandSegment(command)                                 ' draws step 1
+    nowMs := timeBase.update()
+    startTick := getct()
+    startMs := nowMs
+    prevMs := nowMs
+    endTick := startTick
+    maxFrameMs := 0
+    frameCount := 0
+    seg.animate(nowMs)                                          ' stamps the move's start at startMs
+    repeat until seg.isMovementComplete()
+        display.commitScreenToPanelSet()
+        if extraMs > 0
+            waitms(extraMs)
+        nowMs := timeBase.update()
+        endTick := getct()
+        maxFrameMs := maxFrameMs #> (nowMs - prevMs)
+        prevMs := nowMs
+        frameCount++
+        seg.animate(nowMs)
+    display.commitScreenToPanelSet()
+    measuredMs := nowMs - startMs
+    tickMs := muldiv64(endTick - startTick, timeBase.MS_PER_SECOND, clkfreq)
+    debug("MOVE      ", zstr_(pName), "  move_ms=", udec_(MOVE_MS), "  measured_ms=", sdec_(measuredMs), "  ticks_ms=", udec_(tickMs), "  frames=", udec_(frameCount), "  max_frame_ms=", sdec_(maxFrameMs))
+
+    utils.checkEqual(measuredMs >= MOVE_MS, @"the move never ends before its duration", TRUE)
+    utils.checkEqual(measuredMs <= MOVE_MS + maxFrameMs, @"the move ends at most one frame after its duration", TRUE)
+    utils.checkEqual(abs (tickMs - measuredMs) <= TIMING_SLACK_MS, @"getct agrees with the time base on the move's length", TRUE)
+    utils.checkEqual(segmentLit(), @"the segment ends on its target (lit pixels)", endLit)
+
+
+PRI checkLongFrame() | nowMs, leadStartMs, startMs, stepBefore, stepAfter, elapsedBefore, elapsedAfter, expectedBefore, expectedAfter, fpsBeforeX100, fpsAfterX100
+    ' natural frames, then a 3 s move whose middle holds one frame of LONG_FRAME_MS
+
+    seg.setMotion(LONG_MOVE_MS, timeBase.EASE_LINEAR)
+    nowMs := timeBase.update()
+    leadStartMs := nowMs
+    repeat while nowMs - leadStartMs < LEAD_IN_MS
+        display.commitScreenToPanelSet()
+        nowMs := timeBase.update()
+    fpsBeforeX100 := timeBase.framesPerSecondX100()
+
+    seg.commandSegment(seg.CMD_TURN_ON | seg.CMD_LT_TO_RT)
+    nowMs := timeBase.update()
+    startMs := nowMs
+    seg.animate(nowMs)
+    repeat while nowMs - startMs < BEFORE_LONG_MS
+        display.commitScreenToPanelSet()
+        nowMs := timeBase.update()
+        seg.animate(nowMs)
+    stepBefore := segmentLit()
+    elapsedBefore := nowMs - startMs
+
+    display.commitScreenToPanelSet()
+    waitms(LONG_FRAME_MS)                                       ' the forced long frame
+    nowMs := timeBase.update()
+    seg.animate(nowMs)
+    stepAfter := segmentLit()
+    elapsedAfter := nowMs - startMs
+    fpsAfterX100 := timeBase.framesPerSecondX100()
+
+    ' the step for an elapsed time, from the exact ratio (not the code's arithmetic)
+    expectedBefore := seg.FIRST_STEP + elapsedBefore * SEG_STEP_INTERVALS / LONG_MOVE_MS
+    expectedAfter := seg.FIRST_STEP + elapsedAfter * SEG_STEP_INTERVALS / LONG_MOVE_MS
+    debug("LONGFRAME step_before=", udec_(stepBefore), "  expected_before=", udec_(expectedBefore), "  step_after=", udec_(stepAfter), "  expected_after=", udec_(expectedAfter), "  elapsed_after_ms=", sdec_(elapsedAfter), "  fps_before_x100=", udec_(fpsBeforeX100), "  fps_after_x100=", udec_(fpsAfterX100))
+
+    utils.checkEqual(abs (stepBefore - expectedBefore) <= STEP_TOLERANCE, @"natural frames: the drawn step follows the time", TRUE)
+    utils.checkEqual(abs (stepAfter - expectedAfter) <= STEP_TOLERANCE, @"after the long frame: the drawn step is the one for the time passed", TRUE)
+    utils.checkEqual(stepAfter - stepBefore >= MIN_SKIP_STEPS, @"the long frame skips ahead many steps, it does not slow the move", TRUE)
+    utils.checkEqual(fpsAfterX100 < fpsBeforeX100 / DROP_DIVISOR, @"the frame-rate meter reports the drop", TRUE)
+
+    repeat until seg.isMovementComplete()
+        display.commitScreenToPanelSet()
+        seg.animate(timeBase.update())
+    display.commitScreenToPanelSet()
+    utils.checkEqual(segmentLit(), @"the long move ends fully on", SEG_LENGTH)
+
+
+PRI checkSnap() | injectMs
+    ' injected times: a command that arrives mid-move, opposite and same-direction
+
+    seg.setMotion(MOVE_MS, timeBase.EASE_LINEAR)
+    injectMs := INJECT_BASE_MS
+
+    ' the segment is on: turning it off left to right leaves (length - step) pixels lit
+    seg.commandSegment(seg.CMD_TURN_OFF | seg.CMD_LT_TO_RT)
+    seg.animate(injectMs)
+    seg.animate(injectMs + HALF_MOVE_MS)
+    utils.checkEqual(segmentLit(), @"mid-move: half of the segment has turned off", SEG_LENGTH - STEP_AT_HALF_MOVE)
+
+    ' the opposite command: the off move snaps to its end (dark), then the on move draws its step 1 (one pixel)
+    seg.commandSegment(seg.CMD_TURN_ON | seg.CMD_RT_TO_LT)
+    utils.checkEqual(segmentLit(), @"opposite command mid-move: snapped to off, new move drew step 1", seg.FIRST_STEP)
+    utils.checkEqual(seg.isMovementComplete(), @"opposite command mid-move: the new move is running", FALSE)
+    injectMs += INJECT_GAP_MS
+    seg.animate(injectMs)
+    seg.animate(injectMs + MOVE_MS)
+    utils.checkEqual(segmentLit(), @"opposite command mid-move: the digit ends on the last command's target", SEG_LENGTH)
+
+    ' the same command again mid-move: the move snaps to its end, and the repeat has nothing left to do
+    seg.commandSegment(seg.CMD_TURN_OFF | seg.CMD_LT_TO_RT)
+    injectMs += INJECT_GAP_MS
+    seg.animate(injectMs)
+    seg.animate(injectMs + HALF_MOVE_MS)
+    seg.commandSegment(seg.CMD_TURN_OFF | seg.CMD_LT_TO_RT)
+    utils.checkEqual(segmentLit(), @"same command mid-move: snapped to its end (off)", 0)
+    utils.checkEqual(seg.isMovementComplete(), @"same command mid-move: nothing left to move", TRUE)
+
+
+PRI checkEasing() | injectMs
+    ' injected times: smoothstep at a quarter and three quarters of the move
+
+    seg.setMotion(MOVE_MS, timeBase.EASE_SMOOTH)
+    injectMs := INJECT_BASE_MS
+    seg.commandSegment(seg.CMD_TURN_ON | seg.CMD_LT_TO_RT)
+    seg.animate(injectMs)
+    seg.animate(injectMs + QUARTER_MOVE_MS)
+    utils.checkEqual(segmentLit(), @"smoothstep at a quarter of the move", SMOOTH_STEP_AT_QUARTER)
+    utils.checkEqual(segmentLit() <> LINEAR_STEP_AT_QUARTER, @"smoothstep differs from linear at a quarter", TRUE)
+    seg.animate(injectMs + THREE_QUARTER_MOVE_MS)
+    utils.checkEqual(segmentLit(), @"smoothstep at three quarters of the move", SMOOTH_STEP_AT_THREE_QUARTERS)
+    seg.animate(injectMs + MOVE_MS)
+    utils.checkEqual(segmentLit(), @"smoothstep ends fully on", SEG_LENGTH)
+    seg.setMotion(MOVE_MS, timeBase.EASE_LINEAR)
+
+
+PRI checkGroupSetters() | injectMs, bAllComplete
+    ' the group's setters: accepted values, refused values, then the 0 -> 1 transition shows nothing changed
+
+    group.initialize(chainIndex, maxRows, maxColumns)
+    group.placeDigitGroup(GROUP_ROW, GROUP_COLUMN, group.GRP_UP_COUNTER, GROUP_DIGITS, SEG_THICKNESS, GROUP_SEG_LENGTH, GROUP_START_VALUE, color.cGreen)
+    utils.checkEqual(groupALit(), @"probe: digit 0 shows segment A fully lit", GROUP_SEG_LENGTH)
+
+    utils.checkEqual(group.setMoveDuration(MOVE_MS), @"setMoveDuration accepts 300 ms", group.SUCCESS)
+    utils.checkEqual(group.setMoveDuration(group.MIN_MOVE_MS - ONE_MS), @"setMoveDuration refuses 0 ms", group.E_OUT_OF_RANGE)
+    utils.checkEqual(group.setMoveDuration(group.MAX_TIME_MS + ONE_MS), @"setMoveDuration refuses one ms over the limit", group.E_OUT_OF_RANGE)
+    utils.checkEqual(group.setHoldDuration(HOLD_MS), @"setHoldDuration accepts 200 ms", group.SUCCESS)
+    utils.checkEqual(group.setHoldDuration(group.MIN_HOLD_MS - ONE_MS), @"setHoldDuration refuses -1 ms", group.E_OUT_OF_RANGE)
+    utils.checkEqual(group.setHoldDuration(group.MAX_TIME_MS + ONE_MS), @"setHoldDuration refuses one ms over the limit", group.E_OUT_OF_RANGE)
+    utils.checkEqual(group.setEasing(timeBase.EASE_SMOOTH), @"setEasing accepts smoothstep", group.SUCCESS)
+    utils.checkEqual(group.setEasing(UNKNOWN_EASING_STYLE), @"setEasing refuses an unknown style", group.E_UNKNOWN_EASING)
+
+    ' the 0 -> 1 transition runs with what was accepted: 300 ms, smoothstep, a 200 ms hold
+    injectMs := INJECT_BASE_MS
+    group.nextTimeCycle()
+    group.animate(injectMs)
+    group.animate(injectMs + QUARTER_MOVE_MS)
+    utils.checkEqual(groupALit(), @"refused easing left smoothstep in place (step at a quarter)", GROUP_SEG_LENGTH - GROUP_SMOOTH_STEP_AT_QUARTER)
+    group.animate(injectMs + MOVE_MS - ONE_MS)
+    utils.checkEqual(group.isAnimationComplete(), @"refused durations left 300 ms in place: still moving at 299 ms", FALSE)
+    group.animate(injectMs + MOVE_MS)
+    utils.checkEqual(group.isAnimationComplete(), @"refused durations left 300 ms in place: complete at 300 ms", TRUE)
+    utils.checkEqual(groupALit(), @"the group's transition ends on its target (A dark)", 0)
+    bAllComplete := TRUE
+    repeat REPEAT_ASKS
+        if group.isAnimationComplete() == FALSE
+            bAllComplete := FALSE
+    utils.checkEqual(bAllComplete, @"isAnimationComplete is a pure query: asked 3 times, TRUE each time", TRUE)
+    utils.checkEqual(group.isHoldComplete(injectMs + MOVE_MS + HOLD_MS - ONE_MS), @"refused holds left 200 ms in place: holding at 199 ms", FALSE)
+    utils.checkEqual(group.isHoldComplete(injectMs + MOVE_MS + HOLD_MS), @"refused holds left 200 ms in place: hold over at 200 ms", TRUE)
+
+
+PRI segmentLit() : nLit
+    ' lit pixels of the test segment's row
+
+    nLit := litCount(SEG_ROW, SEG_COLUMN, SEG_LENGTH)
+
+
+PRI groupALit() : nLit
+    ' lit pixels of the group's segment A
+
+    nLit := litCount(GROUP_ROW, GROUP_A_COLUMN, GROUP_SEG_LENGTH)
+
+
+PRI litCount(row, firstColumn, nColumns) : nLit | column, pPixel, byteIdx, nBytes, bLit
+    ' count the pixels of a row run whose screen-buffer bytes are not all zero (black is all zero)
+
+    nLit := 0
+    nBytes := hub75Bffrs.bytesPerColor(chainIndex)
+    column := firstColumn
+    repeat nColumns
+        pPixel := pixels.pixelAddressAtRC(chainIndex, row, column)
+        if pPixel <> hub75Bffrs.NO_PIXEL
+            bLit := FALSE
+            byteIdx := 0
+            repeat nBytes
+                if BYTE[pPixel][byteIdx] <> 0
+                    bLit := TRUE
+                byteIdx++
+            if bLit
+                nLit++
+        column++
+
+
+CON ' ---- License ----
+
+{{
+
+ -------------------------------------------------------------------------------------------------
+  MIT License
+
+  Copyright (c) 2021 Stephen Moraco
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+ -------------------------------------------------------------------------------------------------
+}}

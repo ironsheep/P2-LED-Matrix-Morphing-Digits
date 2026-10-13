@@ -7,7 +7,7 @@
 ''               -- see below for terms of use
 ''   E-mail..... stephen@ironsheep.biz
 ''   Started.... Jan 2021
-''   Updated.... 09 Oct 2026
+''   Updated.... 12 Oct 2026
 ''
 '' =================================================================================================
 
@@ -24,14 +24,22 @@ CON { DEBUG PINs }
 CON { Display constants }
 
 MAX_COUNTERS = 4
+LAST_COUNTER = MAX_COUNTERS - 1
 
 #0, GRP_CLOCK_LT, GRP_CLOCK_RT, GRP_DOWNCTR_2DIG, GRP_CTR_6DIG_RAND
+
+CON ' the 2021 pacing, in real time
+
+  ' In 2021 every pixel took one loop pass (22.2 ms at 45.06 passes/s), so a transition took longer on bigger digits,
+  ' and a group held each value for 8 to 10 passes. These reproduce that look (Docs/analysis/morph-time-design.md section d):
+  CLOCK_MOVE_MS = 111       ' clocks, 6 px segments: 5 passes
+  RANDOM_MOVE_MS = 178      ' random group, 9 px segments: 8 passes
+  DOWNCTR_MOVE_MS = 311     ' down counter, 15 px segments: 14 passes
+  HOLD_MS = 200             ' hold after each transition: the middle of 178 to 222 ms
 
 VAR
 
     long    cog
-    long    segmentPeriod
-    long    digitPeriod
     long    digitVal
     long    digitIndex
     long    hours
@@ -56,8 +64,9 @@ OBJ
     display                 : "isp_hub75_display"
     counters[MAX_COUNTERS]  : "isp_hub75_morphCounters"
     hub75Bffrs              : "isp_hub75_hwBufferAccess"
+    timeBase                : "isp_hub75_morphTime"
 
-PUB start() : ok | ctrIdx, chainIndex, maxPhysicalCols, maxPhysicalRows
+PUB start() : ok | ctrIdx, chainIndex, maxPhysicalCols, maxPhysicalRows, nowMs
     '' Start underlying drivers and run demo
 
     'debug("`term temp size 82 50 textsize 10")
@@ -93,78 +102,25 @@ PUB start() : ok | ctrIdx, chainIndex, maxPhysicalCols, maxPhysicalRows
     display.commitScreenToPanelSet()
     'repeat
 
-    repeat
-        stepIdleCounters()
-        animateActiveCounters()
+    counters[GRP_CLOCK_LT].setMoveDuration(CLOCK_MOVE_MS)
+    counters[GRP_CLOCK_RT].setMoveDuration(CLOCK_MOVE_MS)
+    counters[GRP_DOWNCTR_2DIG].setMoveDuration(DOWNCTR_MOVE_MS)
+    counters[GRP_CTR_6DIG_RAND].setMoveDuration(RANDOM_MOVE_MS)
+    repeat ctrIdx from 0 to LAST_COUNTER
+        counters[ctrIdx].setHoldDuration(HOLD_MS)
+
+    timeBase.reset()
+    repeat                                                      ' one pass is one frame
+        nowMs := timeBase.update()                              ' 1. the frame's time: one counter read, and the frame is counted
+        repeat ctrIdx from 0 to LAST_COUNTER                    ' 2. a group whose hold has passed takes its next value
+            if counters[ctrIdx].isConfigured() && counters[ctrIdx].isHoldComplete(nowMs)
+                counters[ctrIdx].nextTimeCycle()
+        repeat ctrIdx from 0 to LAST_COUNTER                    ' 3. every group draws its moves for this frame's time
+            counters[ctrIdx].animate(nowMs)
+        display.commitScreenToPanelSet()                        ' 4. the one commit: it waits for the driver, so it paces the loop (R-9.2)
 
     debug("DEMO: done")
     stop()
-
-PRI stepIdleCounters() | ctrIndex, bDidStep
-    bDidStep := FALSE
-    repeat ctrIndex from 0 to MAX_COUNTERS - 1
-        if counters[ctrIndex].isConfigured() && counters[ctrIndex].isAnimationComplete()
-            counters[ctrIndex].nextTimeCycle()
-            bDidStep := TRUE
-    if bDidStep
-        display.commitScreenToPanelSet()
-
-PRI animateActiveCounters() | ctrIndex, bDidAnimate
-    bDidAnimate := FALSE
-    if not allCounterAnimationsComplete()
-        repeat ctrIndex from 0 to MAX_COUNTERS - 1
-            if not counters[ctrIndex].isAnimationComplete()
-                counters[ctrIndex].animateStep()
-                bDidAnimate := TRUE
-    if bDidAnimate
-        display.commitScreenToPanelSet()
-
-PRI allCounterAnimationsComplete() : status | ctrIndex
-    status := TRUE
-    repeat ctrIndex from 0 to MAX_COUNTERS - 1
-        if not counters[ctrIndex].isAnimationComplete()
-            status := FALSE
-            quit
-
-
-{
-    repeat
-        passTime()                      ' seed the next animations
-        display.commitScreenToPanelSet()   ' show screen changes
-        loopUntilCountersFinish()       ' let animations complete
-
-PRI passTime() | ctrIndex
-    waitSecs(1)
-    repeat ctrIndex from 0 to MAX_COUNTERS - 1
-        if counters[ctrIndex].isConfigured()
-            counters[ctrIndex].nextTimeCycle()
-
-PRI loopUntilCountersFinish() | ctrIndex
-    repeat
-        if not allCounterAnimationsComplete()
-            repeat ctrIndex from 0 to MAX_COUNTERS - 1
-                if not counters[ctrIndex].isAnimationComplete()
-                    counters[ctrIndex].animateStep()
-            display.commitScreenToPanelSet()
-            'wait100thSecs(segmentPeriod)
-            'waitSecs(2)
-
-        if allCounterAnimationsComplete()
-            quit
-'}
-
-PRI wait100thSecs(count)
-    ' Wait for {count} 100ths of a second
-    if count > 0
-        repeat count
-            waitms(10)  ' 1/100 seconds
-
-PRI waitSecs(count)
-    ' Wait for {count} 100ths of a second
-    if count > 0
-        repeat count
-            waitms(1000)  ' 1 seconds
-
 
 PRI stop()
     ' Stop the driver

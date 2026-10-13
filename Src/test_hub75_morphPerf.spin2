@@ -17,6 +17,10 @@
   Every interval is read with getct() on this cog, in system clock ticks; the driver's cogs are
   not involved in the reading, only in what is read. Reported through test_hub75_morphUtils.
 
+  Task 163 moved the group items to the time-based API: each timed animate(nowMs) is given the time of the
+  middle of the next step, so it draws one step like the 2021 animateStep() did, and the frame-rate item runs
+  the new frame loop (one commit per pass). The figures recorded before task 163 stay the 2021 baseline.
+
   Log lines this program adds to the harness's TIME line (same field style):
     PERCALL  <name>  reps=<n>  total_ticks=<n>  ticks_x100_per_call=<n>  net_ticks_x100=<n>  ns_per_call=<n>  net_ns=<n>  net_us_whole=<n>
         N repetitions in one bracket; net = per-call minus the empty `repeat` loop's per-iteration cost
@@ -24,7 +28,8 @@
         a set of one-call brackets, each stored and printed afterwards
     DIFF     <name>  cycles=<n>  with_ticks=<n>  without_ticks=<n>  per_commit_ticks=<n>  per_commit_us=<n>
         the commit time as the difference of two whole loops (a bracket placed around the loop, not the call)
-    FPS      <name>  commits=<n>  passes=<n>  window_ticks=<n>  commits_per_second_x100=<n>  passes_per_second_x100=<n>
+    FPS      <name>  commits=<n>  passes=<n>  window_ticks=<n>  commits_per_second_x100=<n>  passes_per_second_x100=<n>  meter_x100=<n>
+        meter_x100 is isp_hub75_morphTime's frame-rate meter over its last window, printed beside the test's own count
 }
 
 CON ' ---- Timing ----
@@ -72,8 +77,12 @@ CON ' ---- Measurement settings ----
   DIFF_CYCLES = 20                                              ' commits in the differential method
 
   ANIM_CYCLES = 40                                              ' value changes per group
-  ANIM_STEPS_TIMED = 4                                          ' animateStep calls timed after each change (all real steps: segments are 6+ long)
+  ANIM_STEPS_TIMED = 4                                          ' animate calls timed after each change, at steps 2 to 5 (all real steps: segments are 6+ long)
   ANIM_SAMPLE_COUNT = ANIM_CYCLES * ANIM_STEPS_TIMED
+  ANIM_START_MS = 0                                             ' the injected time of each change's first animate (any value works: only differences count)
+  HALF_STEPS_PER_STEP = 2                                       ' times are taken in half steps, so each lands in the middle of a step
+  FIRST_TIMED_HALF_STEP = 3                                     ' the middle of step 2 (step 1 is drawn by the command)
+  LAST_TIMED_HALF_STEP = FIRST_TIMED_HALF_STEP + HALF_STEPS_PER_STEP * (ANIM_STEPS_TIMED - 1)
   NO_MIN_TICKS = $7FFF_FFFF                                     ' start value of a running minimum
 
   FPS_SECONDS = 10                                              ' the demo-loop window
@@ -97,6 +106,13 @@ CON ' ---- Measurement settings ----
   CLOCK_RT_START = 12 * 60
   DOWNCTR_START = 204
   RANDOM_START = 5436
+  CLOCK_STEP_INTERVALS = CLOCK_SEG_LENGTH - 1                   ' a snake of N pixels moves in N steps, N - 1 intervals
+  DOWNCTR_STEP_INTERVALS = DOWNCTR_SEG_LENGTH - 1
+  RANDOM_STEP_INTERVALS = RANDOM_SEG_LENGTH - 1
+  CLOCK_MOVE_MS = 111                                           ' the demo's pacing (demo_hub75_morphSeg.spin2, same values)
+  DOWNCTR_MOVE_MS = 311
+  RANDOM_MOVE_MS = 178
+  HOLD_MS = 200
   FULL_WIDTH_COLUMNS = 64                                       ' wider than this holds a right-hand group
   FULL_HEIGHT_ROWS = 32                                         ' taller than this holds a lower group
   TEXT_ROW = 0
@@ -111,6 +127,7 @@ OBJ
     counters[MAX_COUNTERS]  : "isp_hub75_morphCounters"
     hub75Bffrs              : "isp_hub75_hwBufferAccess"
     utils                   : "test_hub75_morphUtils"
+    timeBase                : "isp_hub75_morphTime"
 
 VAR
 
@@ -275,83 +292,60 @@ PRI placeGroups(maxPhysicalRows, maxPhysicalCols) | ctrIdx
     if maxPhysicalCols > FULL_WIDTH_COLUMNS && maxPhysicalRows > FULL_HEIGHT_ROWS
         counters[GRP_CTR_6DIG_RAND].placeDigitGroup(RANDOM_ROW, RANDOM_COLUMN, counters.GRP_DIGITS_RANDOM, CLOCK_DIGITS, SEG_THICKNESS, RANDOM_SEG_LENGTH, RANDOM_START, color.cRed)
 
+    ' the demo's pacing, so the frame-rate item runs the demo's loop as the demo runs it
+    counters[GRP_CLOCK_LT].setMoveDuration(CLOCK_MOVE_MS)
+    counters[GRP_CLOCK_RT].setMoveDuration(CLOCK_MOVE_MS)
+    counters[GRP_DOWNCTR_2DIG].setMoveDuration(DOWNCTR_MOVE_MS)
+    counters[GRP_CTR_6DIG_RAND].setMoveDuration(RANDOM_MOVE_MS)
+    repeat ctrIdx from 0 to LAST_COUNTER
+        counters[ctrIdx].setHoldDuration(HOLD_MS)
+
 
 PRI measureAnimateSteps()
-    ' one animateStep of each group (4 digits: both clocks and the random group; 3 digits: the down counter)
+    ' one step of each group's animate (4 digits: both clocks and the random group; 3 digits: the down counter)
 
-    timeGroupSteps(@"animateStep clock left (4 digits, seg 6)", GRP_CLOCK_LT)
-    timeGroupSteps(@"animateStep clock right (4 digits, seg 6)", GRP_CLOCK_RT)
-    timeGroupSteps(@"animateStep down counter (3 digits, seg 15)", GRP_DOWNCTR_2DIG)
-    timeGroupSteps(@"animateStep random (4 digits, seg 9)", GRP_CTR_6DIG_RAND)
+    timeGroupSteps(@"animate clock left (4 digits, seg 6)", GRP_CLOCK_LT, CLOCK_STEP_INTERVALS, CLOCK_MOVE_MS)
+    timeGroupSteps(@"animate clock right (4 digits, seg 6)", GRP_CLOCK_RT, CLOCK_STEP_INTERVALS, CLOCK_MOVE_MS)
+    timeGroupSteps(@"animate down counter (3 digits, seg 15)", GRP_DOWNCTR_2DIG, DOWNCTR_STEP_INTERVALS, DOWNCTR_MOVE_MS)
+    timeGroupSteps(@"animate random (4 digits, seg 9)", GRP_CTR_6DIG_RAND, RANDOM_STEP_INTERVALS, RANDOM_MOVE_MS)
 
 
-PRI timeGroupSteps(pName, ctrIdx) | sampleIndex, startTick
-    ' change the group's value, then time the first animateStep calls (each is a real step); nothing is committed
+PRI timeGroupSteps(pName, ctrIdx, stepIntervals, moveMs) | sampleIndex, startTick, halfStep, stepTimeMs
+    ' change the group's value, then time the animate calls given the middle of steps 2 to 5 (each draws one more
+    ' step of every moving snake, as each 2021 animateStep did); nothing is committed
 
     sampleIndex := 0
     repeat ANIM_CYCLES
         counters[ctrIdx].nextTimeCycle()
-        repeat ANIM_STEPS_TIMED
+        counters[ctrIdx].animate(ANIM_START_MS)                 ' stamps the moves' start; step 1 was drawn by the command
+        repeat halfStep from FIRST_TIMED_HALF_STEP to LAST_TIMED_HALF_STEP step HALF_STEPS_PER_STEP
+            stepTimeMs := ANIM_START_MS + muldiv64(moveMs, halfStep, HALF_STEPS_PER_STEP * stepIntervals)
             startTick := getct()
-            counters[ctrIdx].animateStep()
+            counters[ctrIdx].animate(stepTimeMs)
             animTicks[sampleIndex] := getct() - startTick
             sampleIndex++
-        repeat until counters[ctrIdx].isAnimationComplete()     ' finish the animation and its idle count
-            counters[ctrIdx].animateStep()
+        counters[ctrIdx].animate(ANIM_START_MS + moveMs)        ' the moves' end: every segment completes
     reportStats(pName, @animTicks, ANIM_SAMPLE_COUNT)
 
 
-PRI measureFrameRate() | startTick, windowTicks, commitCount, passCount
-    ' the 2021 demo loop, as it is in demo_hub75_morphSeg.spin2, for FPS_SECONDS; every commit is a frame
+PRI measureFrameRate() | startTick, windowTicks, frameCount, nowMs, ctrIdx
+    ' the demo's frame loop, as it is in demo_hub75_morphSeg.spin2, for FPS_SECONDS: one commit per pass, so
+    ' commits = passes; the time base's meter is printed beside the test's own count, never instead of it
 
-    commitCount := 0
-    passCount := 0
+    frameCount := 0
+    timeBase.reset()
     startTick := utils.timeStart()
     repeat while (getct() - startTick) +< FPS_WINDOW_TICKS
-        commitCount += stepIdleCounters()
-        commitCount += animateActiveCounters()
-        passCount++
+        nowMs := timeBase.update()
+        repeat ctrIdx from 0 to LAST_COUNTER
+            if counters[ctrIdx].isConfigured() && counters[ctrIdx].isHoldComplete(nowMs)
+                counters[ctrIdx].nextTimeCycle()
+        repeat ctrIdx from 0 to LAST_COUNTER
+            counters[ctrIdx].animate(nowMs)
+        display.commitScreenToPanelSet()
+        frameCount++
     windowTicks := utils.timeReport(@"demo loop window (total)", startTick)
-    debug("FPS       demo loop  commits=", udec_(commitCount), "  passes=", udec_(passCount), "  window_ticks=", udec_(windowTicks), "  commits_per_second_x100=", udec_(muldiv64(commitCount * RATE_SCALE, clkfreq, windowTicks)), "  passes_per_second_x100=", udec_(muldiv64(passCount * RATE_SCALE, clkfreq, windowTicks)))
-
-
-PRI stepIdleCounters() : nCommits | ctrIndex, bDidStep
-    ' the demo's stepIdleCounters(), returning the commits it made
-
-    nCommits := 0
-    bDidStep := FALSE
-    repeat ctrIndex from 0 to LAST_COUNTER
-        if counters[ctrIndex].isConfigured() && counters[ctrIndex].isAnimationComplete()
-            counters[ctrIndex].nextTimeCycle()
-            bDidStep := TRUE
-    if bDidStep
-        display.commitScreenToPanelSet()
-        nCommits++
-
-
-PRI animateActiveCounters() : nCommits | ctrIndex, bDidAnimate
-    ' the demo's animateActiveCounters(), returning the commits it made
-
-    nCommits := 0
-    bDidAnimate := FALSE
-    if not allCounterAnimationsComplete()
-        repeat ctrIndex from 0 to LAST_COUNTER
-            if not counters[ctrIndex].isAnimationComplete()
-                counters[ctrIndex].animateStep()
-                bDidAnimate := TRUE
-    if bDidAnimate
-        display.commitScreenToPanelSet()
-        nCommits++
-
-
-PRI allCounterAnimationsComplete() : status | ctrIndex
-    ' the demo's allCounterAnimationsComplete()
-
-    status := TRUE
-    repeat ctrIndex from 0 to LAST_COUNTER
-        if not counters[ctrIndex].isAnimationComplete()
-            status := FALSE
-            quit
+    debug("FPS       demo loop  commits=", udec_(frameCount), "  passes=", udec_(frameCount), "  window_ticks=", udec_(windowTicks), "  commits_per_second_x100=", udec_(muldiv64(frameCount * RATE_SCALE, clkfreq, windowTicks)), "  passes_per_second_x100=", udec_(muldiv64(frameCount * RATE_SCALE, clkfreq, windowTicks)), "  meter_x100=", udec_(timeBase.framesPerSecondX100()))
 
 
 PRI reportPerCall(pName, totalTicks, nReps, overheadX100) | ticksX100, netX100, nanos, netNanos
