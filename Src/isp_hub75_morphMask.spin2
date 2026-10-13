@@ -1,0 +1,324 @@
+'' =================================================================================================
+''
+''   File....... isp_hub75_morphMask.spin2
+''   Purpose.... Coverage mask of one segment shape: thick, anti-aliased, square or angled ends, flat or tube cross-section
+''   Authors.... Stephen M Moraco
+''               -- see below for terms of use
+''   E-mail..... stephen@ironsheep.biz
+''   Started.... Oct 2026
+''   Updated.... 12 Oct 2026
+''   Version.... v1.0.0
+''
+'' =================================================================================================
+
+{ A group builds one mask when it is placed, and all seven of its segments draw through it: a
+  horizontal segment reads it as it is, a vertical one reads it transposed (the rotation transform
+  does that; the mask is never stored twice).
+
+  The mask is thickness rows by ceil(length) columns, one byte per pixel, row-major:
+      BYTE[pMask][row * nCols + col]   0 = not covered ... COVER_FULL = fully covered (at full brightness)
+  Rows run across the segment and columns along it. The renderer multiplies a byte by the motion
+  profile and looks the product up in the group's intensity ramp (isp_hub75_morphColor).
+
+  Geometry, in pixels. The shape lies along x from 0 to the length and across y from 0 to the
+  thickness, centred in the mask: a fractional length leaves the same part-covered column at each end.
+  Its half-width at x is
+      square ends:  thickness / 2 for 0 < x < length
+      angled ends:  min(thickness / 2, x, length - x), the classic seven-segment point at 45 degrees
+  Each byte is the exact area of the pixel that the shape covers: along x the covered height is
+  piecewise linear, so it is integrated piece by piece between its break points. Angled ends need a
+  thickness of MIN_ANGLED_THICKNESS or more and fall back to square below it (spec R-4.3).
+
+  Cross-section (spec R-4.4). Flat: every covered pixel is lit by its coverage. Tube: each row is also
+  weighted by 1 - (1 - TUBE_EDGE_LEVEL) x d^2 averaged over the row, where d is the distance from the
+  centre line as a fraction of the half-width, so the edge is TUBE_EDGE_LEVEL of the centre; weights
+  are scaled so the brightest row is fully lit.
+
+  This object has no state: it fills the caller's buffer and keeps nothing.
+}
+
+CON ' segment shape settings
+
+  ' end style (spec R-4.3)
+  '   END_SQUARE - a flat end
+  '   END_ANGLED - the classic pointed end (drawn square below MIN_ANGLED_THICKNESS)
+  #0, END_SQUARE, END_ANGLED
+
+  ' cross-section (spec R-4.4)
+  '   SECTION_FLAT - even brightness across the width
+  '   SECTION_TUBE - brightest along the centre line
+  #0, SECTION_FLAT, SECTION_TUBE
+
+  MIN_THICKNESS = 1                                             ' the thinnest stroke, in pixels
+  MIN_ANGLED_THICKNESS = 3                                      ' below this an angle cannot be drawn
+  LENGTH_SCALE = 256                                            ' lengths are given in 1/256 pixel
+  COVER_FULL = 255                                              ' a fully covered pixel at full brightness
+
+  TUBE_EDGE_LEVEL = 0.4                                         ' tube: brightness at the edge, as a fraction of the centre (float; chosen by eye, spec R-4.5)
+
+CON ' coverage integration
+
+  MAX_BREAKS = 12                                               ' break points of one pixel's integral: its 2 edges, the shape's 2 ends,
+                                                                '   2 corners and 4 row-edge crossings, with room to spare
+  FIRST_PIECE = 1                                               ' a piece runs from break point idx - FIRST_PIECE to idx
+  CUBE_DIVISOR = 3.0                                            ' the integral of d^2 is d^3 / 3 (float)
+  EDGE_BREAKS = 2                                               ' every pixel's integral starts with its left and right edges ...
+  RIGHT_EDGE = 1                                                ' ... in slots 0 and RIGHT_EDGE of breaks[]
+  LAST_OFFSET = 1                                               ' the last index of a count is the count minus this
+  CENTER_DIVISOR = 2                                            ' half of a thickness (integer)
+
+CON ' float constants (Spin2 float operators take float operands)
+
+  F_NONE = 0.0                                                  ' no length, no coverage
+  F_ONE = 1.0                                                   ' one pixel's width or height; full coverage; full weight
+  F_HALVES = 2.0                                                ' half of a length or a sum (float)
+
+OBJ
+
+    morphStatus : "isp_hub75_morphStatus"
+
+PUB null()
+'' This is not a top level object
+''
+
+PUB validateShape(thickness, lengthX256, endStyle, crossSection) : status
+'' Check a segment shape without building it: what buildMask() would refuse, apart from the buffer size.
+'' A placement checks this, and sizes its buffer with maskBytes(), before it changes anything.
+''
+'' @param thickness - the stroke width across the segment, in whole pixels (MIN_THICKNESS or more)
+'' @param lengthX256 - the segment's length along itself, in 1/LENGTH_SCALE pixel (may be fractional; at least the thickness)
+'' @param endStyle - END_SQUARE or END_ANGLED
+'' @param crossSection - SECTION_FLAT or SECTION_TUBE
+'' @returns status - morphStatus.SUCCESS, or E_BAD_THICKNESS, E_UNKNOWN_END_STYLE, E_UNKNOWN_CROSS_SECTION or E_THICKNESS_TOO_LARGE
+
+    if thickness < MIN_THICKNESS
+        status := morphStatus.E_BAD_THICKNESS
+    elseif endStyle <> END_SQUARE and endStyle <> END_ANGLED
+        status := morphStatus.E_UNKNOWN_END_STYLE
+    elseif crossSection <> SECTION_FLAT and crossSection <> SECTION_TUBE
+        status := morphStatus.E_UNKNOWN_CROSS_SECTION
+    elseif thickness * LENGTH_SCALE > lengthX256
+        status := morphStatus.E_THICKNESS_TOO_LARGE
+    else
+        status := morphStatus.SUCCESS
+
+PUB maskBytes(thickness, lengthX256) : nBytes
+'' The bytes a mask of this shape needs: thickness rows of ceil(length) columns. Meaningful for a shape
+'' validateShape() accepts.
+''
+'' @param thickness - the stroke width across the segment, in whole pixels (MIN_THICKNESS or more)
+'' @param lengthX256 - the segment's length along itself, in 1/LENGTH_SCALE pixel (may be fractional; at least the thickness)
+'' @returns nBytes - the buffer size buildMask() needs
+
+    nBytes := maskColumns(lengthX256) * thickness
+
+PUB buildMask(pMask, maskCapacity, thickness, lengthX256, endStyle, crossSection) : status, nCols, nRows | row, col, firstFull, lastFull, fullLevel, bAngled, fLength, fHalfT, fTip, fOffset, fY0, fA0, fA1, fWeight, fMaxWeight
+'' Fill a coverage mask for one segment shape. A refused request writes nothing and returns 0 columns and rows.
+''
+'' @param pMask - hub address of the caller's buffer: maskCapacity bytes
+'' @param maskCapacity - size of that buffer in bytes
+'' @param thickness - the stroke width across the segment, in whole pixels (MIN_THICKNESS or more)
+'' @param lengthX256 - the segment's length along itself, in 1/LENGTH_SCALE pixel (may be fractional; at least the thickness)
+'' @param endStyle - END_SQUARE or END_ANGLED
+'' @param crossSection - SECTION_FLAT or SECTION_TUBE
+'' @returns status - morphStatus.SUCCESS, a validateShape() refusal, or E_MASK_TOO_LARGE, with nothing written
+'' @returns nCols - columns of the mask (along the segment): ceil(length)
+'' @returns nRows - rows of the mask (across the segment): the thickness
+
+' Local Variables:
+' @local row - the mask row being filled
+' @local col - the mask column being filled
+' @local firstFull - the first column wholly within the full-width middle (no end or taper in it)
+' @local lastFull - the last such column
+' @local fullLevel - the current row's byte for a fully covered pixel
+' @local bAngled - TRUE when the ends are drawn angled (asked for, and thick enough)
+' @local fLength - the length in pixels (float)
+' @local fHalfT - half the thickness (float)
+' @local fTip - length of each end's taper: fHalfT when angled, 0.0 when square (float)
+' @local fOffset - x of the mask's left edge: minus the part-covered margin at each end (float)
+' @local fY0 - y of the current row's top edge (float)
+' @local fA0 - distance of the row's top edge from the centre line (float)
+' @local fA1 - distance of the row's bottom edge from the centre line (float)
+' @local fWeight - the current row's cross-section weight (float)
+' @local fMaxWeight - the brightest row's weight (float)
+
+    nCols := nRows := 0
+    status := validateShape(thickness, lengthX256, endStyle, crossSection)
+    if status == morphStatus.SUCCESS and maskBytes(thickness, lengthX256) > maskCapacity
+        status := morphStatus.E_MASK_TOO_LARGE
+
+    if status == morphStatus.SUCCESS
+        nCols := maskColumns(lengthX256)
+        nRows := thickness
+        bAngled := endStyle == END_ANGLED and thickness >= MIN_ANGLED_THICKNESS
+        fLength := float(lengthX256) /. float(LENGTH_SCALE)
+        fHalfT := float(thickness) /. F_HALVES
+        fTip := bAngled ? fHalfT : F_NONE
+        fOffset := (float(nCols) -. fLength) /. F_HALVES
+        fMaxWeight := rowWeight(thickness / CENTER_DIVISOR, fHalfT, crossSection)  ' the row at (or just past) the centre line is the brightest
+        ' the full-width middle: columns whose left edge is at or past the near taper and right edge at or before the far one
+        firstFull := ceilOf(fTip +. fOffset)
+        lastFull := trunc(fLength -. fTip +. fOffset) - LAST_OFFSET
+        repeat row from 0 to nRows - LAST_OFFSET
+            fWeight := rowWeight(row, fHalfT, crossSection) /. fMaxWeight
+            fullLevel := round(float(COVER_FULL) *. fWeight)
+            fY0 := float(row)
+            fA0 := fabs(fY0 -. fHalfT)
+            fA1 := fabs(fY0 +. F_ONE -. fHalfT)
+            repeat col from 0 to nCols - LAST_OFFSET
+                if col >= firstFull and col <= lastFull
+                    BYTE[pMask][row * nCols + col] := fullLevel ' every row is fully covered here
+                else
+                    BYTE[pMask][row * nCols + col] := round(float(COVER_FULL) *. pixelCoverage(float(col) -. fOffset, fY0, fA0, fA1, fLength, fHalfT, bAngled) *. fWeight)
+
+PRI maskColumns(lengthX256) : nCols
+' The mask's columns for a length: ceil(length in pixels).
+
+    nCols := (lengthX256 + LENGTH_SCALE - LAST_OFFSET) / LENGTH_SCALE
+
+PRI ceilOf(fValue) : wholeValue
+' The smallest whole number at or above a non-negative float.
+
+    wholeValue := trunc(fValue)
+    if float(wholeValue) <. fValue
+        wholeValue++
+
+PRI rowWeight(row, fHalfT, crossSection) : fWeight | fY0, fY1, fFalloff
+' The cross-section weight of one row: 1.0 for flat; for tube, 1 - falloff x d^2 averaged over the row (float).
+
+' Local Variables:
+' @local fY0 - the row's top edge, measured from the centre line (float)
+' @local fY1 - the row's bottom edge, measured from the centre line (float)
+' @local fFalloff - how much the weight drops from the centre line to the edge (float)
+
+    fWeight := F_ONE
+    if crossSection == SECTION_TUBE
+        fY0 := float(row) -. fHalfT
+        fY1 := fY0 +. F_ONE
+        fFalloff := F_ONE -. TUBE_EDGE_LEVEL
+        fWeight := F_ONE -. fFalloff *. (fY1 *. fY1 *. fY1 -. fY0 *. fY0 *. fY0) /. (CUBE_DIVISOR *. fHalfT *. fHalfT)
+
+PRI pixelCoverage(fX0, fY0, fA0, fA1, fLength, fHalfT, bAngled) : fCoverage | breaks[MAX_BREAKS], nBreaks, idx, fX1, fY1, fNear, fFar, fMid
+' The exact area of the pixel [fX0, fX0 + 1] x [fY0, fY0 + 1] that the shape covers (float, 0.0 to 1.0).
+' fA0 and fA1 are the distances of the row's top and bottom edges from the centre line.
+
+' Local Variables:
+' @local breaks - the x positions where the covered height changes slope, sorted (floats)
+' @local nBreaks - how many break points are in breaks[]
+' @local idx - the break point being added or summed
+' @local fX1 - the pixel's right edge (float)
+' @local fY1 - the pixel's bottom edge (float)
+' @local fNear - the row's nearest distance from the centre line: 0.0 when the row straddles it (float)
+' @local fFar - the row's farthest distance from the centre line (float)
+' @local fMid - the midpoint of one piece, where its height is sampled: exact, since the height is linear on the piece (float)
+
+    fX1 := fX0 +. F_ONE
+    fY1 := fY0 +. F_ONE
+    fFar := fMax(fA0, fA1)
+    fNear := fMin(fA0, fA1)
+    if fY0 <. fHalfT and fY1 >. fHalfT
+        fNear := F_NONE
+
+    ' Whole-pixel answers first. The half-width is concave along the shape, so its least over the pixel is at
+    ' one of its edges; its greatest is at most min(half thickness, x1, length - x0).
+    if fMin(halfWidthAt(fX0, fLength, fHalfT, bAngled), halfWidthAt(fX1, fLength, fHalfT, bAngled)) >=. fFar
+        fCoverage := F_ONE                                      ' the shape spans the whole row across the whole pixel
+    elseif bAngled and fMin(fHalfT, fMin(fX1, fLength -. fX0)) <=. fNear
+        fCoverage := F_NONE                                     ' the slanted edge never reaches the row inside the pixel
+    else
+        breaks[0] := fX0
+        breaks[RIGHT_EDGE] := fX1
+        nBreaks := EDGE_BREAKS
+        nBreaks := addBreakPair(@breaks, nBreaks, F_NONE, fLength, fX0, fX1)     ' the shape's ends
+        if bAngled
+            nBreaks := addBreakPair(@breaks, nBreaks, fHalfT, fLength, fX0, fX1) ' where each point meets the full width
+            nBreaks := addBreakPair(@breaks, nBreaks, fA0, fLength, fX0, fX1)    ' where the slanted edges cross the row's top and bottom
+            nBreaks := addBreakPair(@breaks, nBreaks, fA1, fLength, fX0, fX1)
+        fCoverage := F_NONE
+        repeat idx from FIRST_PIECE to nBreaks - LAST_OFFSET
+            fMid := (breaks[idx - FIRST_PIECE] +. breaks[idx]) /. F_HALVES
+            fCoverage := fCoverage +. (breaks[idx] -. breaks[idx - FIRST_PIECE]) *. coveredHeight(fMid, fY0, fY1, fLength, fHalfT, bAngled)
+
+PRI halfWidthAt(fX, fLength, fHalfT, bAngled) : fHalfW
+' The shape's half-width at x = fX: 0.0 beyond its ends (float).
+
+    fHalfW := F_NONE
+    if fX >. F_NONE and fX <. fLength
+        fHalfW := fHalfT
+        if bAngled
+            fHalfW := fMin(fHalfT, fMin(fX, fLength -. fX))
+
+PRI addBreakPair(pBreaks, nBreaks, fFromEnd, fLength, fX0, fX1) : nNewBreaks
+' Insert the mirrored pair fFromEnd and fLength - fFromEnd (each only when inside the pixel); return the new count.
+
+    nNewBreaks := addBreak(pBreaks, nBreaks, fFromEnd, fX0, fX1)
+    nNewBreaks := addBreak(pBreaks, nNewBreaks, fLength -. fFromEnd, fX0, fX1)
+
+PRI addBreak(pBreaks, nBreaks, fX, fX0, fX1) : nNewBreaks | idx
+' Insert fX into the sorted break points when it lies strictly inside (fX0, fX1); return the new count.
+
+' Local Variables:
+' @local idx - the slot fX is moved into
+
+    nNewBreaks := nBreaks
+    if fX >. fX0 and fX <. fX1
+        idx := nBreaks
+        repeat while LONG[pBreaks][idx - FIRST_PIECE] >. fX
+            LONG[pBreaks][idx] := LONG[pBreaks][idx - FIRST_PIECE]
+            idx--
+        LONG[pBreaks][idx] := fX
+        nNewBreaks++
+
+PRI coveredHeight(fX, fY0, fY1, fLength, fHalfT, bAngled) : fHeight | fHalfW, fTop, fBottom
+' How much of the row [fY0, fY1] the shape covers at x = fX (float, 0.0 to 1.0).
+
+' Local Variables:
+' @local fHalfW - the shape's half-width at fX (float)
+' @local fTop - the covered band's top edge within the row (float)
+' @local fBottom - the covered band's bottom edge within the row (float)
+
+    fHeight := F_NONE
+    fHalfW := halfWidthAt(fX, fLength, fHalfT, bAngled)
+    fTop := fMax(fY0, fHalfT -. fHalfW)
+    fBottom := fMin(fY1, fHalfT +. fHalfW)
+    if fBottom >. fTop
+        fHeight := fBottom -. fTop
+
+PRI fMin(fA, fB) : fLower
+' The lower of two floats.
+
+    fLower := fA <. fB ? fA : fB
+
+PRI fMax(fA, fB) : fHigher
+' The higher of two floats.
+
+    fHigher := fA >. fB ? fA : fB
+
+CON ' license
+
+{{
+
+ -------------------------------------------------------------------------------------------------
+  MIT License
+
+  Copyright (c) 2021 Iron Sheep Productions, LLC
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+ =================================================================================================
+}}

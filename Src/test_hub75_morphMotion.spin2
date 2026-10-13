@@ -96,6 +96,7 @@ OBJ
     timeBase    : "isp_hub75_morphTime"
     seg         : "isp_hub75_morphSegment"
     group       : "isp_hub75_morphCounters"
+    morphStatus : "isp_hub75_morphStatus"
 
 VAR
 
@@ -267,14 +268,14 @@ PRI checkGroupSetters() | injectMs, bAllComplete
     group.placeDigitGroup(GROUP_ROW, GROUP_COLUMN, group.GRP_UP_COUNTER, GROUP_DIGITS, SEG_THICKNESS, GROUP_SEG_LENGTH, GROUP_START_VALUE, color.cGreen)
     utils.checkEqual(groupALit(), @"probe: digit 0 shows segment A fully lit", GROUP_SEG_LENGTH)
 
-    utils.checkEqual(group.setMoveDuration(MOVE_MS), @"setMoveDuration accepts 300 ms", group.SUCCESS)
-    utils.checkEqual(group.setMoveDuration(group.MIN_MOVE_MS - ONE_MS), @"setMoveDuration refuses 0 ms", group.E_OUT_OF_RANGE)
-    utils.checkEqual(group.setMoveDuration(group.MAX_TIME_MS + ONE_MS), @"setMoveDuration refuses one ms over the limit", group.E_OUT_OF_RANGE)
-    utils.checkEqual(group.setHoldDuration(HOLD_MS), @"setHoldDuration accepts 200 ms", group.SUCCESS)
-    utils.checkEqual(group.setHoldDuration(group.MIN_HOLD_MS - ONE_MS), @"setHoldDuration refuses -1 ms", group.E_OUT_OF_RANGE)
-    utils.checkEqual(group.setHoldDuration(group.MAX_TIME_MS + ONE_MS), @"setHoldDuration refuses one ms over the limit", group.E_OUT_OF_RANGE)
-    utils.checkEqual(group.setEasing(timeBase.EASE_SMOOTH), @"setEasing accepts smoothstep", group.SUCCESS)
-    utils.checkEqual(group.setEasing(UNKNOWN_EASING_STYLE), @"setEasing refuses an unknown style", group.E_UNKNOWN_EASING)
+    utils.checkEqual(group.setMoveDuration(MOVE_MS), @"setMoveDuration accepts 300 ms", morphStatus.SUCCESS)
+    utils.checkEqual(group.setMoveDuration(group.MIN_MOVE_MS - ONE_MS), @"setMoveDuration refuses 0 ms", morphStatus.E_OUT_OF_RANGE)
+    utils.checkEqual(group.setMoveDuration(group.MAX_TIME_MS + ONE_MS), @"setMoveDuration refuses one ms over the limit", morphStatus.E_OUT_OF_RANGE)
+    utils.checkEqual(group.setHoldDuration(HOLD_MS), @"setHoldDuration accepts 200 ms", morphStatus.SUCCESS)
+    utils.checkEqual(group.setHoldDuration(group.MIN_HOLD_MS - ONE_MS), @"setHoldDuration refuses -1 ms", morphStatus.E_OUT_OF_RANGE)
+    utils.checkEqual(group.setHoldDuration(group.MAX_TIME_MS + ONE_MS), @"setHoldDuration refuses one ms over the limit", morphStatus.E_OUT_OF_RANGE)
+    utils.checkEqual(group.setEasing(timeBase.EASE_SMOOTH), @"setEasing accepts smoothstep", morphStatus.SUCCESS)
+    utils.checkEqual(group.setEasing(UNKNOWN_EASING_STYLE), @"setEasing refuses an unknown style", morphStatus.E_UNKNOWN_EASING)
 
     ' the 0 -> 1 transition runs with what was accepted: 300 ms, smoothstep, a 200 ms hold
     injectMs := INJECT_BASE_MS

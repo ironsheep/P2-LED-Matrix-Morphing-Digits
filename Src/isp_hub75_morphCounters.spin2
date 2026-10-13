@@ -24,12 +24,6 @@ CON { public control values }
     WITH_WRAP = TRUE
     WITHOUT_WRAP = FALSE
 
-CON ' status codes: SUCCESS or a negative error (a refused call changes nothing, spec R-10.2)
-
-    SUCCESS = 0
-    E_OUT_OF_RANGE = -1             ' a move or hold duration outside MIN_MOVE_MS / MIN_HOLD_MS to MAX_TIME_MS
-    E_UNKNOWN_EASING = -2           ' an easing style that is not timeBase.EASE_LINEAR or timeBase.EASE_SMOOTH
-
 CON ' motion and cadence settings of a group
 
     MIN_MOVE_MS = 1                 ' a move lasts at least 1 ms (animate() divides by the duration)
@@ -53,6 +47,7 @@ OBJ { Objects we use }
     pixels              : "isp_hub75_screenUtils"
     digits[MAX_DIGITS]  : "isp_hub75_morph7seg"
     timeBase            : "isp_hub75_morphTime"     ' motion constants only: DEFAULT_MOVE_MS and the EASE_ styles
+    morphStatus         : "isp_hub75_morphStatus"   ' the status codes the setters return (a refused call changes nothing, spec R-10.2)
 
 VAR { instance variable }
 
@@ -165,36 +160,36 @@ PUB setMoveDuration(durationMs) : status
 '' Set how long every segment move of this group takes: the same real time for every segment length (spec R-5.4).
 ''
 '' @param durationMs - Duration of each move in ms, MIN_MOVE_MS to MAX_TIME_MS (timeBase.DEFAULT_MOVE_MS when never set); a move in flight follows it from the next animate()
-'' @returns status - SUCCESS, or E_OUT_OF_RANGE with nothing changed
+'' @returns status - morphStatus.SUCCESS, or morphStatus.E_OUT_OF_RANGE with nothing changed
 
-    status := E_OUT_OF_RANGE
+    status := morphStatus.E_OUT_OF_RANGE
     if durationMs >= MIN_MOVE_MS && durationMs <= MAX_TIME_MS
         moveDurationMs := durationMs
         applyMotion()
-        status := SUCCESS
+        status := morphStatus.SUCCESS
 
 PUB setHoldDuration(holdMs) : status
 '' Set how long this group holds each value after its transition completes, before isHoldComplete() reports TRUE.
 ''
 '' @param holdMs - Hold in ms, MIN_HOLD_MS to MAX_TIME_MS (DEFAULT_HOLD_MS when never set)
-'' @returns status - SUCCESS, or E_OUT_OF_RANGE with nothing changed
+'' @returns status - morphStatus.SUCCESS, or morphStatus.E_OUT_OF_RANGE with nothing changed
 
-    status := E_OUT_OF_RANGE
+    status := morphStatus.E_OUT_OF_RANGE
     if holdMs >= MIN_HOLD_MS && holdMs <= MAX_TIME_MS
         holdDurationMs := holdMs
-        status := SUCCESS
+        status := morphStatus.SUCCESS
 
 PUB setEasing(easeStyle) : status
 '' Set how the position of every segment move of this group follows its time.
 ''
 '' @param easeStyle - Easing style, timeBase.EASE_LINEAR (constant speed, used when never set) or timeBase.EASE_SMOOTH (slow start and end)
-'' @returns status - SUCCESS, or E_UNKNOWN_EASING with nothing changed
+'' @returns status - morphStatus.SUCCESS, or morphStatus.E_UNKNOWN_EASING with nothing changed
 
-    status := E_UNKNOWN_EASING
+    status := morphStatus.E_UNKNOWN_EASING
     if easeStyle == timeBase.EASE_LINEAR || easeStyle == timeBase.EASE_SMOOTH
         moveEaseStyle := easeStyle
         applyMotion()
-        status := SUCCESS
+        status := morphStatus.SUCCESS
 
 PUB isAnimationComplete() : bComplete | digitIdx
 '' Return TRUE when no segment of this group is moving. A pure query: asking does not change the answer.

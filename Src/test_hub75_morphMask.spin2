@@ -1,0 +1,299 @@
+'' =================================================================================================
+''
+''   File....... test_hub75_morphMask.spin2
+''   Purpose.... Board test of the segment coverage masks: shape, symmetry, exact edge pixels, total coverage, refusals
+''   Authors.... Stephen M Moraco
+''               -- see below for terms of use
+''   E-mail..... stephen@ironsheep.biz
+''   Started.... Oct 2026
+''   Updated.... 12 Oct 2026
+''
+'' =================================================================================================
+
+{ Task 165: proves isp_hub75_morphMask on the P2. The masks are pure arithmetic, so the display is not started.
+
+  Expected values come from two paths independent of the code under test: the exact edge pixels were
+  worked out by hand (below), and the same figures came out of a 400 x 400 supersampling of each pixel
+  on the host; the total coverage is checked against the shape's area by formula.
+
+  Hand-worked pixels, angled ends, thickness 3 (half-width 1.5; the point's tip at x = 0):
+    row 0, column 0: covered height x - 0.5 for x in 0.5..1      area 0.125  -> 255 x 0.125 = 31.9  -> 32
+    row 0, column 1: x - 0.5 for x in 1..1.5, then 1             area 0.875  -> 223.1               -> 223
+    row 1, column 0: 2x for x in 0..0.5, then 1                  area 0.75   -> 191.3               -> 191
+  A thickness-9 mask has the same corner shape 3 columns further in (its point is 4.5 long).
+  Tube, thickness 9, edge level 0.4: row weight 1 - 0.6 (y1^3 - y0^3) / (3 x 4.5^2):
+    row 0 (y -4.5..-3.5) 0.52346, row 4 (y -0.5..0.5) 0.99753; row 0 = 0.52346 / 0.99753 x 255 = 133.8 -> 134
+
+  Shape areas: square ends length x thickness; angled ends length x thickness - thickness^2 / 2.
+
+  Falsification: compile with -D MORPH_BREAK_MASK and every built mask has one end byte changed, and
+  every refused call has a byte written into the buffer. That run must show FAIL for the symmetry,
+  exact-pixel and buffer-untouched checks.
+}
+
+CON ' ---- Timing ----
+
+  CLK_FREQ = 335_000_000                                        ' system freq as a constant
+  _clkfreq = CLK_FREQ                                           ' set system clock
+
+CON ' ---- Mask buffer ----
+
+  MASK_BYTES = 2304                                             ' room for the largest case (32 x 65 = 2080) plus a margin
+  SENTINEL = $A5                                                ' the buffer is filled with this before a call that must be refused
+  NO_SIZE = 0                                                   ' columns and rows returned by a refused call
+  NEXT_PIXEL = 1                                                ' one pixel further along or across
+  END_COLUMNS = 2                                               ' a thin mask's part-covered columns, one at each end
+  HALF_DIVISOR = 2                                              ' adds half a step before dividing, to round to nearest
+
+CON ' ---- Cases (lengths in 1/LENGTH_SCALE pixel) ----
+
+  ' A: a 1-pixel stroke of fractional length, square ends
+  THIN_THICKNESS = 1
+  THIN_LENGTH_X256 = 9574                                       ' 37.4 px (37.4 x 256 = 9574.4)
+  THIN_COLUMNS = 38
+  THIN_AREA_X10 = 374                                           ' 37.4 px^2, x 10
+
+  ' B: thickness 2, square ends, whole length: every pixel fully covered
+  TWO_THICKNESS = 2
+  TWO_LENGTH_X256 = 5120                                        ' 20 px
+  TWO_COLUMNS = 20
+
+  ' C: thickness 3, angled ends (the smallest that can show an angle)
+  THREE_THICKNESS = 3
+  THREE_LENGTH_X256 = 5120                                      ' 20 px
+  THREE_COLUMNS = 20
+  THREE_AREA_X10 = 555                                          ' 20 x 3 - 9 / 2 = 55.5 px^2, x 10
+  CORNER_LEVEL = 32                                             ' the hand-worked pixels (see above)
+  NEXT_TO_CORNER_LEVEL = 223
+  MIDDLE_TIP_LEVEL = 191
+
+  ' D, E: the plan's 60 x 9 mask, angled, flat then tube
+  NINE_THICKNESS = 9
+  NINE_LENGTH_X256 = 15360                                      ' 60 px
+  NINE_COLUMNS = 60
+  NINE_AREA_X10 = 4995                                          ' 60 x 9 - 81 / 2 = 499.5 px^2, x 10
+  NINE_CORNER_COLUMN = 3                                        ' the point is 4.5 px long: the corner pixel sits 3 columns in
+  NINE_CENTER_ROW = 4
+  NINE_FIRST_FULL_COLUMN = 5                                    ' columns 5 .. 54 lie wholly beyond both points
+  TUBE_EDGE_ROW_LEVEL = 134                                     ' the hand-worked tube weight of row 0 (see above)
+  MID_COLUMN = 30
+
+  ' F: the largest assumed for a 256 x 128 group (a one-digit group filling 128 rows: segment ~64, stroke 32)
+  LARGE_THICKNESS = 32
+  LARGE_LENGTH_X256 = 16512                                     ' 64.5 px
+  LARGE_COLUMNS = 65
+  LARGE_AREA_X10 = 15520                                        ' 64.5 x 32 - 1024 / 2 = 1552 px^2, x 10
+
+  ' G: thickness 2 asked for angled ends: drawn square
+  FALLBACK_LENGTH_X256 = 5248                                   ' 20.5 px: the part-covered end columns show the end shape
+
+  ' refusals
+  BAD_THICKNESS = 0
+  OVER_THICKNESS = 10
+  UNDER_LENGTH_X256 = 2432                                      ' 9.5 px: shorter than the 10-pixel stroke
+  EQUAL_LENGTH_X256 = 2560                                      ' 10 px: a stroke as thick as it is long is accepted
+  UNKNOWN_STYLE = 7                                             ' no end style or cross-section has this value
+  SMALL_CAPACITY = 59                                           ' one byte short of case C's 60
+
+  ' totals are compared x 10 so tenths of a pixel stay whole numbers; within 1% of the area
+  AREA_SCALE = 10
+  PERCENT_WHOLE = 100
+
+CON ' ---- Falsification hook ----
+
+  BREAK_BITS = $10                                              ' -D MORPH_BREAK_MASK: XOR-ed into each built mask's first byte
+
+OBJ
+
+    utils       : "test_hub75_morphUtils"
+    morphMask   : "isp_hub75_morphMask"
+    morphStatus : "isp_hub75_morphStatus"
+
+VAR
+
+    byte    mask[MASK_BYTES]
+    byte    otherMask[MASK_BYTES]
+
+PUB go()
+'' Run the mask test: each case, then the refusals.
+''
+
+    utils.beginSuite(@"morphMask coverage masks")
+    checkThin()
+    checkTwo()
+    checkThree()
+    checkNine()
+    checkTube()
+    checkLarge()
+    checkFallback()
+    checkRefusals()
+    utils.finish()
+
+PRI checkThin() | status, nCols, nRows
+
+    status, nCols, nRows := build(@mask, THIN_THICKNESS, THIN_LENGTH_X256, morphMask.END_SQUARE, morphMask.SECTION_FLAT)
+    utils.checkEqual(status, @"A thickness 1, length 37.4: accepted", morphStatus.SUCCESS)
+    utils.checkEqual(nCols, @"A: columns = ceil(37.4)", THIN_COLUMNS)
+    utils.checkEqual(nRows, @"A: rows = the thickness", THIN_THICKNESS)
+    utils.checkEqual(asymmetricPixels(nCols, nRows), @"A: symmetric end to end and side to side (pixels that differ)", 0)
+    utils.checkEqual(partialPixels(nCols, nRows, NEXT_PIXEL, nCols - END_COLUMNS), @"A: every column between the end columns is fully lit", 0)
+    checkArea(nCols, nRows, THIN_AREA_X10, @"A: total coverage within 1% of 37.4 px^2")
+
+PRI checkTwo() | status, nCols, nRows
+
+    status, nCols, nRows := build(@mask, TWO_THICKNESS, TWO_LENGTH_X256, morphMask.END_SQUARE, morphMask.SECTION_FLAT)
+    utils.checkEqual(status, @"B thickness 2, length 20, square: accepted", morphStatus.SUCCESS)
+    utils.checkEqual(nCols * nRows, @"B: 20 x 2 pixels", TWO_COLUMNS * TWO_THICKNESS)
+    utils.checkEqual(partialPixels(nCols, nRows, 0, nCols - morphMask.LAST_OFFSET), @"B: every pixel fully lit", 0)
+
+PRI checkThree() | status, nCols, nRows
+
+    status, nCols, nRows := build(@mask, THREE_THICKNESS, THREE_LENGTH_X256, morphMask.END_ANGLED, morphMask.SECTION_FLAT)
+    utils.checkEqual(status, @"C thickness 3, length 20, angled: accepted", morphStatus.SUCCESS)
+    utils.checkEqual(nCols, @"C: 20 columns", THREE_COLUMNS)
+    utils.checkEqual(asymmetricPixels(nCols, nRows), @"C: symmetric end to end and side to side (pixels that differ)", 0)
+    utils.checkEqual(pixelAt(nCols, 0, 0), @"C: corner pixel = hand-worked 0.125 coverage", CORNER_LEVEL)
+    utils.checkEqual(pixelAt(nCols, 0, NEXT_PIXEL), @"C: pixel next to the corner = hand-worked 0.875", NEXT_TO_CORNER_LEVEL)
+    utils.checkEqual(pixelAt(nCols, NEXT_PIXEL, 0), @"C: middle row at the tip = hand-worked 0.75", MIDDLE_TIP_LEVEL)
+    utils.checkEqual(pixelAt(nCols, 0, nCols - morphMask.LAST_OFFSET), @"C: far corner = the near corner", CORNER_LEVEL)
+    checkArea(nCols, nRows, THREE_AREA_X10, @"C: total coverage within 1% of 55.5 px^2")
+
+PRI checkNine() | status, nCols, nRows, startTick
+
+    startTick := utils.timeStart()
+    status, nCols, nRows := build(@mask, NINE_THICKNESS, NINE_LENGTH_X256, morphMask.END_ANGLED, morphMask.SECTION_FLAT)
+    utils.timeReport(@"build a 60 x 9 angled flat mask", startTick)
+    utils.checkEqual(status, @"D thickness 9, length 60, angled flat: accepted", morphStatus.SUCCESS)
+    utils.checkEqual(nCols * nRows, @"D: 60 x 9 = 540 bytes", NINE_COLUMNS * NINE_THICKNESS)
+    utils.checkEqual(asymmetricPixels(nCols, nRows), @"D: symmetric end to end and side to side (pixels that differ)", 0)
+    utils.checkEqual(partialPixels(nCols, nRows, NINE_FIRST_FULL_COLUMN, nCols - NINE_FIRST_FULL_COLUMN - morphMask.LAST_OFFSET), @"D: the interior is all 255", 0)
+    utils.checkEqual(pixelAt(nCols, 0, NINE_CORNER_COLUMN), @"D: corner pixel = hand-worked 0.125", CORNER_LEVEL)
+    utils.checkEqual(pixelAt(nCols, 0, NINE_CORNER_COLUMN + NEXT_PIXEL), @"D: pixel next to the corner = hand-worked 0.875", NEXT_TO_CORNER_LEVEL)
+    utils.checkEqual(pixelAt(nCols, NINE_CENTER_ROW, 0), @"D: centre row at the tip = hand-worked 0.75", MIDDLE_TIP_LEVEL)
+    utils.checkEqual(pixelAt(nCols, 0, NINE_CORNER_COLUMN - NEXT_PIXEL), @"D: beyond the point is dark", 0)
+    checkArea(nCols, nRows, NINE_AREA_X10, @"D: total coverage within 1% of 499.5 px^2")
+
+PRI checkTube() | status, nCols, nRows
+
+    status, nCols, nRows := build(@mask, NINE_THICKNESS, NINE_LENGTH_X256, morphMask.END_ANGLED, morphMask.SECTION_TUBE)
+    utils.checkEqual(status, @"E thickness 9, length 60, angled tube: accepted", morphStatus.SUCCESS)
+    utils.checkEqual(asymmetricPixels(nCols, nRows), @"E: symmetric end to end and side to side (pixels that differ)", 0)
+    utils.checkEqual(pixelAt(nCols, NINE_CENTER_ROW, MID_COLUMN), @"E: the centre line is fully lit", morphMask.COVER_FULL)
+    utils.checkEqual(pixelAt(nCols, 0, MID_COLUMN), @"E: the edge row = hand-worked tube weight", TUBE_EDGE_ROW_LEVEL)
+    utils.checkEqual(pixelAt(nCols, NEXT_PIXEL, MID_COLUMN) > pixelAt(nCols, 0, MID_COLUMN) and pixelAt(nCols, NINE_CENTER_ROW, MID_COLUMN) > pixelAt(nCols, NEXT_PIXEL, MID_COLUMN), @"E: brightness rises from the edge to the centre", TRUE)
+
+PRI checkLarge() | status, nCols, nRows, startTick
+
+    startTick := utils.timeStart()
+    status, nCols, nRows := build(@mask, LARGE_THICKNESS, LARGE_LENGTH_X256, morphMask.END_ANGLED, morphMask.SECTION_FLAT)
+    utils.timeReport(@"build a 65 x 32 angled flat mask", startTick)
+    utils.checkEqual(status, @"F thickness 32, length 64.5, angled: accepted", morphStatus.SUCCESS)
+    utils.checkEqual(nCols * nRows, @"F: 65 x 32 = 2080 bytes", LARGE_COLUMNS * LARGE_THICKNESS)
+    utils.checkEqual(asymmetricPixels(nCols, nRows), @"F: symmetric end to end and side to side (pixels that differ)", 0)
+    checkArea(nCols, nRows, LARGE_AREA_X10, @"F: total coverage within 1% of 1552 px^2")
+
+PRI checkFallback() | status, nCols, nRows, idx, differ
+
+    morphMask.buildMask(@otherMask, MASK_BYTES, TWO_THICKNESS, FALLBACK_LENGTH_X256, morphMask.END_SQUARE, morphMask.SECTION_FLAT)
+    status, nCols, nRows := build(@mask, TWO_THICKNESS, FALLBACK_LENGTH_X256, morphMask.END_ANGLED, morphMask.SECTION_FLAT)
+    utils.checkEqual(status, @"G thickness 2 asked angled: accepted", morphStatus.SUCCESS)
+    differ := 0
+    repeat idx from 0 to nCols * nRows - morphMask.LAST_OFFSET
+        if mask[idx] <> otherMask[idx]
+            differ++
+    utils.checkEqual(differ, @"G: below thickness 3, angled is drawn exactly as square (pixels that differ)", 0)
+    utils.checkEqual(pixelAt(nCols, 0, 0) > 0 and pixelAt(nCols, 0, 0) < morphMask.COVER_FULL, @"G: the end column is part-covered (the comparison can see a shape)", TRUE)
+
+PRI checkRefusals() | status, nCols, nRows
+
+    checkRefused(BAD_THICKNESS, THREE_LENGTH_X256, morphMask.END_SQUARE, morphMask.SECTION_FLAT, MASK_BYTES, morphStatus.E_BAD_THICKNESS, @"refuse thickness 0")
+    checkRefused(OVER_THICKNESS, UNDER_LENGTH_X256, morphMask.END_SQUARE, morphMask.SECTION_FLAT, MASK_BYTES, morphStatus.E_THICKNESS_TOO_LARGE, @"refuse thickness 10 on length 9.5")
+    checkRefused(THREE_THICKNESS, THREE_LENGTH_X256, UNKNOWN_STYLE, morphMask.SECTION_FLAT, MASK_BYTES, morphStatus.E_UNKNOWN_END_STYLE, @"refuse an unknown end style")
+    checkRefused(THREE_THICKNESS, THREE_LENGTH_X256, morphMask.END_SQUARE, UNKNOWN_STYLE, MASK_BYTES, morphStatus.E_UNKNOWN_CROSS_SECTION, @"refuse an unknown cross-section")
+    checkRefused(THREE_THICKNESS, THREE_LENGTH_X256, morphMask.END_ANGLED, morphMask.SECTION_FLAT, SMALL_CAPACITY, morphStatus.E_MASK_TOO_LARGE, @"refuse a buffer one byte too small")
+    status, nCols, nRows := morphMask.buildMask(@mask, MASK_BYTES, OVER_THICKNESS, EQUAL_LENGTH_X256, morphMask.END_ANGLED, morphMask.SECTION_FLAT)
+    utils.checkEqual(status, @"accept thickness 10 on length 10 (not greater)", morphStatus.SUCCESS)
+
+PRI checkRefused(thickness, lengthX256, endStyle, crossSection, capacity, expectedStatus, pName) | status, nCols, nRows, idx, changed
+
+    bytefill(@mask, SENTINEL, MASK_BYTES)
+    status, nCols, nRows := morphMask.buildMask(@mask, capacity, thickness, lengthX256, endStyle, crossSection)
+#IFDEF MORPH_BREAK_MASK
+    mask[0] := 0
+#ENDIF
+    utils.checkEqual(status, pName, expectedStatus)
+    utils.checkEqual(nCols | nRows, @"  ... and returns 0 columns and 0 rows", NO_SIZE)
+    changed := 0
+    repeat idx from 0 to MASK_BYTES - morphMask.LAST_OFFSET
+        if mask[idx] <> SENTINEL
+            changed++
+    utils.checkEqual(changed, @"  ... and writes nothing (bytes changed)", 0)
+
+PRI build(pMask, thickness, lengthX256, endStyle, crossSection) : status, nCols, nRows
+' buildMask() into the full buffer; the falsification build then damages the result.
+
+    status, nCols, nRows := morphMask.buildMask(pMask, MASK_BYTES, thickness, lengthX256, endStyle, crossSection)
+#IFDEF MORPH_BREAK_MASK
+    BYTE[pMask][0] ^= BREAK_BITS
+#ENDIF
+
+PRI pixelAt(nCols, row, col) : level
+
+    level := mask[row * nCols + col]
+
+PRI asymmetricPixels(nCols, nRows) : nDiffer | row, col
+' Pixels that differ from their mirror end to end, or from their mirror side to side.
+
+    nDiffer := 0
+    repeat row from 0 to nRows - morphMask.LAST_OFFSET
+        repeat col from 0 to nCols - morphMask.LAST_OFFSET
+            if pixelAt(nCols, row, col) <> pixelAt(nCols, row, nCols - morphMask.LAST_OFFSET - col) or pixelAt(nCols, row, col) <> pixelAt(nCols, nRows - morphMask.LAST_OFFSET - row, col)
+                nDiffer++
+
+PRI partialPixels(nCols, nRows, firstCol, lastCol) : nPartial | row, col
+' Pixels in columns firstCol..lastCol (every row) that are not fully lit.
+
+    nPartial := 0
+    repeat row from 0 to nRows - morphMask.LAST_OFFSET
+        repeat col from firstCol to lastCol
+            if pixelAt(nCols, row, col) <> morphMask.COVER_FULL
+                nPartial++
+
+PRI checkArea(nCols, nRows, areaX10, pName) | total, idx, totalX10
+' Sum the mask, in pixels x 10, and check it is within 1% of the shape's area.
+
+    total := 0
+    repeat idx from 0 to nCols * nRows - morphMask.LAST_OFFSET
+        total += mask[idx]
+    totalX10 := (total * AREA_SCALE + morphMask.COVER_FULL / HALF_DIVISOR) / morphMask.COVER_FULL
+    debug("AREA     ", zstr_(pName), "  total_x10=", sdec_(totalX10), "  area_x10=", sdec_(areaX10))
+    utils.checkEqual(abs (totalX10 - areaX10) * PERCENT_WHOLE <= areaX10, pName, TRUE)
+
+CON ' ---- License ----
+
+{{
+
+ -------------------------------------------------------------------------------------------------
+  MIT License
+
+  Copyright (c) 2021 Iron Sheep Productions, LLC
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+ =================================================================================================
+}}
