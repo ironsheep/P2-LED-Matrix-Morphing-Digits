@@ -1,0 +1,83 @@
+# Expectations for tools/tests/check_style/run.sh (read that header first).
+#
+#   red     CASE RULE FILE LINE   the case's violating variant (cases/CASE/v) must produce exactly the
+#                                 set of findings listed under this CASE, each at FILE:LINE; its clean
+#                                 twin (cases/CASE/c) must produce none. One line per finding.
+#   green   CASE                  a boundary case: the .spin2 files directly in cases/CASE must be clean
+#   onefile CASE RULE FILE LINE   the case's v/ file, checked ALONE in a scratch repo root, from the root
+#                                 and from Src/, must still report RULE at FILE:LINE (the checker reads
+#                                 the project files the checked file includes); the c/ twin must be clean
+#
+# The rule list is NOT kept here: it is the ROSTER of tools/check_style.sh, and the runner fails any
+# ROSTER rule that no red line asserts. To add a case, copy cases/cNN, edit, run
+#   bash tools/tests/check_style/run.sh --observe
+# and paste the red lines it prints for the new case after reading each one.
+
+red c1 1.1 isp_hub75_morphFix.spin2 15
+green c2
+red c3 1.3 isp_hub75_morphFix.spin2 71
+red c4 1.4 isp_hub75_morphFix.spin2 82
+red c5 1.5 isp_hub75_morphFix.spin2 71
+red c6 1.8 isp_hub75_morphFix.spin2 82
+red c7 1.9 isp_hub75_morphFix.spin2 19
+red c8 2.1 isp_hub75_morphFix.spin2 71
+red c9 2.1 isp_hub75_morphFix.spin2 22
+red c10 2.1.4 isp_hub75_morphFix.spin2 71
+red c11 2.4 isp_hub75_morphFix.spin2 17
+red c12 2.5 isp_hub75_morphFix.spin2 74
+red c13 3.1 isp_hub75_morphFix.spin2 16
+red c14 3.1 isp_hub75_morphFix.spin2 16
+red c15 3.2 isp_hub75_morphFix.spin2 71
+red c16 4.1 isp_hub75_morphFix.spin2 72
+red c16 4.1 isp_hub75_morphFix.spin2 73
+red c16 4.1 isp_hub75_morphFix.spin2 74
+red c16 4.1 isp_hub75_morphFix.spin2 75
+red c17 4.1 isp_hub75_morphFix.spin2 16
+red c18 4.1 isp_hub75_morphFix.spin2 61
+red c19 4.1 isp_hub75_morphFix.spin2 65
+red c20 4.2 isp_hub75_morphFix.spin2 1
+red c21 4.2 isp_hub75_morphFix.spin2 3
+red c22 4.2.1 isp_hub75_morphFix.spin2 79
+red c23 4.2.1 isp_hub75_morphFix.spin2 85
+red c24 4.5 isp_hub75_morphFix.spin2 18
+red c25 4.5 isp_hub75_morphFix.spin2 21
+red c26 4.5 isp_hub75_morphFix.spin2 25
+red c27 4.5 isp_hub75_morphFix.spin2 12
+red c28 4.6 isp_hub75_morphFix.spin2 15
+red c29 4.9 isp_hub75_morphFix.spin2 16
+red c30 5.0 isp_hub75_morphFix.spin2 71
+red c31 5.0 isp_hub75_morphFix.spin2 71
+red c31 5.1 isp_hub75_morphFix.spin2 71
+red c32 5.2 isp_hub75_morphFix.spin2 83
+green c33
+red c34 5.2 isp_hub75_morphFix.spin2 83
+red c34 5.3 isp_hub75_morphFix.spin2 83
+red c35 5.4 isp_hub75_morphFix.spin2 64
+red c36 5.4.1 isp_hub75_morphFix.spin2 49
+red c36 5.7 isp_hub75_morphFix.spin2 49
+red c37 5.4.1 isp_hub75_morphFix.spin2 82
+red c37 5.7 isp_hub75_morphFix.spin2 82
+red c38 5.7 isp_hub75_morphFix.spin2 82
+green c39
+red c40 5.7 test_hub75_morphFix.spin2 30
+red c40 6.1 test_hub75_morphFix.spin2 30
+red c41 2.4 test_hub75_morphFix.spin2 14
+red c41 6.2 test_hub75_morphFix.spin2 14
+red c42 5.7 test_hub75_morphFix.spin2 29
+red c42 6.4 test_hub75_morphFix.spin2 29
+red c43 6.4 test_hub75_morphFix.spin2 19
+red c44 14.3a isp_hub75_morphFix.spin2 16
+red c45 14.3a isp_hub75_morphFix.spin2 16
+red c46 14.3a isp_hub75_morphFix.spin2 16
+red c47 14.3a isp_hub75_morphFix.spin2 16
+red c48 14.3a isp_hub75_morphFix.spin2 19
+red c49 14.3a isp_hub75_morphFix.spin2 17
+red c50 14.3a isp_hub75_morphFix.spin2 19
+red c51 14.3a isp_hub75_morphFix.spin2 17
+red c52 14.3a isp_hub75_morphFix.spin2 16
+green c53
+red c54 14.3b isp_hub75_morphFix.spin2 24
+
+onefile c11 2.4 isp_hub75_morphFix.spin2 17
+onefile c41 2.4 test_hub75_morphFix.spin2 14
+onefile c41 6.2 test_hub75_morphFix.spin2 14

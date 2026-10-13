@@ -1,0 +1,94 @@
+'' =========================================================================================
+''
+''   File....... isp_hub75_morphFix.spin2
+''   Purpose.... Fixture object for the style checker
+''   Authors.... Test Author
+''   E-mail..... test@example.com
+''   Started.... Jan 2021
+''   Updated.... 12 Oct 2026
+''
+'' =========================================================================================
+
+CON ' ---- Fixture constants ----
+  {Spin2_Doc_CON}
+  MAX_ITEMS = 8
+  TICK_PERIOD = 10
+  SUCCESS_CODE = 0
+
+OBJ ' ---- Objects ----
+  child : "isp_hub75_morphChild"
+
+DAT ' ---- Tables ----
+tableVals long 0
+emptyStr byte 0
+
+VAR ' ---- State ----
+  long itemCount
+  byte flagSet
+
+PUB start(startCount) : status | loopIdx
+'' Start the fixture.
+''
+'' @param startCount - Number of items to count
+'' @returns status - SUCCESS_CODE or an error code
+
+' Local Variables:
+' @local loopIdx - loop index
+
+  status := SUCCESS_CODE
+  itemCount := startCount
+  repeat loopIdx from 0 to MAX_ITEMS
+    itemCount += TICK_PERIOD
+  flagSet := child.CHILD_VALUE
+
+PUB isReady() : bReady
+'' Report whether the fixture is ready.
+''
+'' @returns bReady - TRUE when ready
+
+  bReady := FALSE
+  if itemCount == MAX_ITEMS
+    bReady := TRUE
+
+' anchor_pub_end
+
+PRI doWork(workCount) : doneCount | workIdx
+' Do some work.
+'
+' @param workCount - How many
+' @returns doneCount - How many were done
+
+' Local Variables:
+' @local workIdx - index
+
+  doneCount := 0
+  repeat workIdx from 0 to workCount
+    doneCount++
+    if doneCount > TICK_PERIOD
+      quit
+
+' anchor_pri_end
+PRI extraMethod(argCount) : status | tmpIdx
+' Take a count.
+'
+' @param argCount - the count
+' @returns status - the status
+
+' Local Variables:
+' @local tmpIdx - holder
+
+  tmpIdx := argCount
+  status := tmpIdx
+
+CON ' ---- License ----
+
+{{
+
+ -------------------------------------------------------------------------------------------------
+  MIT License
+
+  Copyright (c) 2021 Test Owner
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy.
+ =================================================================================================
+}}

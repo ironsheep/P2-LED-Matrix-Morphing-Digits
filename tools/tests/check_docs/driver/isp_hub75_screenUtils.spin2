@@ -1,0 +1,5 @@
+'' Stand-in for a driver file: the doc-checker fixtures name this file as "from the driver".
+'' The real driver is never versioned here, so the suite carries this one-method copy.
+
+PUB drawStub() : status
+    status := 0

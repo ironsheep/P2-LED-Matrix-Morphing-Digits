@@ -1,0 +1,12 @@
+'' File....... isp_hub75_morphSegment.spin2
+'' Purpose.... fixture segment object
+'' See isp_hub75_morph7seg.spin2 for the digit object
+
+CON { enums }
+
+#0, SEG_UNKNOWN, #$E0, SEG_TOP_A, #$C0, SEG_RIGHT_B, #$A0, SEG_RIGHT_C, #$80, SEG_BOTTOM_D, #$60, SEG_LEFT_E, #$40, SEG_LEFT_F, #$20, SEG_MIDDLE_G
+#0, CMD_UNKNOWN, #$02, CMD_BOTTOM_UP, #$04, CMD_TOP_DOWN, #$06, CMD_LT_TO_RT, #$08, CMD_RT_TO_LT, #$0A, CMD_COL_TO_RT, #$0C, CMD_COL_TO_LT, #$0E, CMD_IMMEDIATE
+
+PUB isAnimationComplete() : status
+    '' Return T/F
+    status := TRUE

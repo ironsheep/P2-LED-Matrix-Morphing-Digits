@@ -29,7 +29,10 @@
 # So .github/release/README-package.md is covered the moment it exists. ChangeLog.md is read for
 # ORPHAN and DUPLICATE but not COUNT (a changelog counts things in the past).
 # Working areas excluded (intent documents are never evidence): Docs/plans/ Docs/analysis/
-# Docs/SPECIFICATION.md tasks/ .claude/ .todo-mcp/ REF-NO-COMMIT/ CLAUDE.md.
+# Docs/SPECIFICATION.md tasks/ .claude/ .todo-mcp/ REF-NO-COMMIT/ CLAUDE.md tools/tests/ (the
+# checkers' own fixtures: mini-repos of deliberately wrong documents and sources; their .md files
+# are not documents of this project and their .spin2 files define no method of this project).
+# An excluded file is still a tracked file: a document may name tools/tests/check_docs/run.sh.
 #
 # Driver file and method names are derived from the driver directory (default: the one
 # REF-NO-COMMIT/p2-obex-driver-* directory; more than one is a could-not-run error, exit 2); a
@@ -53,6 +56,13 @@ ROOT=${DOCS_ROOT:-$SELF_ROOT}
 TAB=$(printf '\t')
 
 die() { printf 'check_docs.sh: %s\n' "$1" >&2; exit 2; }
+# the named working areas (intent documents and fixtures are never evidence); see the header
+workArea() {
+  case "$1" in
+    Docs/plans/*|Docs/analysis/*|Docs/SPECIFICATION.md|tasks/*|.claude/*|.todo-mcp/*|REF-NO-COMMIT/*|CLAUDE.md|tools/tests/*) return 0 ;;
+  esac
+  return 1
+}
 # PUB/PRI method names (lowercased), one per line, for the .spin2 files given as arguments
 pubNames() { awk '/^(PUB|PRI)[ \t]+[A-Za-z_]/ { s = $0; sub(/^(PUB|PRI)[ \t]+/, "", s); match(s, /^[A-Za-z_][A-Za-z0-9_]*/); print tolower(substr(s, 1, RLENGTH)) }' "$@"; }
 
@@ -86,7 +96,9 @@ fi
 
 # ---------------------------------------------------------------- our methods and counts
 SPIN_FILES=()
+: > "$WORK/workfiles"
 while IFS= read -r f; do
+  if workArea "$f"; then printf "%s\n" "$f" >> "$WORK/workfiles"; continue; fi
   case "$f" in *.spin2) SPIN_FILES+=("$f") ;; esac
 done < "$WORK/tracked"
 : > "$WORK/pubs"
@@ -114,8 +126,8 @@ NSEG=$1; NSNAKE=$2; NCOL=$3
 # ---------------------------------------------------------------- document set (derived)
 : > "$WORK/docs"
 while IFS= read -r f; do
+  workArea "$f" && continue
   case "$f" in
-    Docs/plans/*|Docs/analysis/*|Docs/SPECIFICATION.md|tasks/*|.claude/*|.todo-mcp/*|REF-NO-COMMIT/*|CLAUDE.md) continue ;;
     *.md) printf '%s\n' "$f" >> "$WORK/docs" ;;
     Src/isp_hub75_morph*.spin2) printf '%s\n' "$f" >> "$WORK/docs" ;;
   esac
@@ -137,13 +149,15 @@ function report(type, ln, msg,   key) {
   seen[key] = 1
   printf "%s\t%s\t%d\t%s\n", type, CURDOC, ln, msg
 }
+# an exact tracked path always resolves; a bare or partial name never resolves to a working-area
+# file (a fixture under tools/tests/ must not stand in for a missing project file)
 function resolve(name, ddir,   k, c) {
   if (name in TRK) return name
   if (ddir != "." && (ddir "/" name) in TRK) return ddir "/" name
   if (index(name, "/") > 0) {
     c = "/" name
     for (k = 1; k <= nTrk; k++)
-      if (length(TL[k]) > length(c) && substr(TL[k], length(TL[k]) - length(c) + 1) == c) return TL[k]
+      if (!(TL[k] in WORKF) && length(TL[k]) > length(c) && substr(TL[k], length(TL[k]) - length(c) + 1) == c) return TL[k]
     return ""
   }
   return (name in BM) ? BM[name] : ""
@@ -304,7 +318,8 @@ function flush(   i, t, tl, raw, kind, ddir, fence, rest, nm, nxt, s, name, c, e
 
 BEGIN {
   FS = "\n"
-  while ((getline line < TRACKED) > 0) { TRK[line] = 1; TL[++nTrk] = line; if (!(baseOf(line) in BM)) BM[baseOf(line)] = line }
+  while ((getline line < WORKFILES) > 0) WORKF[line] = 1
+  while ((getline line < TRACKED) > 0) { TRK[line] = 1; TL[++nTrk] = line; if (!(line in WORKF) && !(baseOf(line) in BM)) BM[baseOf(line)] = line }
   while ((getline line < DRVFILES) > 0) DRV[line] = 1
   while ((getline line < PUBS) > 0) PUBSET[line] = 1
   split("zero one two three four five six seven eight nine ten eleven twelve", w, " ")
@@ -326,7 +341,7 @@ FNR == 1 { flush(); CURDOC = FILENAME }
 END { flush() }
 AWKEOF
 
-awk -v TRACKED="$WORK/tracked" -v DRVFILES="$WORK/drvfiles" -v PUBS="$WORK/pubs" \
+awk -v TRACKED="$WORK/tracked" -v WORKFILES="$WORK/workfiles" -v DRVFILES="$WORK/drvfiles" -v PUBS="$WORK/pubs" \
     -v DRIVER_OK="$DRIVER_OK" -v NDIST="$NDIST" -v NSEG="$NSEG" -v NSNAKE="$NSNAKE" -v NCOL="$NCOL" \
     "$AWKPROG" "${DOCARR[@]}" > "$WORK/found" 2>"$WORK/awk.err" \
   || { cat "$WORK/awk.err" >&2; die "internal awk failure"; }

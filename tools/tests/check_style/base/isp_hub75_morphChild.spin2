@@ -1,0 +1,30 @@
+'' =========================================================================================
+''
+''   File....... isp_hub75_morphChild.spin2
+''   Purpose.... Child object for the style checker fixtures
+''   Authors.... Test Author
+''   E-mail..... test@example.com
+''   Started.... Jan 2021
+''   Updated.... 12 Oct 2026
+''
+'' =========================================================================================
+
+CON ' ---- Child constants ----
+  {Spin2_Doc_CON}
+  CHILD_VALUE = 3
+
+PUB null()
+'' This is NOT a top level object
+
+CON ' ---- License ----
+
+{{
+
+ -------------------------------------------------------------------------------------------------
+  MIT License
+
+  Copyright (c) 2021 Test Owner
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy.
+ =================================================================================================
+}}

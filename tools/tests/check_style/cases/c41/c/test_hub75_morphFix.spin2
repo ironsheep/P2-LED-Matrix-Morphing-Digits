@@ -1,0 +1,44 @@
+'' =========================================================================================
+''
+''   File....... test_hub75_morphFix.spin2
+''   Purpose.... Test-file fixture for the style checker
+''   Authors.... Test Author
+''   E-mail..... test@example.com
+''   Started.... Jan 2021
+''   Updated.... 12 Oct 2026
+''
+'' =========================================================================================
+
+CON ' ---- Test constants ----
+  TEST_BUF_SIZE = 512
+  OWN_VALUE = 3
+
+OBJ ' ---- Objects ----
+  child : "isp_hub75_morphChild"
+
+DAT ' ---- Buffers ----
+testBuf byte 0[TEST_BUF_SIZE]
+
+PUB go() | status
+'' Run the fixture test.
+''
+
+' Local Variables:
+' @local status - fetched status
+
+  status := child.CHILD_VALUE
+  bytefill(@testBuf, 0, TEST_BUF_SIZE)
+  child.evaluateSingleValue(status, @"check", child.CHILD_VALUE)
+
+CON ' ---- License ----
+
+{{
+
+ -------------------------------------------------------------------------------------------------
+  MIT License
+
+  Copyright (c) 2021 Test Owner
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy.
+ =================================================================================================
+}}
