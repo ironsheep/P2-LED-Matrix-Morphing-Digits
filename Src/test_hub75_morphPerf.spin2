@@ -1,0 +1,433 @@
+'' =================================================================================================
+''
+''   File....... test_hub75_morphPerf.spin2
+''   Purpose.... Performance baseline: times today's drawing primitives, commit, digit-group step and demo frame rate
+''   Authors.... Stephen M Moraco
+''               -- see below for terms of use
+''   E-mail..... stephen@ironsheep.biz
+''   Started.... Oct 2026
+''   Updated.... 12 Oct 2026
+''
+'' =================================================================================================
+
+{ Baseline form (task 162): measures the drawing path as it stands before any rewrite, on the quad
+  (4 x ICN2037 128x64 in a 2x2 grid, 256x128, 8-bit, 335 MHz). Run it on the board, three or more
+  times, and record the figures in Docs/analysis/performance-baseline.md.
+
+  Every interval is read with getct() on this cog, in system clock ticks; the driver's cogs are
+  not involved in the reading, only in what is read. Reported through test_hub75_morphUtils.
+
+  Log lines this program adds to the harness's TIME line (same field style):
+    PERCALL  <name>  reps=<n>  total_ticks=<n>  ticks_x100_per_call=<n>  net_ticks_x100=<n>  ns_per_call=<n>  net_ns=<n>  net_us_whole=<n>
+        N repetitions in one bracket; net = per-call minus the empty `repeat` loop's per-iteration cost
+    STATS    <name>  n=<n>  min_ticks=<n>  mean_ticks=<n>  max_ticks=<n>  min_us=<n>  mean_us=<n>  max_us=<n>
+        a set of one-call brackets, each stored and printed afterwards
+    DIFF     <name>  cycles=<n>  with_ticks=<n>  without_ticks=<n>  per_commit_ticks=<n>  per_commit_us=<n>
+        the commit time as the difference of two whole loops (a bracket placed around the loop, not the call)
+    FPS      <name>  commits=<n>  passes=<n>  window_ticks=<n>  commits_per_second_x100=<n>  passes_per_second_x100=<n>
+}
+
+CON ' ---- Timing ----
+
+  CLK_FREQ = 335_000_000                                        ' system freq as a constant
+  _clkfreq = CLK_FREQ                                           ' set system clock
+
+CON ' ---- Units ----
+
+  NANOS_PER_SECOND = 1_000_000_000
+  NANOS_PER_MICRO = 1000                                        ' the three fraction digits of a microsecond
+  PER_CALL_SCALE = 100                                          ' ticks per call are printed times this (two decimals)
+  RATE_SCALE = 100                                              ' rates are printed times this (two decimals)
+  QUAD_ROWS = 128                                               ' the display this baseline is for: the quad, 256 x 128
+  QUAD_COLUMNS = 256
+
+CON ' ---- Display (the 2021 demo's groups) ----
+
+  MAX_COUNTERS = 4
+  LAST_COUNTER = MAX_COUNTERS - 1
+
+  #0, GRP_CLOCK_LT, GRP_CLOCK_RT, GRP_DOWNCTR_2DIG, GRP_CTR_6DIG_RAND
+
+CON ' ---- Measurement settings ----
+
+  BRACKET_REPS = 1000                                           ' empty-bracket repetitions
+  LOOP_REPS = 10000                                             ' empty-loop repetitions
+  PIXEL_REPS = 2000                                             ' drawPixelAtRCwithRGB and packedCorrectedRgb repetitions
+  RUN_REPS = 500                                                ' fillRowRun and copyRowRun repetitions
+  RUN_SHORT = 8                                                 ' run lengths in pixels
+  RUN_MEDIUM = 32
+  RUN_LONG = 128
+  COLOR_LIST_LONGS = RUN_LONG                                   ' copyRowRun's color list: one LONG per pixel of the longest run
+
+  TEST_ROW = 40                                                 ' where the primitives draw (inside the first panel)
+  TEST_PIXEL_COLUMN = 100
+  TEST_RUN_COLUMN = 0                                           ' runs start at the panel's left edge so none crosses a cell
+  TEST_RED = 200
+  TEST_GREEN = 120
+  TEST_BLUE = 40
+
+  QUIET_MS = 100                                                ' quiet before a commit: many refresh periods
+  COMMIT_SAMPLES = 20                                           ' one-call commit brackets per kind
+  LAST_COMMIT_SAMPLE = COMMIT_SAMPLES - 1
+  DIFF_CYCLES = 20                                              ' commits in the differential method
+
+  ANIM_CYCLES = 40                                              ' value changes per group
+  ANIM_STEPS_TIMED = 4                                          ' animateStep calls timed after each change (all real steps: segments are 6+ long)
+  ANIM_SAMPLE_COUNT = ANIM_CYCLES * ANIM_STEPS_TIMED
+  NO_MIN_TICKS = $7FFF_FFFF                                     ' start value of a running minimum
+
+  FPS_SECONDS = 10                                              ' the demo-loop window
+  FPS_WINDOW_TICKS = CLK_FREQ * FPS_SECONDS
+
+  ' group placement (the demo's, same arguments)
+  CLOCK_LT_ROW = 10
+  CLOCK_LT_COLUMN = 2
+  CLOCK_RT_ROW = 8
+  CLOCK_RT_COLUMN = 64 + 2
+  DOWNCTR_ROW = 28
+  DOWNCTR_COLUMN = 3
+  RANDOM_ROW = 32
+  RANDOM_COLUMN = 64 + 4
+  CLOCK_DIGITS = 4
+  DOWNCTR_DIGITS = 3
+  SEG_THICKNESS = 1
+  CLOCK_SEG_LENGTH = 6
+  DOWNCTR_SEG_LENGTH = 15
+  RANDOM_SEG_LENGTH = 9
+  CLOCK_RT_START = 12 * 60
+  DOWNCTR_START = 204
+  RANDOM_START = 5436
+  FULL_WIDTH_COLUMNS = 64                                       ' wider than this holds a right-hand group
+  FULL_HEIGHT_ROWS = 32                                         ' taller than this holds a lower group
+  TEXT_ROW = 0
+  TEXT_COLUMN = 0
+
+OBJ
+
+    color                   : "isp_hub75_color"
+    display                 : "isp_hub75_display"
+    pixels                  : "isp_hub75_screenUtils"
+    colorUtils              : "isp_hub75_colorUtils"
+    counters[MAX_COUNTERS]  : "isp_hub75_morphCounters"
+    hub75Bffrs              : "isp_hub75_hwBufferAccess"
+    utils                   : "test_hub75_morphUtils"
+
+VAR
+
+    long    chainIndex
+    long    loopX100                                            ' the empty loop's cost per iteration, ticks x100
+    long    colorList[COLOR_LIST_LONGS]
+    long    quietTicks[COMMIT_SAMPLES]
+    long    backToBackTicks[COMMIT_SAMPLES]
+    long    animTicks[ANIM_SAMPLE_COUNT]
+
+PUB go() | maxPhysicalRows, maxPhysicalCols, packedColor
+'' Run the baseline: start the display, time each item, report, finish.
+''
+
+' Local Variables:
+' @local maxPhysicalRows - display height in pixels
+' @local maxPhysicalCols - display width in pixels
+' @local packedColor - the test color, corrected and packed
+
+    utils.beginSuite(@"morphPerf baseline")
+
+    chainIndex := hub75Bffrs.indexForHub75ChainId(hub75Bffrs.HUB75_ADAPTER_1)
+    display.start(display.HUB75_ADAPTER_1)
+    maxPhysicalCols := hub75Bffrs.maxDisplayColumns(chainIndex)
+    maxPhysicalRows := hub75Bffrs.maxDisplayRows(chainIndex)
+    debug("DISPLAY  rows=", udec_(maxPhysicalRows), "  columns=", udec_(maxPhysicalCols), "  chain=", udec_(chainIndex))
+    utils.checkEqual(maxPhysicalRows, @"display is the quad: rows", QUAD_ROWS)
+    utils.checkEqual(maxPhysicalCols, @"display is the quad: columns", QUAD_COLUMNS)
+    display.clearScreen()
+    packedColor := pixels.packedCorrectedRgb(chainIndex, TEST_RED, TEST_GREEN, TEST_BLUE)
+    longfill(@colorList, packedColor, COLOR_LIST_LONGS)
+
+    measureOverheads()
+    measureColorAndPixel()
+    measureRuns()
+    measureCommits()
+
+    ' the groups are placed after the primitives so the digits are drawn on a clean screen
+    display.clearScreen()
+    placeGroups(maxPhysicalRows, maxPhysicalCols)
+    display.commitScreenToPanelSet()
+    measureAnimateSteps()
+    measureFrameRate()
+
+    utils.finish()
+
+
+PRI measureOverheads() | startTick, bracketTicks, readTick
+    ' the cost of the measurement itself: one counter read, and an empty repeat loop
+
+    startTick := getct()
+    repeat BRACKET_REPS
+        readTick := getct()
+    bracketTicks := getct() - startTick
+    reportPerCall(@"one getct read in a loop (bracket cost)", bracketTicks, BRACKET_REPS, 0)
+
+    startTick := utils.timeStart()
+    repeat LOOP_REPS
+    bracketTicks := utils.timeReport(@"empty repeat loop (total)", startTick)
+    loopX100 := muldiv64(bracketTicks, PER_CALL_SCALE, LOOP_REPS)
+    reportPerCall(@"empty repeat loop", bracketTicks, LOOP_REPS, 0)
+
+
+PRI measureColorAndPixel() | startTick, totalTicks, packedColor
+    ' one packedCorrectedRgb (colorUtils, and the screenUtils wrapper) and one drawPixelAtRCwithRGB
+
+    startTick := utils.timeStart()
+    repeat PIXEL_REPS
+        packedColor := colorUtils.packedCorrectedRgb(chainIndex, TEST_RED, TEST_GREEN, TEST_BLUE)
+    totalTicks := utils.timeReport(@"colorUtils.packedCorrectedRgb (total)", startTick)
+    reportPerCall(@"colorUtils.packedCorrectedRgb", totalTicks, PIXEL_REPS, loopX100)
+
+    startTick := utils.timeStart()
+    repeat PIXEL_REPS
+        packedColor := pixels.packedCorrectedRgb(chainIndex, TEST_RED, TEST_GREEN, TEST_BLUE)
+    totalTicks := utils.timeReport(@"screenUtils.packedCorrectedRgb (total)", startTick)
+    reportPerCall(@"screenUtils.packedCorrectedRgb", totalTicks, PIXEL_REPS, loopX100)
+
+    startTick := utils.timeStart()
+    repeat PIXEL_REPS
+        pixels.drawPixelAtRCwithRGB(chainIndex, TEST_ROW, TEST_PIXEL_COLUMN, TEST_RED, TEST_GREEN, TEST_BLUE)
+    totalTicks := utils.timeReport(@"drawPixelAtRCwithRGB (total)", startTick)
+    reportPerCall(@"drawPixelAtRCwithRGB", totalTicks, PIXEL_REPS, loopX100)
+
+
+PRI measureRuns() | packedColor
+    ' fillRowRun and copyRowRun of 8, 32 and 128 pixels
+
+    packedColor := colorList[0]
+    timeFillRun(@"fillRowRun 8 px", RUN_SHORT, packedColor)
+    timeFillRun(@"fillRowRun 32 px", RUN_MEDIUM, packedColor)
+    timeFillRun(@"fillRowRun 128 px", RUN_LONG, packedColor)
+    timeCopyRun(@"copyRowRun 8 px", RUN_SHORT)
+    timeCopyRun(@"copyRowRun 32 px", RUN_MEDIUM)
+    timeCopyRun(@"copyRowRun 128 px", RUN_LONG)
+
+
+PRI timeFillRun(pName, nPixels, packedColor) | startTick, totalTicks
+    startTick := utils.timeStart()
+    repeat RUN_REPS
+        pixels.fillRowRun(chainIndex, TEST_ROW, TEST_RUN_COLUMN, nPixels, packedColor)
+    totalTicks := utils.timeReport(pName, startTick)
+    reportPerCall(pName, totalTicks, RUN_REPS, loopX100)
+
+
+PRI timeCopyRun(pName, nPixels) | startTick, totalTicks
+    startTick := utils.timeStart()
+    repeat RUN_REPS
+        pixels.copyRowRun(chainIndex, TEST_ROW, TEST_RUN_COLUMN, nPixels, @colorList)
+    totalTicks := utils.timeReport(pName, startTick)
+    reportPerCall(pName, totalTicks, RUN_REPS, loopX100)
+
+
+PRI measureCommits() | sampleIndex, startTick, endTick, withTicks, withoutTicks
+    ' commit after a quiet period (no wait), commit back to back (waits for the previous one), and the
+    ' differential method: whole loops of quiet+commit and quiet only, the difference over the cycles
+
+    repeat sampleIndex from 0 to LAST_COMMIT_SAMPLE
+        waitms(QUIET_MS)
+        startTick := getct()
+        display.commitScreenToPanelSet()
+        quietTicks[sampleIndex] := getct() - startTick
+    reportSamples(@"commit after quiet period", @quietTicks, COMMIT_SAMPLES)
+
+    display.commitScreenToPanelSet()                            ' the first of the train, not timed
+    repeat sampleIndex from 0 to LAST_COMMIT_SAMPLE
+        startTick := getct()
+        display.commitScreenToPanelSet()
+        backToBackTicks[sampleIndex] := getct() - startTick
+    reportSamples(@"commit back to back", @backToBackTicks, COMMIT_SAMPLES)
+
+    startTick := getct()
+    repeat DIFF_CYCLES
+        waitms(QUIET_MS)
+        display.commitScreenToPanelSet()
+    endTick := getct()
+    withTicks := endTick - startTick
+    startTick := getct()
+    repeat DIFF_CYCLES
+        waitms(QUIET_MS)
+    endTick := getct()
+    withoutTicks := endTick - startTick
+    reportDifference(@"commit by loop difference", withTicks, withoutTicks, DIFF_CYCLES)
+
+
+PRI placeGroups(maxPhysicalRows, maxPhysicalCols) | ctrIdx
+    ' place the demo's four groups exactly as the 2021 demo does
+
+    repeat ctrIdx from 0 to LAST_COUNTER
+        counters[ctrIdx].initialize(chainIndex, maxPhysicalRows, maxPhysicalCols)
+
+    display.setTextFont(display.TEXT_FONT_5X7)
+    display.setCursor(TEXT_ROW, TEXT_COLUMN)
+    display.setColoredTextAtLnCol(TEXT_ROW, TEXT_COLUMN, string("Iron Sheep"), color.cMaroon)
+    display.commitScreenToPanelSet()
+
+    counters[GRP_CLOCK_LT].placeDigitGroup(CLOCK_LT_ROW, CLOCK_LT_COLUMN, counters.GRP_CLOCK, CLOCK_DIGITS, SEG_THICKNESS, CLOCK_SEG_LENGTH, 0, color.cOrange)
+    if maxPhysicalCols > FULL_WIDTH_COLUMNS
+        counters[GRP_CLOCK_RT].placeDigitGroup(CLOCK_RT_ROW, CLOCK_RT_COLUMN, counters.GRP_CLOCK, CLOCK_DIGITS, SEG_THICKNESS, CLOCK_SEG_LENGTH, CLOCK_RT_START, color.cGreen)
+    if maxPhysicalRows > FULL_HEIGHT_ROWS
+        counters[GRP_DOWNCTR_2DIG].placeDigitGroup(DOWNCTR_ROW, DOWNCTR_COLUMN, counters.GRP_DOWN_COUNTER, DOWNCTR_DIGITS, SEG_THICKNESS, DOWNCTR_SEG_LENGTH, DOWNCTR_START, color.cTeal)
+    if maxPhysicalCols > FULL_WIDTH_COLUMNS && maxPhysicalRows > FULL_HEIGHT_ROWS
+        counters[GRP_CTR_6DIG_RAND].placeDigitGroup(RANDOM_ROW, RANDOM_COLUMN, counters.GRP_DIGITS_RANDOM, CLOCK_DIGITS, SEG_THICKNESS, RANDOM_SEG_LENGTH, RANDOM_START, color.cRed)
+
+
+PRI measureAnimateSteps()
+    ' one animateStep of each group (4 digits: both clocks and the random group; 3 digits: the down counter)
+
+    timeGroupSteps(@"animateStep clock left (4 digits, seg 6)", GRP_CLOCK_LT)
+    timeGroupSteps(@"animateStep clock right (4 digits, seg 6)", GRP_CLOCK_RT)
+    timeGroupSteps(@"animateStep down counter (3 digits, seg 15)", GRP_DOWNCTR_2DIG)
+    timeGroupSteps(@"animateStep random (4 digits, seg 9)", GRP_CTR_6DIG_RAND)
+
+
+PRI timeGroupSteps(pName, ctrIdx) | sampleIndex, startTick
+    ' change the group's value, then time the first animateStep calls (each is a real step); nothing is committed
+
+    sampleIndex := 0
+    repeat ANIM_CYCLES
+        counters[ctrIdx].nextTimeCycle()
+        repeat ANIM_STEPS_TIMED
+            startTick := getct()
+            counters[ctrIdx].animateStep()
+            animTicks[sampleIndex] := getct() - startTick
+            sampleIndex++
+        repeat until counters[ctrIdx].isAnimationComplete()     ' finish the animation and its idle count
+            counters[ctrIdx].animateStep()
+    reportStats(pName, @animTicks, ANIM_SAMPLE_COUNT)
+
+
+PRI measureFrameRate() | startTick, windowTicks, commitCount, passCount
+    ' the 2021 demo loop, as it is in demo_hub75_morphSeg.spin2, for FPS_SECONDS; every commit is a frame
+
+    commitCount := 0
+    passCount := 0
+    startTick := utils.timeStart()
+    repeat while (getct() - startTick) +< FPS_WINDOW_TICKS
+        commitCount += stepIdleCounters()
+        commitCount += animateActiveCounters()
+        passCount++
+    windowTicks := utils.timeReport(@"demo loop window (total)", startTick)
+    debug("FPS       demo loop  commits=", udec_(commitCount), "  passes=", udec_(passCount), "  window_ticks=", udec_(windowTicks), "  commits_per_second_x100=", udec_(muldiv64(commitCount * RATE_SCALE, clkfreq, windowTicks)), "  passes_per_second_x100=", udec_(muldiv64(passCount * RATE_SCALE, clkfreq, windowTicks)))
+
+
+PRI stepIdleCounters() : nCommits | ctrIndex, bDidStep
+    ' the demo's stepIdleCounters(), returning the commits it made
+
+    nCommits := 0
+    bDidStep := FALSE
+    repeat ctrIndex from 0 to LAST_COUNTER
+        if counters[ctrIndex].isConfigured() && counters[ctrIndex].isAnimationComplete()
+            counters[ctrIndex].nextTimeCycle()
+            bDidStep := TRUE
+    if bDidStep
+        display.commitScreenToPanelSet()
+        nCommits++
+
+
+PRI animateActiveCounters() : nCommits | ctrIndex, bDidAnimate
+    ' the demo's animateActiveCounters(), returning the commits it made
+
+    nCommits := 0
+    bDidAnimate := FALSE
+    if not allCounterAnimationsComplete()
+        repeat ctrIndex from 0 to LAST_COUNTER
+            if not counters[ctrIndex].isAnimationComplete()
+                counters[ctrIndex].animateStep()
+                bDidAnimate := TRUE
+    if bDidAnimate
+        display.commitScreenToPanelSet()
+        nCommits++
+
+
+PRI allCounterAnimationsComplete() : status | ctrIndex
+    ' the demo's allCounterAnimationsComplete()
+
+    status := TRUE
+    repeat ctrIndex from 0 to LAST_COUNTER
+        if not counters[ctrIndex].isAnimationComplete()
+            status := FALSE
+            quit
+
+
+PRI reportPerCall(pName, totalTicks, nReps, overheadX100) | ticksX100, netX100, nanos, netNanos
+    ' print the PERCALL line: per-call ticks, and the figure net of the empty loop's per-iteration cost
+
+    ticksX100 := muldiv64(totalTicks, PER_CALL_SCALE, nReps)
+    netX100 := (ticksX100 - overheadX100) #> 0
+    nanos := muldiv64(ticksX100, NANOS_PER_SECOND, clkfreq) / PER_CALL_SCALE
+    netNanos := muldiv64(netX100, NANOS_PER_SECOND, clkfreq) / PER_CALL_SCALE
+    debug("PERCALL  ", zstr_(pName), "  reps=", udec_(nReps), "  total_ticks=", udec_(totalTicks), "  ticks_x100_per_call=", udec_(ticksX100), "  net_ticks_x100=", sdec_(netX100), "  ns_per_call=", udec_(nanos), "  net_ns=", sdec_(netNanos), "  net_us_whole=", udec_(netNanos / NANOS_PER_MICRO))
+
+
+PRI reportSamples(pName, pTicks, nSamples) | sampleIndex
+    ' print each stored one-call bracket as a TIME line, then their STATS line
+
+    sampleIndex := 0
+    repeat nSamples
+        reportTicks(pName, LONG[pTicks][sampleIndex])
+        sampleIndex++
+    reportStats(pName, pTicks, nSamples)
+
+
+PRI reportTicks(pName, elapsedTicks)
+    ' print a TIME line (the harness's format) for an interval that was measured and stored earlier
+
+    debug("TIME     ", zstr_(pName), "  ticks=", udec_(elapsedTicks), "  us=", udec_(muldiv64(elapsedTicks, utils.MICROS_PER_SECOND, clkfreq)), "  clkfreq=", udec_(clkfreq))
+
+
+PRI reportStats(pName, pTicks, nSamples) | sampleIndex, minTicks, maxTicks, sumTicks, meanTicks
+    ' print the STATS line: min, mean and max of nSamples stored brackets
+
+    minTicks := NO_MIN_TICKS
+    maxTicks := 0
+    sumTicks := 0
+    sampleIndex := 0
+    repeat nSamples
+        sumTicks += LONG[pTicks][sampleIndex]
+        minTicks := minTicks <# LONG[pTicks][sampleIndex]
+        maxTicks := maxTicks #> LONG[pTicks][sampleIndex]
+        sampleIndex++
+    meanTicks := sumTicks / nSamples
+    debug("STATS    ", zstr_(pName), "  n=", udec_(nSamples), "  min_ticks=", udec_(minTicks), "  mean_ticks=", udec_(meanTicks), "  max_ticks=", udec_(maxTicks), "  min_us=", udec_(muldiv64(minTicks, utils.MICROS_PER_SECOND, clkfreq)), "  mean_us=", udec_(muldiv64(meanTicks, utils.MICROS_PER_SECOND, clkfreq)), "  max_us=", udec_(muldiv64(maxTicks, utils.MICROS_PER_SECOND, clkfreq)))
+
+
+PRI reportDifference(pName, withTicks, withoutTicks, nCycles) | perCommitTicks
+    ' print the DIFF line: the commit time as the difference between two whole loops, over the cycles
+
+    perCommitTicks := (withTicks - withoutTicks) / nCycles
+    debug("DIFF     ", zstr_(pName), "  cycles=", udec_(nCycles), "  with_ticks=", udec_(withTicks), "  without_ticks=", udec_(withoutTicks), "  per_commit_ticks=", sdec_(perCommitTicks), "  per_commit_us=", sdec_(muldiv64(perCommitTicks, utils.MICROS_PER_SECOND, clkfreq)))
+
+
+CON ' ---- License ----
+
+{{
+
+ -------------------------------------------------------------------------------------------------
+  MIT License
+
+  Copyright (c) 2021 Stephen Moraco
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+ -------------------------------------------------------------------------------------------------
+}}

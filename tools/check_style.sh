@@ -412,7 +412,7 @@ function chk_misc(   i, s, k, q, fname, path, line, a, rest, items, ni, j, nm) {
     q = substr(s, RSTART, RLENGTH); rest = substr(s, RSTART + RLENGTH)
     fname = q; sub(/^[^"]*"/, "", fname); sub(/"$/, "", fname)
     if (fname !~ /\.spin2$/) fname = fname ".spin2"
-    path = DIRPFX fname
+    path = KEYDIR fname
     # 1.9: overrides after the quoted file name
     if (rest ~ /\|/) {
       rest = substr(rest, index(rest, "|") + 1)
@@ -647,7 +647,7 @@ function load(   nl, i, f) {
   AOPS =":=|\\+=|-=|\\*=|//=|/=|&=|\\|=|\\^=|<<=|>>=|#>=|<#=|~>=|->=|<-=|><=|&&=|\\|\\|=|\\^\\^=|\\+/=|\\+//=|\\*\\*=|\\+\\+|--|~~|~([^>]|$)"
   nl = split(LIST, f, "|")
   for (i = 1; i <= nl; i++) listSet[f[i]] = 1
-  DIRPFX = FILE_NAME; sub(/[^\/]*$/, "", DIRPFX)
+  KEYDIR = KEY_NAME; sub(/[^\/]*$/, "", KEYDIR)
   BASE = FILE_NAME; sub(/^.*\//, "", BASE)
 }
 
@@ -656,7 +656,7 @@ END {
   load()
   lexAll(); sections(); findMethods(); collectCon()
   if (MODE == "cons") {
-    for (i = 1; i <= conCnt; i++) printf "C\t%s\t%s\t%d\n", FILE_NAME, conN[i], conL[i]
+    for (i = 1; i <= conCnt; i++) printf "C\t%s\t%s\t%d\n", KEY_NAME, conN[i], conL[i]
     exit
   }
   chk_ascii(); chk_pnut(); chk_names(); chk_misc(); chk_layout(); chk_comments(); chk_header()
@@ -670,15 +670,28 @@ usage_err() { printf 'check_style.sh: %s\n' "$1" >&2; }
 SUMMARY=0
 if [ "${1:-}" = "-s" ] || [ "${1:-}" = "--summary" ]; then SUMMARY=1; shift; fi
 
+derive_files() {
+  git -C "$ROOT" ls-files --cached --others --exclude-standard -- \
+    'Src/isp_hub75_morph*.spin2' 'Src/demo_hub75_morph*.spin2' 'Src/test_hub75_morph*.spin2' 2>/dev/null | sort -u
+}
+
+# FILES are checked; CON_FILES are read for constants (rules 2.4 / 6.2). With explicit
+# arguments, CON_FILES also holds every derived project file, so a one-file check sees the
+# constants of the project objects it includes, exactly as the whole-tree run does.
 FILES=()
+CON_FILES=()
 if [ "$#" -gt 0 ]; then
   for a in "$@"; do FILES+=("${a#./}"); done
+  CON_FILES=("${FILES[@]}")
+  while IFS= read -r f; do
+    [ -n "$f" ] && CON_FILES+=("$ROOT/$f")
+  done < <(derive_files)
 else
   cd "$ROOT" || { usage_err "cannot cd to $ROOT"; exit 2; }
   while IFS= read -r f; do
     [ -n "$f" ] && FILES+=("$f")
-  done < <(git ls-files --cached --others --exclude-standard -- \
-             'Src/isp_hub75_morph*.spin2' 'Src/demo_hub75_morph*.spin2' 'Src/test_hub75_morph*.spin2' | sort -u)
+  done < <(derive_files)
+  CON_FILES=(${FILES[@]+"${FILES[@]}"})
 fi
 
 LICENSE_FILE=${STYLE_LICENSE:-$ROOT/LICENSE}
@@ -695,14 +708,22 @@ trap 'rm -f "$FIND" "$CONS"' EXIT
 BADFILE=0
 if [ "$NFILES" -gt 0 ]; then
   if [ -z "$LICENSE_TXT" ]; then usage_err "no 'Copyright (c)' line found in $LICENSE_FILE (set STYLE_LICENSE)"; exit 2; fi
-  LIST=$(IFS='|'; printf '%s' "${FILES[*]}")
   for f in "${FILES[@]}"; do
-    if [ ! -f "$f" ]; then usage_err "listed file missing: $f"; BADFILE=1; continue; fi
-    awk -v MODE=cons -v FILE_NAME="$f" -v LIST="$LIST" -v CONFILE=/dev/null -v LICENSE_TXT="$LICENSE_TXT" "$AWKPROG" "$f" >> "$CONS"
+    if [ ! -f "$f" ]; then usage_err "listed file missing: $f"; BADFILE=1; fi
   done
   [ "$BADFILE" -eq 1 ] && exit 2
+  # constants are keyed by absolute path, so the 2.4 lookup works from any working directory
+  abspath() { printf '%s/%s' "$(cd "$(dirname "$1")" && pwd)" "$(basename "$1")"; }
+  KEYS=()
+  for f in "${CON_FILES[@]}"; do
+    [ -f "$f" ] && KEYS+=("$(abspath "$f")")
+  done
+  LIST=$(IFS='|'; printf '%s' "${KEYS[*]}")
+  for k in "${KEYS[@]}"; do
+    awk -v MODE=cons -v FILE_NAME="$k" -v KEY_NAME="$k" -v LIST="$LIST" -v CONFILE=/dev/null -v LICENSE_TXT="$LICENSE_TXT" "$AWKPROG" "$k" >> "$CONS"
+  done
   for f in "${FILES[@]}"; do
-    awk -v MODE=check -v FILE_NAME="$f" -v LIST="$LIST" -v CONFILE="$CONS" -v LICENSE_TXT="$LICENSE_TXT" "$AWKPROG" "$f" >> "$FIND"
+    awk -v MODE=check -v FILE_NAME="$f" -v KEY_NAME="$(abspath "$f")" -v LIST="$LIST" -v CONFILE="$CONS" -v LICENSE_TXT="$LICENSE_TXT" "$AWKPROG" "$f" >> "$FIND"
   done
   sort -s -t "$TAB" -k3,3 -k4,4n "$FIND" | uniq > "$FIND.s" && mv "$FIND.s" "$FIND"
 fi
