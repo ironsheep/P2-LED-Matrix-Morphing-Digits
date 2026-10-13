@@ -1,0 +1,144 @@
+{Spin2_v51}
+'' =================================================================================================
+''
+''   File....... isp_hub75_morphColor.spin2
+''   Purpose.... Shared color helper for the morphing digits: one gamma curve and per-color intensity ramps
+''   Authors.... Stephen M Moraco
+''               -- see below for terms of use
+''   E-mail..... stephen@ironsheep.biz
+''   Started.... Oct 2026
+''   Updated.... 12 Oct 2026
+''   Version.... v1.0.0
+''
+'' =================================================================================================
+
+{ Every partial-brightness pixel (a tail, an edge, anti-aliasing) is drawn at an intensity from 0
+  (off) to 255 (the full color). The driver applies no gamma, so equal steps of raw level do not look
+  like equal steps of brightness. This object turns an intensity into the packed bytes the driver
+  stores, through a perceptual curve, with one table read per pixel.
+
+  The gamma curve is in DAT, one copy for the program: every object that includes this file shares
+  it, and it is built once. Keep this object free of CON overrides: an override that changed its
+  image would give that instance its own DAT and a second curve (p2kb p2kbSpin2ObjectImageDedup).
+
+  Usage:
+    1. buildRamp(@ramp, chainIdx, rgbColor) - once per color, when a group is placed: fills the
+                                              caller's RAMP_LEVELS LONGs (the curve is built on
+                                              first use)
+    2. packed := ramp[intensity]            - per pixel: the packed color at that intensity, ready for
+                                              screenUtils.copyRowRun() or fillRowRun()
+
+  The math. The color's channels are the levels the driver shows at full intensity, so they are
+  kept exactly: each channel is scaled by the same perceptual factor,
+      channel(i) = round(channel x curve(i)),   curve(i) = (i / 255) ^ GAMMA
+  and packed through the driver's own packedCorrectedRgb(). So ramp[255] is the driver's packing
+  of the full color, ramp[0] is black, the hue is the same at every level, and a channel that is 0
+  in the color is 0 at every level. The curve is kept as 16-bit fractions so a channel is rounded
+  once, not twice: an 8-bit curve would first round the factor, then the product.
+}
+
+CON ' ramp shape
+
+  RAMP_LEVELS = 256                                             ' intensities 0 (off) to RAMP_MAX (full color): a caller's ramp is this many LONGs
+  RAMP_OFF = 0                                                  ' the intensity of black
+  RAMP_FIRST_LIT = RAMP_OFF + 1                                 ' the lowest intensity above black
+  RAMP_MAX = RAMP_LEVELS - 1                                    ' the intensity of the full color
+
+CON ' gamma curve
+
+  GAMMA = 2.2                                                   ' the exponent of the perceptual curve (float)
+  CURVE_FULL = 65_535                                           ' curve(RAMP_MAX): factors are 16-bit fractions of this
+  CURVE_HALF = CURVE_FULL / 2                                   ' added before dividing by CURVE_FULL, so the channel rounds to nearest
+
+OBJ
+
+    pixels      : "isp_hub75_screenUtils"
+    colorUtils  : "isp_hub75_colorUtils"
+
+DAT ' shared gamma curve (one copy for the program; see the notes above)
+
+  curveBuilt      long    FALSE                                 ' TRUE once buildCurve() has filled the curve
+  curve           word    0[RAMP_LEVELS]                        ' curve(i) x CURVE_FULL, rounded
+
+PUB null()
+'' This is not a top level object
+''
+
+PUB buildCurve() | levelIdx
+'' Build the shared gamma curve, once. Later calls return at once. buildRamp() calls this, so a
+'' caller needs it only to take the start-up cost at a time of its choosing.
+''
+
+' Local Variables:
+' @local levelIdx - the intensity whose curve value is being computed
+
+    if curveBuilt <> TRUE
+        curve[RAMP_OFF] := 0                                    ' POW of 0.0 is not used: log2(0) has no value
+        repeat levelIdx from RAMP_FIRST_LIT to RAMP_MAX
+            curve[levelIdx] := round(float(CURVE_FULL) *. ((float(levelIdx) /. float(RAMP_MAX)) POW GAMMA))
+        curveBuilt := TRUE
+
+PUB curveAt(intensity) : curveValue
+'' Return the gamma curve's factor at an intensity, as a fraction of CURVE_FULL. For tests and
+'' tuning; drawing reads a ramp, never the curve.
+''
+'' @param intensity - 0 to RAMP_MAX (only the low 8 bits are used)
+'' @returns curveValue - the curve at that intensity, 0 to CURVE_FULL
+
+    buildCurve()
+    curveValue := curve[intensity & RAMP_MAX]
+
+PUB buildRamp(pRamp, nChainIdx, rgbColor) | levelIdx, red, green, blue, factor
+'' Fill an intensity ramp for one color on one adapter: LONG[pRamp][i] is the packed color at
+'' intensity i, from 0 (black) to RAMP_MAX (exactly the driver's packing of rgbColor).
+''
+'' @param pRamp - hub address of RAMP_LEVELS LONGs, owned by the caller
+'' @param nChainIdx - the index of the adapter the ramp is drawn on (its color table packs the bytes)
+'' @param rgbColor - the full color, $RRGGBB
+
+' Local Variables:
+' @local levelIdx - the intensity being filled
+' @local red - the color's red channel at full intensity
+' @local green - the color's green channel at full intensity
+' @local blue - the color's blue channel at full intensity
+' @local factor - the curve at levelIdx, a fraction of CURVE_FULL
+
+    buildCurve()
+    red, green, blue := colorUtils.rgbForCValue(rgbColor)
+    repeat levelIdx from RAMP_OFF to RAMP_MAX
+        factor := curve[levelIdx]
+        LONG[pRamp][levelIdx] := pixels.packedCorrectedRgb(nChainIdx, scaled(red, factor), scaled(green, factor), scaled(blue, factor))
+
+PRI scaled(channel, factor) : level
+' A channel scaled by a curve factor (a fraction of CURVE_FULL), rounded to nearest.
+
+    level := (channel * factor + CURVE_HALF) / CURVE_FULL
+
+CON ' license
+
+{{
+
+ -------------------------------------------------------------------------------------------------
+  MIT License
+
+  Copyright (c) 2021 Iron Sheep Productions, LLC
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+ =================================================================================================
+}}

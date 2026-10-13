@@ -16,6 +16,7 @@
     1. beginSuite()  - zero the counts, print the SUITE line
     2. checkEqual()  - one PASS or FAIL line per check, counted
        timeStart() / timeReport() - one TIME line per measurement (not counted as a check)
+       holdFor()     - a wait of any length (waitms() alone stops working past 6.4 s at 335 MHz)
     3. finish()      - print SUMMARY and RESULT, then the END_SESSION line so a headless run exits
        (pnut-term-ts --end-marker matches that text; the DEBUG_END_SESSION constant prints only a blank line there)
 
@@ -40,6 +41,10 @@ CON ' ---- Reporting ----
   ' Pause before the end marker: pnut-term-ts closes the log when it sees END_SESSION,
   ' and without this pause the last lines before it were cut short (seen on the bench, 2026-10-12)
   END_SETTLE_MS = 200
+
+  ' holdFor() waits in slices of this length: one waitms() must stay under $8000_0000 clocks, which is 6.4 s at
+  ' 335 MHz, and a longer one returns at once with no error (p2kb p2kbSpin2Waitms; seen on the bench 2026-10-12)
+  HOLD_SLICE_MS = 1000
 
 DAT ' ---- Run Counts ----
 
@@ -96,6 +101,24 @@ PUB timeReport(pTimingName, startTick) : elapsedTicks | elapsedUs
     elapsedTicks := getct() - startTick
     elapsedUs := muldiv64(elapsedTicks, MICROS_PER_SECOND, clkfreq)
     debug("TIME     ", zstr_(pTimingName), "  ticks=", udec_(elapsedTicks), "  us=", udec_(elapsedUs), "  clkfreq=", udec_(clkfreq))
+
+
+PUB holdFor(durationMs) : heldMs | startMs
+'' Hold for durationMs (to keep a display up to be judged by eye, for example), at any length: waited in
+'' HOLD_SLICE_MS slices, because one waitms() longer than $8000_0000 clocks returns at once.
+''
+'' @param durationMs - How long to hold, in milliseconds
+'' @returns heldMs - The time that actually passed (getms()), for the caller to check
+
+' Local Variables:
+' @local startMs - getms() when the hold began
+
+    startMs := getms()
+    repeat durationMs / HOLD_SLICE_MS
+        waitms(HOLD_SLICE_MS)
+    if durationMs // HOLD_SLICE_MS > 0
+        waitms(durationMs // HOLD_SLICE_MS)
+    heldMs := getms() - startMs
 
 
 PUB finish() : failedCount

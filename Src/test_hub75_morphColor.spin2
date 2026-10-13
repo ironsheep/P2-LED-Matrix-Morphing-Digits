@@ -1,0 +1,249 @@
+'' =================================================================================================
+''
+''   File....... test_hub75_morphColor.spin2
+''   Purpose.... Board test of the color helper: gamma curve, intensity ramps, and a gradient bar to judge by eye
+''   Authors.... Stephen M Moraco
+''               -- see below for terms of use
+''   E-mail..... stephen@ironsheep.biz
+''   Started.... Oct 2026
+''   Updated.... 12 Oct 2026
+''
+'' =================================================================================================
+
+{ Task 164: proves isp_hub75_morphColor on the quad.
+
+  The reference for every packed value is the driver's own packing (screenUtils.packedColorOf() and
+  packedCorrectedRgb()), never a recomputation of the helper's math. The mid-ramp values were worked
+  out by hand from (i / 255) ^ 2.2 (below), an independent path to the curve.
+
+  Sections:
+    1. the curve: 0 at intensity 0, CURVE_FULL at RAMP_MAX, and two mid values worked out by hand
+    2. per color (red, green, blue, white, orange): ramp[RAMP_MAX] equals the driver's packing of the
+       color exactly; ramp[0] is black; each channel never decreases from one level to the next; a
+       channel that is 0 in the color is 0 at every level
+    3. timing: building the curve, and building one ramp
+    4. a full-width gradient bar per color, held on the display so it can be judged by eye: no
+       visible jump between adjacent levels
+
+  Falsification: compile with -D MORPH_BREAK_RAMP and each color's ramp is damaged after it is
+  built (its full entry, one mid entry pushed below its neighbour, and a stray bit in a channel
+  that must stay 0). That run must show FAIL for the full-color, never-decreases and no-leak checks.
+}
+
+CON ' ---- Timing ----
+
+  CLK_FREQ = 335_000_000                                        ' system freq as a constant
+  _clkfreq = CLK_FREQ                                           ' set system clock
+
+CON ' ---- Curve values worked out by hand ----
+
+  ' (i / 255) ^ 2.2 x 255, rounded: intensity 128 -> 0.21953 x 255 = 55.98; intensity 64 -> 0.04778 x 255 = 12.18
+  MID_LEVEL = 128
+  MID_WHITE = 56
+  QUARTER_LEVEL = 64
+  QUARTER_WHITE = 12
+  ' orange ($FFA500) at intensity 128: red 255 x 0.21953 = 55.98, green 165 x 0.21953 = 36.22
+  MID_ORANGE_RED = 56
+  MID_ORANGE_GREEN = 36
+  NO_CHANNEL = 0
+
+CON ' ---- Gradient bar ----
+
+  MAX_BAR_COLUMNS = 256                                         ' widest display this test draws on (the quad)
+  GRADIENT_HOLD_MS = 60_000                                     ' how long the bars stay up to be judged by eye (utils.holdFor())
+
+CON ' ---- Falsification hook ----
+
+  BREAK_MID_LEVEL = 200                                         ' -D MORPH_BREAK_RAMP: this entry is set below its neighbour
+  BREAK_LEAK_BITS = $01                                         ' ... and this bit is set in each zero channel's byte
+
+CON ' ---- Colors under test ----
+
+  NUM_COLORS = 5                                                ' entries in testColors
+  LAST_COLOR_IDX = NUM_COLORS - 1
+  PREV_LEVEL = 1                                                ' the level below is this many entries back
+  ONE_PAST = 1                                                  ' a last index plus this is a count
+
+OBJ
+
+    color       : "isp_hub75_color"
+    display     : "isp_hub75_display"
+    pixels      : "isp_hub75_screenUtils"
+    hub75Bffrs  : "isp_hub75_hwBufferAccess"
+    utils       : "test_hub75_morphUtils"
+    morphColor  : "isp_hub75_morphColor"
+    colorUtils  : "isp_hub75_colorUtils"
+
+DAT ' colors under test, with a zero-terminated name each
+
+  testColors      long    color.cRed, color.cGreen, color.cBlue, color.cWhite, color.cOrange
+  testNames       word    @nameRed, @nameGreen, @nameBlue, @nameWhite, @nameOrange
+  nameRed         byte    "red", 0
+  nameGreen       byte    "green", 0
+  nameBlue        byte    "blue", 0
+  nameWhite       byte    "white", 0
+  nameOrange      byte    "orange", 0
+
+VAR
+
+    long    chainIndex
+    long    maxRows
+    long    maxColumns
+    long    ramp[morphColor.RAMP_LEVELS]
+    long    rowColors[MAX_BAR_COLUMNS]
+
+PUB go() | colorIdx, startTick
+'' Run the color test: start the display, check the curve and each color's ramp, time them, show the bars.
+''
+
+    utils.beginSuite(@"morphColor gamma and ramps")
+    chainIndex := hub75Bffrs.indexForHub75ChainId(hub75Bffrs.HUB75_ADAPTER_1)
+    display.start(display.HUB75_ADAPTER_1)
+    maxColumns := hub75Bffrs.maxDisplayColumns(chainIndex)
+    maxRows := hub75Bffrs.maxDisplayRows(chainIndex)
+    display.clearScreen()
+    display.commitScreenToPanelSet()
+
+    startTick := utils.timeStart()
+    morphColor.buildCurve()
+    utils.timeReport(@"build the gamma curve (first call)", startTick)
+    checkCurve()
+
+    repeat colorIdx from 0 to LAST_COLOR_IDX
+        startTick := utils.timeStart()
+        morphColor.buildRamp(@ramp, chainIndex, testColors[colorIdx])
+        utils.timeReport(@"build one ramp", startTick)
+#IFDEF MORPH_BREAK_RAMP
+        breakRamp(testColors[colorIdx])
+#ENDIF
+        checkRamp(testColors[colorIdx], @@testNames[colorIdx])
+        if testColors[colorIdx] == color.cWhite
+            checkMidWhite()
+        elseif testColors[colorIdx] == color.cOrange
+            checkMidOrange()
+
+    showGradientBars()
+    utils.finish()
+
+PRI checkCurve()
+
+    utils.checkEqual(morphColor.curveAt(morphColor.RAMP_OFF), @"curve: 0 at intensity 0", 0)
+    utils.checkEqual(morphColor.curveAt(morphColor.RAMP_MAX), @"curve: CURVE_FULL at intensity 255", morphColor.CURVE_FULL)
+    utils.checkEqual(morphColor.curveAt(morphColor.RAMP_MAX), @"curve: a second call returns the same (built once)", morphColor.CURVE_FULL)
+
+PRI checkRamp(rgbColor, pName) | leakMask, leakBits, drops, levelIdx
+' One color's ramp, just built in ramp[]: the full entry, black, never decreasing, no leak.
+
+' Local Variables:
+' @local leakMask - packed bytes of the channels that are 0 in rgbColor, at full level
+' @local leakBits - every ramp entry OR-ed together, then masked to those channels
+' @local drops - levels at which some channel is lower than at the level below
+' @local levelIdx - the ramp entry being examined
+
+    debug("COLOR    ", zstr_(pName), "  rgb=", uhex_long_(rgbColor))
+    utils.checkEqual(ramp[morphColor.RAMP_MAX], @"ramp[255] is the driver's packing of the full color", pixels.packedColorOf(chainIndex, rgbColor))
+    utils.checkEqual(ramp[morphColor.RAMP_OFF], @"ramp[0] is the driver's packing of black", pixels.packedColorOf(chainIndex, color.cBlack))
+
+    drops := 0
+    repeat levelIdx from morphColor.RAMP_FIRST_LIT to morphColor.RAMP_MAX
+        if channelDropped(ramp[levelIdx - PREV_LEVEL], ramp[levelIdx])
+            drops++
+    utils.checkEqual(drops, @"every channel never decreases from one level to the next", 0)
+
+    leakMask := leakMaskOf(rgbColor)
+    leakBits := 0
+    repeat levelIdx from morphColor.RAMP_OFF to morphColor.RAMP_MAX
+        leakBits |= ramp[levelIdx]
+    utils.checkEqual(leakBits & leakMask, @"a channel that is 0 in the color is 0 at every level", 0)
+
+PRI checkMidWhite()
+
+    utils.checkEqual(ramp[MID_LEVEL], @"white at 128 matches the hand-worked curve (56)", pixels.packedCorrectedRgb(chainIndex, MID_WHITE, MID_WHITE, MID_WHITE))
+    utils.checkEqual(ramp[QUARTER_LEVEL], @"white at 64 matches the hand-worked curve (12)", pixels.packedCorrectedRgb(chainIndex, QUARTER_WHITE, QUARTER_WHITE, QUARTER_WHITE))
+
+PRI checkMidOrange()
+
+    utils.checkEqual(ramp[MID_LEVEL], @"orange at 128 keeps its hue (56, 36, 0)", pixels.packedCorrectedRgb(chainIndex, MID_ORANGE_RED, MID_ORANGE_GREEN, NO_CHANNEL))
+
+PRI channelDropped(lowerPacked, upperPacked) : bDropped
+' TRUE when any packed channel of upperPacked is below the same channel of lowerPacked.
+
+    bDropped := packedChannel(upperPacked, 0) < packedChannel(lowerPacked, 0)
+    bDropped |= packedChannel(upperPacked, colorUtils.PACKED_GREEN_SHIFT) < packedChannel(lowerPacked, colorUtils.PACKED_GREEN_SHIFT)
+    bDropped |= packedChannel(upperPacked, colorUtils.PACKED_BLUE_SHIFT) < packedChannel(lowerPacked, colorUtils.PACKED_BLUE_SHIFT)
+
+PRI packedChannel(packedColor, channelShift) : channelByte
+' One byte of a packed color: red at shift 0, green at PACKED_GREEN_SHIFT, blue at PACKED_BLUE_SHIFT.
+
+    channelByte := (packedColor >> channelShift) & colorUtils.CHANNEL_MASK
+
+PRI leakMaskOf(rgbColor) : leakMask | red, green, blue
+' The packed bytes, at full level, of every channel that is 0 in rgbColor: a ramp entry must have none of these bits.
+
+    red, green, blue := colorUtils.rgbForCValue(rgbColor)
+    leakMask := pixels.packedCorrectedRgb(chainIndex, zeroChannelMask(red), zeroChannelMask(green), zeroChannelMask(blue))
+
+PRI zeroChannelMask(channelLevel) : maskLevel
+' Full level when a color's channel is 0, else 0: the level to pack for the leak mask.
+
+    maskLevel := channelLevel == 0 ? colorUtils.CHANNEL_MASK : 0
+
+#IFDEF MORPH_BREAK_RAMP
+PRI breakRamp(rgbColor)
+' Falsification hook: damage the ramp so the full-color, never-decreases and no-leak checks must fail.
+
+    ramp[morphColor.RAMP_MAX] ^= BREAK_LEAK_BITS << colorUtils.PACKED_GREEN_SHIFT
+    ramp[BREAK_MID_LEVEL] := ramp[morphColor.RAMP_OFF]
+    ramp[MID_LEVEL] |= leakMaskOf(rgbColor) & (BREAK_LEAK_BITS | BREAK_LEAK_BITS << colorUtils.PACKED_GREEN_SHIFT | BREAK_LEAK_BITS << colorUtils.PACKED_BLUE_SHIFT)
+#ENDIF
+
+PRI showGradientBars() | colorIdx, bandRows, row, column, lastColumn
+' One band of rows per color, intensity rising from 0 at the left edge to RAMP_MAX at the right; held for GRADIENT_HOLD_MS.
+
+' Local Variables:
+' @local bandRows - display rows per color band
+' @local row - display row being drawn
+' @local column - display column whose intensity is being looked up
+' @local lastColumn - the rightmost column drawn
+
+    lastColumn := (maxColumns <# MAX_BAR_COLUMNS) - ONE_PAST
+    bandRows := maxRows / NUM_COLORS
+    display.clearScreen()
+    repeat colorIdx from 0 to LAST_COLOR_IDX
+        morphColor.buildRamp(@ramp, chainIndex, testColors[colorIdx])
+        repeat column from 0 to lastColumn
+            rowColors[column] := ramp[(column * morphColor.RAMP_MAX) / lastColumn]
+        repeat row from colorIdx * bandRows to (colorIdx + ONE_PAST) * bandRows - ONE_PAST
+            pixels.copyRowRun(chainIndex, row, 0, lastColumn + ONE_PAST, @rowColors)
+    display.commitScreenToPanelSet()
+    debug("BARS     shown  colors=", udec_(NUM_COLORS), "  rows_each=", udec_(bandRows), "  columns=", udec_(lastColumn + ONE_PAST), "  hold_ms=", udec_(GRADIENT_HOLD_MS))
+    utils.checkEqual(utils.holdFor(GRADIENT_HOLD_MS) >= GRADIENT_HOLD_MS, @"the bars were held for the full hold time", TRUE)
+
+CON ' ---- License ----
+
+{{
+
+ -------------------------------------------------------------------------------------------------
+  MIT License
+
+  Copyright (c) 2021 Iron Sheep Productions, LLC
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+ =================================================================================================
+}}
