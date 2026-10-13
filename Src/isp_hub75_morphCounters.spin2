@@ -25,6 +25,15 @@ CON ' motion and cadence settings of a group
     DEFAULT_HOLD_MS = 200           ' hold after each transition when the caller sets none: the 2021 demo held 8 to 10
                                     '   loop passes, 178 to 222 ms (Docs/analysis/morph-time-design.md section d)
 
+CON ' group rotation (spec R-7.1): the names and meanings match the driver's content-rotation words
+    '   ROT_0   - not turned
+    '   ROT_90  - turned 90 degrees clockwise
+    '   ROT_180 - turned 180 degrees (upside down)
+    '   ROT_270 - turned 90 degrees counter-clockwise
+    ' The group turns as a whole; its digits' motion turns with it. Display mounting is the driver's, and the
+    ' two combine (R-7.3).
+    #0, ROT_0, ROT_90, ROT_180, ROT_270
+
 CON ' group types and sizes
 
 #0, GRP_UNKNOWN, GRP_CLOCK, GRP_UP_COUNTER, GRP_DOWN_COUNTER, GRP_DIGITS, GRP_DIGITS_RANDOM
@@ -36,6 +45,10 @@ GAP_LARGE_DIGITS = 4
 
 CON ' the group's segment shape and color (one mask and one ramp serve every digit)
 
+    NEXT_PIXEL = 1                  ' one pixel further on
+    DOT_PIXELS = 4                  ' a seconds dot is 2 x 2: pixel index bit 0 is its column, bit 1 its row
+    DOT_SIDE_MASK = 1
+    DOT_SIDE_SHIFT = 1
     MAX_MASK_BYTES = 2048           ' the coverage mask buffer: thickness x segment length; U5 sets the final size (task 168)
 
 OBJ
@@ -78,6 +91,10 @@ VAR ' per group
     long    hours
     long    hours24
     long    minutes
+    long    rotation            ' ROT_0 .. ROT_270 (setRotation(); applied at placement)
+    long    maxPhysicalRows     ' the display, as mounted
+    long    maxPhysicalCols
+    long    drawCtx[digits.CTX_LONGS]   ' this group's drawing context, shared by its digits (morph7seg CTX_ fields)
     long    dotRow
     long    dotCol
     long    dotVOffset
@@ -108,6 +125,9 @@ PUB initialize(nChainIndex, nPhysicalRows, nPhysicalColumns) | digitIndex
     isSetup := FALSE
     groupType := GRP_UNKNOWN
     chainIndex := nChainIndex
+    maxPhysicalRows := nPhysicalRows
+    maxPhysicalCols := nPhysicalColumns
+    rotation := ROT_0
     repeat digitIndex from 0 to MAX_DIGITS -1
         digits[digitIndex].initialize(nChainIndex, nPhysicalRows, nPhysicalColumns)
     ' the segments default to the same motion when they are initialized
@@ -148,10 +168,11 @@ PUB placeDigitGroup(row, column, grpType, nbrDigits, segThickness, segLength, in
         grpWidth := (digitWidth + digitHspace) * nbrDigits
         if groupType == GRP_CLOCK
             grpWidth := grpWidth + 2 + 1    ' add-in width of dots
-            dotRow := row + (segLength / 2)
-            dotCol := column + (digitWidth + digitHspace) * 2
+            dotRow := segLength / 2                                 ' group coordinates
+            dotCol := (digitWidth + digitHspace) * 2
             dotVOffset := segLength + 1
         grpHeight := digitHeight + 1
+        setDrawContext(row, column, grpWidth, grpHeight)            ' the group's turn and its place on the display
 
         if groupType == GRP_CLOCK
             hours := currValue / 60
@@ -164,15 +185,30 @@ PUB placeDigitGroup(row, column, grpType, nbrDigits, segThickness, segLength, in
         else
             updateInitsFromValue(currValue)
 
-        currCol := column
+        currCol := 0                                                ' digits are placed in group coordinates
         repeat digitIdx from 0 to nbrDigits - 1
-            digits[digitIdx].placeDigit(row, currCol, segLength, segThickness, initValue[digitIdx], @mask, @ramp, tailX256())
+            digits[digitIdx].setContext(@drawCtx)
+            digits[digitIdx].placeDigit(0, currCol, segLength, segThickness, initValue[digitIdx], @mask, @ramp, tailX256())
             currCol := currCol + digitWidth + digitHspace
             if groupType == GRP_CLOCK && digitIdx == 1
                 currCol := currCol + 2 + 1  ' add in dot width
 
         if groupType == GRP_CLOCK
             showSecondsDots( 0 )
+        if isQuarterTurn()                                          ' the size on the display: turned a quarter, it swaps
+            grpWidth, grpHeight := grpHeight, grpWidth
+
+PUB setRotation(groupRotation) : status
+'' Set how the next placement turns this group on the display (spec R-7.1): its digits and their motion turn
+'' with it, and a quarter turn swaps its width and height.
+''
+'' @param groupRotation - ROT_0 (used when never set), ROT_90 (clockwise), ROT_180 or ROT_270 (counter-clockwise)
+'' @returns status - morphStatus.SUCCESS, or morphStatus.E_UNKNOWN_ROTATION with nothing changed
+
+    status := morphStatus.E_UNKNOWN_ROTATION
+    if groupRotation >= ROT_0 and groupRotation <= ROT_270
+        rotation := groupRotation
+        status := morphStatus.SUCCESS
 
 PUB setSegmentStyle(segEndStyle, segCrossSection) : status
 '' Set the segment shape the next placement builds: its end style and cross-section (spec R-4.3, R-4.4).
@@ -415,12 +451,62 @@ PRI showSecondsDots(lightDark) | targetColor
     drawSecondsDot(dotRow, dotCol, targetColor)
     drawSecondsDot(dotRow + dotVOffset, dotCol, targetColor)
 
-PRI drawSecondsDot(row, column, rgbColor)
-    'place a dot on the screen
-    pixels.drawPixelAtRC(chainIndex, row, column, rgbColor)
-    pixels.drawPixelAtRC(chainIndex, row, column+1, rgbColor)
-    pixels.drawPixelAtRC(chainIndex, row+1, column, rgbColor)
-    pixels.drawPixelAtRC(chainIndex, row+1, column+1, rgbColor)
+PRI drawSecondsDot(row, column, rgbColor) | dotPixel, screenX, screenY
+    ' place a 2 x 2 dot at (row, column) in group coordinates, through the group's turn (task 169 draws it in the pipeline)
+    repeat dotPixel from 0 to DOT_PIXELS - NEXT_PIXEL
+        screenX, screenY := groupToScreen(column + (dotPixel & DOT_SIDE_MASK), row + (dotPixel >> DOT_SIDE_SHIFT))
+        pixels.drawPixelAtRC(chainIndex, screenY, screenX, rgbColor)
+
+PRI setDrawContext(row, column, groupWidth, groupHeight) | screenWidth, screenHeight
+' Fill the group's drawing context: the transform from group coordinates (unturned, groupWidth x groupHeight)
+' to the display, whose turned bounding box has its top-left at (row, column), and the clip rectangle: that box,
+' held to the display.
+
+' Local Variables:
+' @local screenWidth, screenHeight - the group's size on the display
+
+    longfill(@drawCtx, 0, digits.CTX_LONGS)
+    screenWidth := groupWidth
+    screenHeight := groupHeight
+    case rotation
+        ROT_0:
+            drawCtx[digits.CTX_XX] := NEXT_PIXEL                    ' x = column + gx, y = row + gy
+            drawCtx[digits.CTX_X0] := column
+            drawCtx[digits.CTX_YY] := NEXT_PIXEL
+            drawCtx[digits.CTX_Y0] := row
+        ROT_90:
+            drawCtx[digits.CTX_XY] := -NEXT_PIXEL                   ' x = column + (height - 1 - gy), y = row + gx
+            drawCtx[digits.CTX_X0] := column + groupHeight - NEXT_PIXEL
+            drawCtx[digits.CTX_YX] := NEXT_PIXEL
+            drawCtx[digits.CTX_Y0] := row
+        ROT_180:
+            drawCtx[digits.CTX_XX] := -NEXT_PIXEL                   ' x = column + (width - 1 - gx), y = row + (height - 1 - gy)
+            drawCtx[digits.CTX_X0] := column + groupWidth - NEXT_PIXEL
+            drawCtx[digits.CTX_YY] := -NEXT_PIXEL
+            drawCtx[digits.CTX_Y0] := row + groupHeight - NEXT_PIXEL
+        ROT_270:
+            drawCtx[digits.CTX_XY] := NEXT_PIXEL                    ' x = column + gy, y = row + (width - 1 - gx)
+            drawCtx[digits.CTX_X0] := column
+            drawCtx[digits.CTX_YX] := -NEXT_PIXEL
+            drawCtx[digits.CTX_Y0] := row + groupWidth - NEXT_PIXEL
+    if isQuarterTurn()
+        screenWidth := groupHeight
+        screenHeight := groupWidth
+    drawCtx[digits.CTX_CLIP_LEFT] := column #> 0
+    drawCtx[digits.CTX_CLIP_TOP] := row #> 0
+    drawCtx[digits.CTX_CLIP_RIGHT] := (column + screenWidth - NEXT_PIXEL) <# (maxPhysicalCols - NEXT_PIXEL)
+    drawCtx[digits.CTX_CLIP_BOTTOM] := (row + screenHeight - NEXT_PIXEL) <# (maxPhysicalRows - NEXT_PIXEL)
+
+PRI isQuarterTurn() : bQuarter
+' TRUE when the group is turned 90 degrees either way: its width and height swap on the display.
+
+    bQuarter := rotation == ROT_90 or rotation == ROT_270
+
+PRI groupToScreen(groupX, groupY) : screenX, screenY
+' A group pixel's place on the display, through the group's turn.
+
+    screenX := drawCtx[digits.CTX_XX] * groupX + drawCtx[digits.CTX_XY] * groupY + drawCtx[digits.CTX_X0]
+    screenY := drawCtx[digits.CTX_YX] * groupX + drawCtx[digits.CTX_YY] * groupY + drawCtx[digits.CTX_Y0]
 
 
 CON ' license

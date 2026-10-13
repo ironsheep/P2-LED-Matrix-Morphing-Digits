@@ -48,6 +48,16 @@ CON ' drawing
 
     LEVEL_FULL = 255                    ' a fully lit pixel (mask byte, lit share and ramp index)
     LEVEL_ROUND = LEVEL_FULL / 2        ' added before dividing by LEVEL_FULL, to round to nearest
+    ' a drawing context (CTX_LONGS longs, owned by the group; see setContext()): where its pixels land,
+    '   screen x = CTX_XX * gx + CTX_XY * gy + CTX_X0,  screen y = CTX_YX * gx + CTX_YY * gy + CTX_Y0
+    ' for (gx, gy) in group coordinates (each coefficient -1, 0 or 1: a quarter-turn rotation), and the
+    ' rectangle of the display its digits may draw in (inclusive)
+    #0, CTX_XX, CTX_XY, CTX_X0, CTX_YX, CTX_YY, CTX_Y0, CTX_CLIP_LEFT, CTX_CLIP_TOP, CTX_CLIP_RIGHT, CTX_CLIP_BOTTOM
+    CTX_LONGS = CTX_CLIP_BOTTOM + 1
+    ' the steps drawBlock() moves by, in digit coordinates, for one pixel right and one pixel down on the display
+    #0, XF_U_PER_X, XF_V_PER_X, XF_U_PER_Y, XF_V_PER_Y
+    XFORM_LONGS = XF_V_PER_Y + 1
+
     ' one slot's entry in slotTable (longs): what drawBlock() reads for it
     #0, F_MODE, F_BOX_U0, F_BOX_U1, F_BOX_V0, F_BOX_V1, F_U0, F_V0, F_VERTICAL, F_OFFSET, F_LIT
     SLOT_LONGS = F_LIT + 1
@@ -74,16 +84,15 @@ OBJ
 
 DAT ' shared drawing tables: one cog draws, one digit at a time, so one copy serves every digit
 
-    slotTable       long    0[SLOT_TABLE_LONGS]                 ' this frame's state of every slot, for drawBlock() (F_ fields)
+    slotTable       long    0[SLOT_TABLE_LONGS]                 ' this frame's state of every slot, for drawBlock() (F_ fields) ...
+    xformTable      long    0[XFORM_LONGS]                      ' ... then the digit's steps (XF_ fields): read with it in one block
     litTable        byte    0[MAX_SEGMENTS * MAX_SEGMENT_LENGTH]    ' this frame's snake lit shares, per slot and mask column
 
 VAR ' per digit
     long    chainIndex
-    long    maxPhysicalCols
-    long    maxPhysicalRows
     long    currValue
-    long    topY
-    long    leftX
+    long    digitGY             ' the digit's top-left in its group's coordinates (the display's, with no group)
+    long    digitGX
     long    digitWidth
     long    digitHeight
     long    segCols             ' the mask's columns: segment length L
@@ -105,11 +114,18 @@ VAR ' per digit
     long    drawnFromEnd[MAX_SEGMENTS]
     long    drawnOn[MAX_SEGMENTS]
     long    drawnOffset[MAX_SEGMENTS]
-    ' where this digit may draw, on the display (inclusive): the display, until its group narrows it
+    long    pCtx                ' the drawing context in use: the group's (setContext()), or ownCtx
+    long    screenOriginX       ' where digit pixel (0, 0) lands on the display, and the context's coefficients
+    long    screenOriginY       '   and clip rectangle, copied at placement (placeDigit()) so drawing reads none
+    long    coefXX              '   of them through pCtx
+    long    coefXY
+    long    coefYX
+    long    coefYY
     long    clipLeft
     long    clipTop
     long    clipRight
     long    clipBottom
+    long    ownCtx[CTX_LONGS]   ' a digit with no group draws unrotated, clipped to the display
 
 PUB null()
 '' This is NOT a top level object
@@ -123,12 +139,12 @@ PUB initialize(nChainIndex, nPhysicalRows, nPhysicalColumns) | segmentIndex
 '' @param nPhysicalColumns - the display's columns, as mounted
 
     chainIndex := nChainIndex
-    maxPhysicalCols := nPhysicalColumns
-    maxPhysicalRows := nPhysicalRows
     cellRows, cellColumns := hub75Bffrs.cellSizeInPixels(nChainIndex)
-    clipLeft := clipTop := 0
-    clipRight := nPhysicalColumns - NEXT_ONE
-    clipBottom := nPhysicalRows - NEXT_ONE
+    longfill(@ownCtx, 0, CTX_LONGS)                             ' screen = group coordinates:
+    ownCtx[CTX_XX] := ownCtx[CTX_YY] := NEXT_ONE                '   x = gx, y = gy
+    ownCtx[CTX_CLIP_RIGHT] := nPhysicalColumns - NEXT_ONE
+    ownCtx[CTX_CLIP_BOTTOM] := nPhysicalRows - NEXT_ONE
+    pCtx := @ownCtx
     currValue := DIGIT_NO_VALUE
     repeat segmentIndex from 0 to LAST_SEGMENT
         segments[segmentIndex].initialize()
@@ -170,8 +186,18 @@ PUB placeDigit(row, column, segLength, thickness, digitValue, pSegMask, pColorRa
 ' @local inset - ceil(T/2)
 ' @local crossBar - W - T: the middle segment's top row, the right verticals' column, and the slide distance
 
-    leftX := column
-    topY := row
+    digitGX := column
+    digitGY := row
+    coefXX := LONG[pCtx][CTX_XX]                                ' the group's transform, copied once
+    coefXY := LONG[pCtx][CTX_XY]
+    coefYX := LONG[pCtx][CTX_YX]
+    coefYY := LONG[pCtx][CTX_YY]
+    screenOriginX := coefXX * digitGX + coefXY * digitGY + LONG[pCtx][CTX_X0]
+    screenOriginY := coefYX * digitGX + coefYY * digitGY + LONG[pCtx][CTX_Y0]
+    clipLeft := LONG[pCtx][CTX_CLIP_LEFT]
+    clipTop := LONG[pCtx][CTX_CLIP_TOP]
+    clipRight := LONG[pCtx][CTX_CLIP_RIGHT]
+    clipBottom := LONG[pCtx][CTX_CLIP_BOTTOM]
     segCols := segLength
     segRows := thickness
     pMask := pSegMask
@@ -277,6 +303,14 @@ PUB commandSegment(segmentIndex, commandBits) : status
     status := segments[segmentIndex].commandSegment(commandBits)
     bNeedsRender := TRUE
 
+PUB setContext(pGroupContext)
+'' Draw through a group's context: its transform and its clip rectangle (CTX_ fields), taken at the next
+'' placeDigit(). The group owns the block and fills it before placing its digits.
+''
+'' @param pGroupContext - hub address of the group's CTX_LONGS longs
+
+    pCtx := pGroupContext
+
 PRI setSlot(orientation, leftU, topV, bVertical) | slot
 ' Record one segment's mask position and direction; its slot is its orientation's bit position.
 
@@ -294,9 +328,14 @@ PRI drawChanges() | slot, mode, head, tail, bFromEnd, bOn, offset, colLo, colHi,
 ' @local colLo, colHi - a snake's changed columns, from its start end
 ' @local posLo, posHi - the lower and higher of two positions, in 1/256 pixel
 
-    ' first every slot's new state and box, so each redraw composites the frame's state of every segment
+    ' first every slot's new state and box, so each redraw composites the frame's state of every segment,
+    ' and this digit's steps for drawBlock(): the inverse of a rotation is its transpose
     repeat slot from 0 to LAST_SEGMENT
         segStateLoad(slot)
+    xformTable[XF_U_PER_X] := coefXX
+    xformTable[XF_V_PER_X] := coefXY
+    xformTable[XF_U_PER_Y] := coefYX
+    xformTable[XF_V_PER_Y] := coefYY
     repeat slot from 0 to LAST_SEGMENT
         mode, head, tail, bFromEnd, bOn, offset := frameMode[slot], frameHead[slot], frameTail[slot], frameFromEnd[slot], frameOn[slot], frameOffset[slot]
         if mode <> drawnMode[slot] or tail <> drawnTail[slot] or bFromEnd <> drawnFromEnd[slot] or bOn <> drawnOn[slot]
@@ -389,20 +428,25 @@ PRI drawAlong(slot, colLo, colHi)
     else
         drawLocalRect(segU0[slot] + colLo, segV0[slot], segU0[slot] + colHi, segV0[slot] + segRows - NEXT_ONE)
 
-PRI drawLocalRect(leftU, topV, rightU, bottomV) | firstX, lastX, firstY, lastY, blockX0, blockX1, blockY0, blockY1, pPixel, rightStep, downStep
-' Redraw a local rectangle, clipped to the digit's clip rectangle: split into blocks that each lie in one cell (one panel),
-' each block drawn by drawBlock() at the address and steps the driver's address rule gives
-' (hub75Bffrs.mountedBlockRun()); then the driver's window watch is told what was written.
+PRI drawLocalRect(leftU, topV, rightU, bottomV) | firstX, lastX, firstY, lastY, cornerX, cornerY, blockX0, blockX1, blockY0, blockY1, pPixel, rightStep, downStep, blockU, blockV
+' Redraw a local rectangle: through the context's transform onto the display, clipped to the context's clip
+' rectangle, split into blocks that each lie in one cell (one panel), each block drawn by drawBlock() at the
+' address and steps the driver's address rule gives (hub75Bffrs.mountedBlockRun()); then the driver's window
+' watch is told what was written.
 
 ' Local Variables:
 ' @local firstX, lastX, firstY, lastY - the rectangle on the display, clipped
+' @local cornerX, cornerY - the rectangle's far corner on the display
 ' @local blockX0, blockX1, blockY0, blockY1 - the block being drawn: the rectangle's part in one cell
 ' @local pPixel, rightStep, downStep - the block's top-left pixel address and its steps, or NO_PIXEL
+' @local blockU, blockV - the block's top-left display pixel in digit coordinates
 
-    firstX := (leftX + leftU) #> clipLeft
-    lastX := (leftX + rightU) <# clipRight
-    firstY := (topY + topV) #> clipTop
-    lastY := (topY + bottomV) <# clipBottom
+    firstX, firstY := toScreen(leftU, topV)                     ' a quarter-turn maps a rectangle to a rectangle:
+    cornerX, cornerY := toScreen(rightU, bottomV)               ' its two corners bound it
+    lastX := (firstX #> cornerX) <# clipRight
+    firstX := (firstX <# cornerX) #> clipLeft
+    lastY := (firstY #> cornerY) <# clipBottom
+    firstY := (firstY <# cornerY) #> clipTop
     if firstX <= lastX and firstY <= lastY
         blockY0 := firstY
         repeat while blockY0 <= lastY
@@ -412,21 +456,36 @@ PRI drawLocalRect(leftU, topV, rightU, bottomV) | firstX, lastX, firstY, lastY, 
                 blockX1 := ((blockX0 / cellColumns + NEXT_ONE) * cellColumns - NEXT_ONE) <# lastX
                 pPixel, rightStep, downStep := hub75Bffrs.mountedBlockRun(chainIndex, blockY0, blockX0, blockY1 - blockY0 + NEXT_ONE, blockX1 - blockX0 + NEXT_ONE)
                 if pPixel <> hub75Bffrs.NO_PIXEL                     ' a cell that holds no panel draws nothing
-                    drawBlock(pPixel, rightStep, downStep, blockX0 - leftX, blockY0 - topY, blockX1 - blockX0 + NEXT_ONE, blockY1 - blockY0 + NEXT_ONE)
+                    blockU, blockV := toLocal(blockX0, blockY0)
+                    drawBlock(pPixel, rightStep, downStep, blockU, blockV, blockX1 - blockX0 + NEXT_ONE, blockY1 - blockY0 + NEXT_ONE)
                 blockX0 := blockX1 + NEXT_ONE
             blockY0 := blockY1 + NEXT_ONE
         hub75Bffrs.noteDrawn(chainIndex, firstY, firstX, lastY, lastX)
 
+PRI toScreen(localU, localV) : screenX, screenY
+' A digit pixel's place on the display, through the group's transform.
+
+    screenX := screenOriginX + coefXX * localU + coefXY * localV
+    screenY := screenOriginY + coefYX * localU + coefYY * localV
+
+PRI toLocal(screenX, screenY) : localU, localV
+' A display pixel in digit coordinates: the transform's inverse (a rotation's inverse is its transpose).
+
+    screenX -= screenOriginX
+    screenY -= screenOriginY
+    localU := coefXX * screenX + coefYX * screenY
+    localV := coefXY * screenX + coefYY * screenY
+
 PRI drawBlock(pPixel, rightStep, downStep, firstU, firstV, nColumns, nRows) | pSlots, pMaskB, maskCols, maskRows, pRampB, rowPixel, localU, localV, colsLeft
-' Draw one block in one cell, inline PASM (cog-exec): for every pixel, the sum of every segment's level there
+' Draw one block in one cell, inline PASM (cog-exec), walking digit coordinates by xformTable's steps: for every pixel, the sum of every segment's level there
 ' (its mask; times its snake's lit share; or its mask slid sideways), held to LEVEL_FULL, through the ramp,
 ' written as the pixel's three bytes (red, green, blue: the driver's writePacked() order).
 '
 ' @param pPixel - hub address of the block's top-left pixel
 ' @param rightStep - signed bytes to the next pixel right, in this cell
 ' @param downStep - signed bytes to the next pixel down, in this cell
-' @param firstU - the block's left column, digit-local
-' @param firstV - the block's top row, digit-local
+' @param firstU - the block's top-left display pixel, in digit coordinates (u)
+' @param firstV - the block's top-left display pixel, in digit coordinates (v)
 ' @param nColumns - the block's width
 ' @param nRows - the block's height
 
@@ -445,25 +504,37 @@ PRI drawBlock(pPixel, rightStep, downStep, firstU, firstV, nColumns, nRows) | pS
     maskRows := segRows
     pRampB := pRamp
     rowPixel := pPixel
-    localV := firstV
     org
-                setq    #SLOT_TABLE_LONGS - NEXT_ONE            ' the slot table, into cog registers
+                setq    #SLOT_TABLE_LONGS + XFORM_LONGS - NEXT_ONE  ' the slot table and the steps, into cog registers
                 rdlong  slots, pSlots
 .row
-                mov     nActive, #0                             ' the slots that cover this row
+                mov     localU, firstU                          ' the row's first pixel, digit-local
+                mov     localV, firstV
+                mov     nActive, #0                             ' the slots that can cover this row
                 mov     slotBase, #0
                 mov     slotsLeft, #MAX_SEGMENTS
 .scan
                 alts    slotBase, #slots + F_MODE
                 mov     t1, 0-0                 wz
     if_z        jmp     #.scanNext                              ' MODE_NONE
+                tjz     stepVx, #.scanV                         ' v is the same along the row: test v ...
+                alts    slotBase, #slots + F_BOX_U0             ' ... else u is: test u
+                cmps    localU, 0-0             wc
+    if_c        jmp     #.scanNext
+                alts    slotBase, #slots + F_BOX_U1
+                mov     t1, 0-0
+                cmps    t1, localU              wc
+    if_c        jmp     #.scanNext
+                jmp     #.scanKeep
+.scanV
                 alts    slotBase, #slots + F_BOX_V0
-                cmps    localV, 0-0                  wc
+                cmps    localV, 0-0             wc
     if_c        jmp     #.scanNext
                 alts    slotBase, #slots + F_BOX_V1
                 mov     t1, 0-0
-                cmps    t1, localV                   wc
+                cmps    t1, localV              wc
     if_c        jmp     #.scanNext
+.scanKeep
                 altd    nActive, #active
                 mov     0-0, slotBase
                 add     nActive, #NEXT_ONE
@@ -472,7 +543,6 @@ PRI drawBlock(pPixel, rightStep, downStep, firstU, firstV, nColumns, nRows) | pS
                 djnz    slotsLeft, #.scan
 
                 mov     pix, rowPixel
-                mov     localU, firstU
                 mov     colsLeft, nColumns
 .pixel
                 mov     sum, #0
@@ -489,6 +559,13 @@ PRI drawBlock(pPixel, rightStep, downStep, firstU, firstV, nColumns, nRows) | pS
                 alts    slotBase, #slots + F_BOX_U1
                 mov     t1, 0-0
                 cmps    t1, localU                   wc
+    if_c        jmp     #.slotNext
+                alts    slotBase, #slots + F_BOX_V0
+                cmps    localV, 0-0             wc
+    if_c        jmp     #.slotNext
+                alts    slotBase, #slots + F_BOX_V1
+                mov     t1, 0-0
+                cmps    t1, localV              wc
     if_c        jmp     #.slotNext
                 alts    slotBase, #slots + F_U0                 ' across and along the segment's mask
                 mov     t1, 0-0
@@ -576,14 +653,20 @@ PRI drawBlock(pPixel, rightStep, downStep, firstU, firstV, nColumns, nRows) | pS
                 add     t2, #NEXT_ONE
                 wrbyte  t1, t2
                 add     pix, rightStep
-                add     localU, #NEXT_ONE
+                add     localU, stepUx                          ' one pixel right on the display, in digit coordinates
+                add     localV, stepVx
                 djnz    colsLeft, #.pixel
                 add     rowPixel, downStep
-                add     localV, #NEXT_ONE
+                add     firstU, stepUy                          ' one pixel down
+                add     firstV, stepVy
                 djnz    nRows, #.row
                 ret
 
 slots           long    0[SLOT_TABLE_LONGS]
+stepUx          long    0                                       ' xformTable, loaded with the slots (XF_ order)
+stepVx          long    0
+stepUy          long    0
+stepVy          long    0
 active          long    0[MAX_SEGMENTS]
 nActive         long    0
 slotBase        long    0
