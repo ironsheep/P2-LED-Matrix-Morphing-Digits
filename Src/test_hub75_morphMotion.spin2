@@ -51,7 +51,7 @@ CON ' ---- Test segment and moves ----
   SEG_LENGTH = 31                                               ' 31 pixels: the head runs 32 pixels over a move
   SEG_THICKNESS = 1
   SLOT_A = 6                                                    ' segment A's slot in the digit
-  MASK_BYTES = SEG_LENGTH * SEG_THICKNESS
+  MASK_BYTES = 64                                               ' the figure's masks at T1 L31: 31 + 3 + 4 + 1 bytes
   EDGE_TAIL_X256 = 256                                          ' the edge profile: a 1-pixel tail
   TENTHS = 10                                                   ' lit amounts are compared in tenths of a pixel
   FULL_TENTHS = SEG_LENGTH * TENTHS
@@ -143,7 +143,7 @@ PUB go() | level
     ' the probe's ramp: red byte = level, through the driver's own packing
     repeat level from 0 to morphColor.RAMP_MAX
         linearRamp[level] := pixels.packedCorrectedRgb(chainIndex, level, 0, 0)
-    morphMask.buildMask(@mask, MASK_BYTES, SEG_THICKNESS, SEG_LENGTH << dig.SUBPIXEL_SHIFT, morphMask.END_SQUARE, morphMask.SECTION_FLAT)
+    morphMask.buildFigure(@mask, MASK_BYTES, SEG_THICKNESS, SEG_LENGTH, SEG_THICKNESS, morphMask.SECTION_FLAT)
     dig.initialize(chainIndex, maxRows, maxColumns)
     dig.placeDigit(DIGIT_ROW, DIGIT_COLUMN, SEG_LENGTH, SEG_THICKNESS, dig.DIGIT_HIDDEN, @mask, @linearRamp, EDGE_TAIL_X256)
     dig.animate(timeBase.update())

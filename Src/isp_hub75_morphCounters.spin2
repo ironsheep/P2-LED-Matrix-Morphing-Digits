@@ -15,7 +15,7 @@
 { A group is a row of digits (a counter, a value or a clock) drawn in one area of one display.
 
   Usage:
-    1. optional settings before placement: setSegmentStyle(), setThickness(), setProfile(), setTailLength(),
+    1. optional settings before placement: setCrossSection(), setThickness(), setProfile(), setTailLength(),
        setMoveDuration(), setHoldDuration(), setEasing()
     2. status, width, height := placeGroup(adapter, left, top, width, height, type, layout, rotation, color, value)
        - the group finds the largest digits that fit the area (turned), centres itself, and returns the size
@@ -100,7 +100,7 @@ CON ' sizing a group to its area (spec R-8.1)
     NEXT_PIXEL = 1                  ' one pixel further on
     ONE_STEP = 1                    ' a counter's step
     HALF = 2
-    MAX_MASK_BYTES = 2048           ' the coverage mask buffer: thickness x segment length
+    MAX_MASK_BYTES = 2048           ' the figure's masks: isp_hub75_morphMask.figureBytes() (about segment length x thickness x 2)
 
 CON ' the placed-area table: one entry per placed group, shared by every group object (spec R-8.5)
 
@@ -119,7 +119,7 @@ OBJ
     timeBase            : "isp_hub75_morphTime"     ' motion constants only: DEFAULT_MOVE_MS and the EASE_ styles
     morphStatus         : "isp_hub75_morphStatus"   ' the status codes the setters return (a refused call changes nothing, spec R-10.2)
     morphColor          : "isp_hub75_morphColor"    ' the group's intensity ramp
-    morphMask           : "isp_hub75_morphMask"     ' the group's segment coverage mask
+    morphMask           : "isp_hub75_morphMask"     ' the group's figure masks
 
 DAT ' placed areas, one table for every group object of the program (AREA_ fields, inclusive display coordinates)
 
@@ -152,7 +152,6 @@ VAR ' per group
 
     ' settings
     long    rotation            ' ROT_0 .. ROT_270 (from placement)
-    long    endStyle            ' morphMask.END_SQUARE or END_ANGLED
     long    crossSection        ' morphMask.SECTION_FLAT or SECTION_TUBE
     long    fixedThickness      ' the stroke thickness when bThicknessSet ...
     long    bThicknessSet       ' ... TRUE once setThickness() set it; FALSE: sized with the digits
@@ -160,10 +159,9 @@ VAR ' per group
     long    tailPixels          ' PROFILE_TAIL's tail when bTailSet ...
     long    bTailSet            ' ... TRUE once setTailLength() set it; FALSE: a quarter of the segment's length
     long    ramp[morphColor.RAMP_LEVELS]
-    long    bMaskBuilt          ' TRUE once mask holds the shape below (kept when placed again at that shape)
+    long    bMaskBuilt          ' TRUE once mask holds the figure below (kept when placed again at that figure)
     long    maskThickness
     long    maskLength
-    long    maskEnd
     long    maskSection
     long    bRampBuilt          ' TRUE once ramp holds this adapter's color below
     long    rampChain
@@ -267,10 +265,10 @@ PUB placeGroup(adapter, areaLeft, areaTop, areaWidth, areaHeight, grpType, layou
         currValue := initialValue
         valueCap := maxValue
         maxValueDivisor := (valueCap + NEXT_PIXEL) / DECIMAL_BASE
-        if not bMaskBuilt or maskThickness <> thickness or maskLength <> segLength or maskEnd <> endStyle or maskSection <> crossSection
-            morphMask.buildMask(@mask, MAX_MASK_BYTES, thickness, segLength << digits.SUBPIXEL_SHIFT, endStyle, crossSection)
-            maskThickness, maskLength, maskEnd, maskSection := thickness, segLength, endStyle, crossSection
-            bMaskBuilt := TRUE                                      ' a group placed again (after removeGroup()) at the same shape keeps its mask
+        if not bMaskBuilt or maskThickness <> thickness or maskLength <> segLength or maskSection <> crossSection
+            morphMask.buildFigure(@mask, MAX_MASK_BYTES, thickness, segLength, dotFor(thickness), crossSection)
+            maskThickness, maskLength, maskSection := thickness, segLength, crossSection
+            bMaskBuilt := TRUE                                      ' a group placed again (after removeGroup()) at the same figure keeps its masks
         if not bRampBuilt or rampChain <> chain or rampColor <> rgbColor
             morphColor.buildRamp(@ramp, chain, rgbColor)
             rampChain, rampColor := chain, rgbColor
@@ -334,22 +332,17 @@ PUB useAutoThickness()
     ensureDefaults()
     bThicknessSet := FALSE
 
-PUB setSegmentStyle(segEndStyle, segCrossSection) : status
-'' Set the segment shape the next placement builds: its end style and cross-section (spec R-4.3, R-4.4).
+PUB setCrossSection(segCrossSection) : status
+'' Set the stroke's cross-section the next placement builds (spec R-4.4): even, or brightest along its centre
+'' line. The stroke's shape is fixed (spec R-4.3).
 ''
-'' @param segEndStyle - morphMask.END_SQUARE or morphMask.END_ANGLED (END_ANGLED when never set)
 '' @param segCrossSection - morphMask.SECTION_FLAT (used when never set) or morphMask.SECTION_TUBE
-'' @returns status - morphStatus.SUCCESS, or E_UNKNOWN_END_STYLE or E_UNKNOWN_CROSS_SECTION with nothing changed
+'' @returns status - morphStatus.SUCCESS, or E_UNKNOWN_CROSS_SECTION with nothing changed
 
     ensureDefaults()
-    if segEndStyle <> morphMask.END_SQUARE and segEndStyle <> morphMask.END_ANGLED
-        status := morphStatus.E_UNKNOWN_END_STYLE
-    elseif segCrossSection <> morphMask.SECTION_FLAT and segCrossSection <> morphMask.SECTION_TUBE
-        status := morphStatus.E_UNKNOWN_CROSS_SECTION
-    else
-        endStyle := segEndStyle
+    status := morphMask.validateSection(segCrossSection)
+    if status == morphStatus.SUCCESS
         crossSection := segCrossSection
-        status := morphStatus.SUCCESS
 
 PUB setProfile(profile) : status
 '' Set how a moving segment's lit part ends: one anti-aliased edge pixel, or a gradient tail (spec R-5.3).
@@ -573,7 +566,6 @@ PRI ensureDefaults()
         moveDurationMs := timeBase.DEFAULT_MOVE_MS
         moveEaseStyle := timeBase.EASE_LINEAR
         holdDurationMs := DEFAULT_HOLD_MS
-        endStyle := morphMask.END_ANGLED
         crossSection := morphMask.SECTION_FLAT
         motionProfile := timeBase.DEFAULT_PROFILE
         bTailSet := FALSE
@@ -666,7 +658,7 @@ PRI fitDigits(layout, groupRotation, areaWidth, areaHeight) : segLength, thickne
     tryLength := (fitHeight / HALF) <# digits.MAX_SEGMENT_LENGTH    ' a digit is at least 2L tall
     repeat while tryLength >= MIN_SEGMENT_LENGTH and segLength == 0
         tryThickness := bThicknessSet ? fixedThickness : autoThickness(tryLength)
-        if tryThickness <= tryLength and morphMask.maskBytes(tryThickness, tryLength << digits.SUBPIXEL_SHIFT) <= MAX_MASK_BYTES
+        if tryThickness <= tryLength and morphMask.figureBytes(tryThickness, tryLength, dotFor(tryThickness)) <= MAX_MASK_BYTES
             tryWidth, tryHeight := groupSize(layout, tryLength, tryThickness)
             if tryWidth <= fitWidth and tryHeight <= fitHeight
                 segLength, thickness, groupWidth, groupHeight := tryLength, tryThickness, tryWidth, tryHeight

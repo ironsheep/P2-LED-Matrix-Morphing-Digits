@@ -17,14 +17,19 @@
   as it grows in, then rests. Every transition must end on exactly those pixels (spec R-5.7).
 
   Sections:
-    1. per configuration (thin edge profile, thick angled tail profile, thick tube with a tail longer
-       than the segment): the rest checksum of each digit 0-9, then all 90 transitions from rest, each
+    1. per configuration (thin edge profile, thick tail profile, thick tube with a tail longer than the
+       segment): the rest checksum of each digit 0-9, then all 90 transitions from rest, each
        sampled mid-move (it must differ from the end) and at its end (it must equal the rest checksum)
     2. an interrupted move: a new value mid-flight still ends on the new value's rest pixels (R-5.5)
     3. the column slides in both directions on and off, including the two the table never uses
     4. refused commands: a style the segment cannot do changes nothing on the screen
     5. a digit touching the display's right and bottom edges
     6. timing: one segment's frames per profile, and a dense frame of six thick digits all moving
+    7. the figure's area (spec R-4.3): digits 0 and 1 at rest, read through a ramp whose red byte is the level,
+       against the round-pen figure's area by formula, within 1%. With P = L + 1 and corner radius
+       R = (T + 1) / 2, a 0 is one closed loop of centre-line length 6P - 8R + 2 pi R, so its area is T times
+       that; a 1 is one straight stroke with round ends, T (2P - T - 1) + pi T^2 / 4. Strokes 5 and 4 (odd
+       and even: the even one's runs start half a pixel in).
 
   Falsification: compile with -D MORPH_BREAK_RENDER and the renderer's end state is damaged (one mask
   byte changes after the rest checksums are taken); every end-equals-rest check must then FAIL.
@@ -53,8 +58,8 @@ CON ' ---- Configurations ----
 
   NUM_CONFIGS = 3
   ' thin: thickness 1, length 6, square, flat, edge profile (the 2021 look)
-  ' thick: thickness 5, length 20, angled, flat, tail profile (tail 5)
-  ' tube: thickness 8, length 24, angled, tube, tail 40 (longer than the segment)
+  ' thick: thickness 5, length 20, flat, tail profile (tail 5)
+  ' tube: thickness 8, length 24, tube, tail 40 (longer than the segment)
   EDGE_TAIL_X256 = 256
   THICK_CONFIG = 1                                              ' the configuration the single cases use
   NUM_PROFILES = 2                                              ' the timing section's profiles: edge, then tail
@@ -88,6 +93,24 @@ CON ' ---- Timing section ----
   DENSE_FROM = 8                                                ' 8 -> 1: A, D, E, F and G all snake or slide off at once
   DENSE_TO = 1
 
+CON ' ---- Figure area ----
+
+  AREA_ODD_THICKNESS = 5
+  AREA_ODD_LENGTH = 20
+  AREA_EVEN_THICKNESS = 4
+  AREA_EVEN_LENGTH = 30
+  AREA_ZERO = 0
+  AREA_ONE = 1
+  CORNERS_PER_LOOP = 8                                          ' a loop's straight runs lose 2R at each of 4 corners ...
+  SIDES_PER_LOOP = 6                                            ' ... of 6 sides' worth of P (2 across, 2 x 2 down)
+  TENTHS = 10                                                   ' areas are compared in tenths of a pixel
+  PERCENT_WHOLE = 100                                           ' within 1%
+  HALF_DIVISOR = 2                                              ' adds half a step before dividing, to round to nearest
+  F_PI = 3.14159265
+  F_TWO = 2.0
+  F_QUARTER = 4.0
+  F_TENTHS = 10.0
+
 CON ' ---- Falsification hook ----
 
   BREAK_BITS = $FF                                              ' ... by flipping every bit
@@ -108,17 +131,16 @@ OBJ
     probe       : "test_hub75_morphProbe"
     dense[DENSE_DIGITS] : "isp_hub75_morph7seg"
 
-DAT ' configurations: thickness, length, end style, cross-section, tail (1/256 px), name
+DAT ' configurations: thickness, length, cross-section, tail (1/256 px), name
 
   cfgThickness    long    1, 5, 8
   cfgLength       long    6, 20, 24
-  cfgEnd          long    morphMask.END_SQUARE, morphMask.END_ANGLED, morphMask.END_ANGLED
   cfgSection      long    morphMask.SECTION_FLAT, morphMask.SECTION_FLAT, morphMask.SECTION_TUBE
   cfgTail         long    EDGE_TAIL_X256, 5 * 256, 40 * 256
   cfgNames        word    @nameThin, @nameThick, @nameTube
-  nameThin        byte    "thin T1 L6 square edge", 0
-  nameThick       byte    "thick T5 L20 angled tail5", 0
-  nameTube        byte    "tube T8 L24 angled tail40", 0
+  nameThin        byte    "thin T1 L6 edge", 0
+  nameThick       byte    "thick T5 L20 tail5", 0
+  nameTube        byte    "tube T8 L24 tail40", 0
 
 VAR
 
@@ -133,6 +155,7 @@ VAR
     long    areaHeight
     long    restSum[NUM_DIGITS]
     long    ramp[morphColor.RAMP_LEVELS]
+    long    linearRamp[morphColor.RAMP_LEVELS]                  ' the area probe's ramp: red byte = level
     byte    mask[MASK_BYTES]
 
 PUB go() | cfgIdx
@@ -157,15 +180,17 @@ PUB go() | cfgIdx
     checkRefusals()
     checkDisplayEdge()
     checkTiming()
+    checkFigureArea(AREA_ODD_THICKNESS, AREA_ODD_LENGTH)
+    checkFigureArea(AREA_EVEN_THICKNESS, AREA_EVEN_LENGTH)
     display.commitScreenToPanelSet()
     utils.finish()
 
-PRI useConfig(cfgIdx) | status, nCols, nRows
+PRI useConfig(cfgIdx) | status
 
     thickness := cfgThickness[cfgIdx]
     segLength := cfgLength[cfgIdx]
     tailX256 := cfgTail[cfgIdx]
-    status, nCols, nRows := morphMask.buildMask(@mask, MASK_BYTES, thickness, segLength << digit.SUBPIXEL_SHIFT, cfgEnd[cfgIdx], cfgSection[cfgIdx])
+    status := morphMask.buildFigure(@mask, MASK_BYTES, thickness, segLength, thickness, cfgSection[cfgIdx])
     areaWidth, areaHeight := digit.digitSize(segLength, thickness)
     debug("CONFIG   ", zstr_(@@cfgNames[cfgIdx]), "  status=", sdec_(status), "  digit=", udec_(areaWidth), "x", udec_(areaHeight))
 
@@ -265,9 +290,9 @@ PRI checkDisplayEdge() | row, column, restEdgeSum
     utils.checkEqual(areaSum(row, column), @"a digit touching the right and bottom edges: 8 -> 0 ends on 0's rest pixels", restEdgeSum)
     clearArea(row, column)
 
-PRI checkTiming() | status, nCols, nRows, startTick, ticks, digitIdx, column, profileIdx
+PRI checkTiming() | startTick, ticks, digitIdx, column, profileIdx
 
-    status, nCols, nRows := morphMask.buildMask(@mask, MASK_BYTES, TIMED_THICKNESS, TIMED_LENGTH << digit.SUBPIXEL_SHIFT, morphMask.END_ANGLED, morphMask.SECTION_FLAT)
+    morphMask.buildFigure(@mask, MASK_BYTES, TIMED_THICKNESS, TIMED_LENGTH, TIMED_THICKNESS, morphMask.SECTION_FLAT)
     repeat profileIdx from 0 to NUM_PROFILES - ONE_MORE
         tailX256 := profileIdx == 0 ? EDGE_TAIL_X256 : TIMED_TAIL_X256
         thickness := TIMED_THICKNESS
@@ -284,7 +309,7 @@ PRI checkTiming() | status, nCols, nRows, startTick, ticks, digitIdx, column, pr
         debug("TIME     one segment (T9 L40) per frame, ", zstr_(profileIdx == 0 ? @"edge profile" : @"tail profile 10"), "  avg_us=", udec_(muldiv64(ticks / (TIMED_FRAMES - ONE_MORE), utils.MICROS_PER_SECOND, clkfreq)))
     clearArea(DIGIT_ROW, DIGIT_COLUMN)
 
-    status, nCols, nRows := morphMask.buildMask(@mask, MASK_BYTES, DENSE_THICKNESS, DENSE_LENGTH << digit.SUBPIXEL_SHIFT, morphMask.END_ANGLED, morphMask.SECTION_FLAT)
+    morphMask.buildFigure(@mask, MASK_BYTES, DENSE_THICKNESS, DENSE_LENGTH, DENSE_THICKNESS, morphMask.SECTION_FLAT)
     column := DIGIT_COLUMN
     repeat digitIdx from 0 to DENSE_DIGITS - ONE_MORE
         dense[digitIdx].initialize(chainIndex, maxRows, maxColumns)
@@ -303,6 +328,52 @@ PRI checkTiming() | status, nCols, nRows, startTick, ticks, digitIdx, column, pr
             dense[digitIdx].animate(nowMs)
         ticks += getct() - startTick
     debug("TIME     dense frame: 6 digits T6 L22 (8 -> 1, 5 segments each) all moving, tail 10  avg_us=", udec_(muldiv64(ticks / (TIMED_FRAMES - ONE_MORE), utils.MICROS_PER_SECOND, clkfreq)))
+
+PRI checkFigureArea(stroke, length) | level, expectedX10, measuredX10, fT, fP, fR
+
+    repeat level from 0 to morphColor.RAMP_MAX
+        linearRamp[level] := pixels.packedCorrectedRgb(chainIndex, level, 0, 0)
+    morphMask.buildFigure(@mask, MASK_BYTES, stroke, length, stroke, morphMask.SECTION_FLAT)
+    thickness := stroke
+    segLength := length
+    tailX256 := EDGE_TAIL_X256
+    areaWidth, areaHeight := digit.digitSize(segLength, thickness)
+    fT := float(stroke)
+    fP := float(length + ONE_MORE)
+    fR := (fT +. morphMask.F_ONE) *. morphMask.F_HALF
+
+    placeLinear(AREA_ZERO)
+    measuredX10 := redTenths()
+    expectedX10 := round(F_TENTHS *. fT *. (float(SIDES_PER_LOOP) *. fP -. float(CORNERS_PER_LOOP) *. fR +. F_TWO *. F_PI *. fR))
+    debug("AREA     0 at T", udec_(stroke), " L", udec_(length), "  measured_x10=", udec_(measuredX10), "  expected_x10=", udec_(expectedX10))
+    utils.checkEqual(abs (measuredX10 - expectedX10) * PERCENT_WHOLE <= expectedX10, stroke & ONE_MORE ? @"a 0 (odd stroke) covers its round-pen loop's area within 1%" : @"a 0 (even stroke) covers its round-pen loop's area within 1%", TRUE)
+
+    placeLinear(AREA_ONE)
+    measuredX10 := redTenths()
+    expectedX10 := round(F_TENTHS *. (fT *. (F_TWO *. fP -. fT -. morphMask.F_ONE) +. F_PI *. fT *. fT /. F_QUARTER))
+    debug("AREA     1 at T", udec_(stroke), " L", udec_(length), "  measured_x10=", udec_(measuredX10), "  expected_x10=", udec_(expectedX10))
+    utils.checkEqual(abs (measuredX10 - expectedX10) * PERCENT_WHOLE <= expectedX10, stroke & ONE_MORE ? @"a 1 (odd stroke) covers its round-ended stroke's area within 1%" : @"a 1 (even stroke) covers its round-ended stroke's area within 1%", TRUE)
+    clearArea(DIGIT_ROW, DIGIT_COLUMN)
+
+PRI placeLinear(value)
+' Place the digit fresh through the linear ramp, showing value at rest.
+
+    clearArea(DIGIT_ROW, DIGIT_COLUMN)
+    digit.placeDigit(DIGIT_ROW, DIGIT_COLUMN, segLength, thickness, value, @mask, @linearRamp, tailX256)
+    digit.setMotion(MOVE_MS, 0)
+    frame(0)
+    frame(MOVE_MS)
+
+PRI redTenths() : amountX10 | pixRow, pixCol, pPixel, total
+' The digit area's lit amount, in tenths of a pixel: its red bytes (the level, through the linear ramp) / 255.
+
+    total := 0
+    repeat pixRow from DIGIT_ROW to DIGIT_ROW + areaHeight - ONE_MORE
+        repeat pixCol from DIGIT_COLUMN to DIGIT_COLUMN + areaWidth - ONE_MORE
+            pPixel := pixels.pixelAddressAtRC(chainIndex, pixRow, pixCol)
+            if pPixel <> hub75Bffrs.NO_PIXEL
+                total += BYTE[pPixel]
+    amountX10 := (total * TENTHS + morphColor.RAMP_MAX / HALF_DIVISOR) / morphColor.RAMP_MAX
 
 PRI placeAt(row, column, value)
 ' Clear the area, place the digit fresh showing value, and draw it (one frame).

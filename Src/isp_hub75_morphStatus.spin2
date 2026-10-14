@@ -30,7 +30,7 @@ CON ' status codes (a new code takes the next unused negative value; a value is 
   E_UNKNOWN_EASING = -2                                         ' an easing style that is not isp_hub75_morphTime's EASE_LINEAR or EASE_SMOOTH
   E_BAD_THICKNESS = -3                                          ' a segment thickness below 1 pixel
   E_THICKNESS_TOO_LARGE = -4                                    ' a segment thickness greater than the segment's length
-  E_UNKNOWN_END_STYLE = -5                                      ' an end style that is not isp_hub75_morphMask's END_SQUARE or END_ANGLED
+  ' -5 is retired: it was E_UNKNOWN_END_STYLE, for the end styles the round-pen figure replaced (task 180)
   E_UNKNOWN_CROSS_SECTION = -6                                  ' a cross-section that is not isp_hub75_morphMask's SECTION_FLAT or SECTION_TUBE
   E_MASK_TOO_LARGE = -7                                         ' a segment mask that needs more bytes than the buffer given for it
   E_UNKNOWN_PROFILE = -8                                        ' a motion profile that is not isp_hub75_morphTime's PROFILE_EDGE or PROFILE_TAIL
