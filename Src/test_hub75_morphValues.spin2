@@ -79,7 +79,7 @@ CON ' ---- Case tables (DAT below) ----
   SET_LONGS = S_S + 1
   NUM_COUNT_CASES = 5
   NUM_STEP_CASES = 6
-  NUM_SET_CASES = 5
+  NUM_SET_CASES = 11
   UP_START = 128
   DOWN_START = 1002
   SET_VALUE_START = 1234
@@ -155,12 +155,25 @@ DAT ' cases: setTime() to each boundary (layout, hours mode, h, m, s)
                   long    0 + groupT.LAYOUT_HH_MM, 0 + groupT.HOURS_12, 0, 0, 0
                   long    0 + groupT.LAYOUT_HH_MM, 0 + groupT.HOURS_12, 12, 0, 0
                   long    0 + groupT.LAYOUT_MM_SS, 0 + groupT.HOURS_24, 0, 59, 59
-  setNames        word    @setName0, @setName1, @setName2, @setName3, @setName4
+                  long    0 + groupT.LAYOUT_HH_MM, 0 + groupT.HOURS_24, 23, 59, 0
+                  long    0 + groupT.LAYOUT_HH_MM, 0 + groupT.HOURS_12, 12, 59, 0
+                  long    0 + groupT.LAYOUT_HH_MM, 0 + groupT.HOURS_12, 11, 59, 0
+                  long    0 + groupT.LAYOUT_HH_MM, 0 + groupT.HOURS_12, 23, 59, 0
+                  long    0 + groupT.LAYOUT_HH_MM_SS, 0 + groupT.HOURS_12, 23, 59, 59
+                  long    0 + groupT.LAYOUT_HH_MM_SS, 0 + groupT.HOURS_12, 0, 0, 0
+  setNames        word    @setName0, @setName1, @setName2, @setName3, @setName4, @setName5, @setName6, @setName7, @setName8
+                  word    @setName9, @setName10
   setName0        byte    "setTime 23:59:59 (24h)", 0
   setName1        byte    "setTime 00:00:00 (24h)", 0
   setName2        byte    "setTime 00:00 (12h shows 12:00)", 0
   setName3        byte    "setTime 12:00 (12h)", 0
   setName4        byte    "setTime 59:59 (MM:SS)", 0
+  setName5        byte    "setTime 23:59 (24h)", 0
+  setName6        byte    "setTime 12:59 (12h)", 0
+  setName7        byte    "setTime 11:59 (12h)", 0
+  setName8        byte    "setTime 23:59 (12h shows 11:59)", 0
+  setName9        byte    "setTime 23:59:59 (12h shows 11:59:59)", 0
+  setName10       byte    "setTime 00:00:00 (12h shows 12:00:00)", 0
 
 VAR
 

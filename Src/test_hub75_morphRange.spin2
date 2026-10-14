@@ -1,0 +1,235 @@
+'' =================================================================================================
+''
+''   File....... test_hub75_morphRange.spin2
+''   Purpose.... Range gate: the release checks no other test program covers
+''   Authors.... Stephen M Moraco
+''               -- see below for terms of use
+''   E-mail..... stephen@ironsheep.biz
+''   Started.... Oct 2026
+''   Updated.... 14 Oct 2026
+''
+'' =================================================================================================
+
+{ Task 172: part of the range gate (spec R-13.1, R-13.2; Docs/analysis/range-gate.md lists every case and the program
+  that checks it). The other gate programs cover layout, rotation, boundaries, masks, ramps, the time base, moves,
+  placement and values; this one holds what they do not:
+
+    1. the library version: MORPH_VERSION encodes the same version as versionString() (tools/stamp_version.sh --check
+       ties both to ChangeLog.md on the host)
+    2. the group setters' refusals: a stroke of 0, an unknown cross-section, an unknown profile, a tail of 0, and a
+       fixed stroke too thick for the area; each refused call changes nothing
+    3. setTime() on a group that is not placed
+    4. the placed-area table full: with MAX_GROUPS groups placed, one more is refused (-D RANGE_TABLE_FULL only)
+
+  Check 4 needs MAX_GROUPS + 1 group objects (11). With the quad's 8-bit driver they do not fit in hub RAM (12_184
+  bytes over), so on the quad the table can never fill: memory runs out first. The check is built with
+  -D RANGE_TABLE_FULL against a scratch copy of the driver config that lists one 64 x 32 panel, and certified that
+  way (Docs/analysis/range-gate.md); the default build leaves it out.
+
+  A falsification build (-D MORPH_BREAK_RANGE) expects the next patch version, so check 1 must FAIL.
+}
+
+CON ' ---- Timing ----
+
+  CLK_FREQ = 335_000_000                                        ' system freq as a constant
+  _clkfreq = CLK_FREQ                                           ' set system clock
+
+CON ' ---- Range Settings ----
+
+#IFDEF RANGE_TABLE_FULL
+  NUM_GROUPS = 11                                               ' one more than the placed-area table holds (MAX_GROUPS)
+#ELSE
+  NUM_GROUPS = 1                                                ' checks 1-3 need one group
+#ENDIF
+  LAST_GROUP = NUM_GROUPS - 1
+  EXTRA_GROUP = LAST_GROUP                                      ' the group that finds the table full
+  LAST_TABLE_GROUP = group.MAX_GROUPS - 1                      ' groups 0 to this fill the placed-area table
+  FIRST_KEPT = 1                                                ' group 0 is removed to free an entry; the rest stay placed
+  CELLS_ACROSS = 4                                              ' each group gets its own cell of the display: 4 x 3 cells,
+  CELLS_DOWN = 3                                                '   64 x 32 on the quad, 16 x 10 on one 64 x 32 panel
+  STROKE = 1                                                    ' a stroke that fits a one-digit group in the smallest cell
+  THICK_STROKE = 20                                             ' a stroke no one-digit group fits in a cell
+  BAD_SETTING = 99                                              ' no setter accepts this
+  NO_TAIL = 0                                                   ' a tail shorter than timeBase.MIN_TAIL_PIXELS
+  NO_STROKE = 0                                                 ' a stroke thinner than morphMask.MIN_THICKNESS
+  CLOCK_START = 0                                               ' 00:00:00
+  VERSION_DOT = "."                                             ' versionString(): "v" then MAJOR.MINOR.PATCH
+  VERSION_LEAD = 1                                              ' the "v" before the first number
+  DIGIT_ZERO = "0"
+  MAJOR_SCALE = 10_000                                          ' MORPH_VERSION is MAJOR * 10000 + MINOR * 100 + PATCH
+  MINOR_SCALE = 100
+  #0, PART_MAJOR, PART_MINOR, PART_PATCH                        ' versionString()'s three numbers, left to right
+  VERSION_PARTS = PART_PATCH + 1
+  REMOVE_LIMIT_MS = 5_000                                       ' removeGroup()'s morph-out finishes well within this
+
+#IFDEF MORPH_BREAK_RANGE
+  BREAK_VERSION = 1                                             ' falsification: expect the next patch version
+#ELSE
+  BREAK_VERSION = 0
+#ENDIF
+
+OBJ
+
+    utils               : "test_hub75_morphUtils"
+    color               : "isp_hub75_color"
+    display             : "isp_hub75_display"
+    hub75Bffrs          : "isp_hub75_hwBufferAccess"
+    timeBase            : "isp_hub75_morphTime"
+    morphStatus         : "isp_hub75_morphStatus"
+    group[NUM_GROUPS]   : "isp_hub75_morphCounters"
+
+VAR
+
+    long    cellWidth                                           ' one cell of the display (CELLS_ACROSS x CELLS_DOWN)
+    long    cellHeight
+
+PUB go() | chainIndex
+'' Run the range checks this program holds, then report.
+''
+
+' Local Variables:
+' @local chainIndex - the adapter's chain index, for the display's size
+
+    display.start(display.HUB75_ADAPTER_1)
+    chainIndex := hub75Bffrs.indexForHub75ChainId(hub75Bffrs.HUB75_ADAPTER_1)
+    cellWidth := hub75Bffrs.maxDisplayColumns(chainIndex) / CELLS_ACROSS
+    cellHeight := hub75Bffrs.maxDisplayRows(chainIndex) / CELLS_DOWN
+    display.clearScreen()
+    timeBase.reset()
+    utils.beginSuite(@"morphRange release checks")
+
+    checkVersion()
+    checkSetterRefusals()
+    checkNotPlaced()
+#IFDEF RANGE_TABLE_FULL
+    checkTableFull()
+#ENDIF
+
+    utils.finish()
+
+PRI checkVersion() | pText, part, numbers[VERSION_PARTS]
+' Check MORPH_VERSION against the numbers in versionString(): the two must name the same version.
+'
+' Local Variables:
+' @local pText - the version text, walked character by character
+' @local part - the number being read: PART_MAJOR, PART_MINOR or PART_PATCH
+' @local numbers - the three numbers read from the text
+
+    longfill(@numbers, 0, VERSION_PARTS)
+    pText := group[0].versionString() + VERSION_LEAD
+    part := PART_MAJOR
+    repeat while BYTE[pText] <> 0
+        if BYTE[pText] == VERSION_DOT
+            part++
+        else
+            numbers[part] := numbers[part] * group.DECIMAL_BASE + BYTE[pText] - DIGIT_ZERO
+        pText++
+    utils.checkEqual(part, @"versionString() has three numbers", PART_PATCH)
+    utils.checkEqual(group.MORPH_VERSION + BREAK_VERSION, @"MORPH_VERSION is the version versionString() names", numbers[PART_MAJOR] * MAJOR_SCALE + numbers[PART_MINOR] * MINOR_SCALE + numbers[PART_PATCH])
+
+PRI checkSetterRefusals() | status, usedWidth, usedHeight
+' Each setter refuses a value it cannot use and changes nothing: the group then places as it would have without it.
+'
+' Local Variables:
+' @local status - a setter's or placeGroup()'s result
+' @local usedWidth, usedHeight - the size the placed group uses
+
+    utils.checkEqual(group[0].setThickness(NO_STROKE), @"setThickness refuses a stroke of 0", morphStatus.E_BAD_THICKNESS)
+    utils.checkEqual(group[0].setCrossSection(BAD_SETTING), @"setCrossSection refuses an unknown cross-section", morphStatus.E_UNKNOWN_CROSS_SECTION)
+    utils.checkEqual(group[0].setProfile(BAD_SETTING), @"setProfile refuses an unknown profile", morphStatus.E_UNKNOWN_PROFILE)
+    utils.checkEqual(group[0].setTailLength(NO_TAIL), @"setTailLength refuses a tail of 0", morphStatus.E_BAD_TAIL_LENGTH)
+
+    ' a fixed stroke too thick for the area: the digits cannot be drawn at that stroke, so the area is too small
+    group[0].setThickness(THICK_STROKE)
+    status := placeInCell(0)
+    utils.checkEqual(status, @"placeGroup refuses a fixed stroke too thick for its area", morphStatus.E_AREA_TOO_SMALL)
+    utils.checkEqual(group[0].isPlaced(), @"  ... and the group is not placed", FALSE)
+
+    ' after the refusals the group still places with its own (valid) settings
+    group[0].setThickness(STROKE)
+    status, usedWidth, usedHeight := group[0].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, 0, 0, cellWidth, cellHeight, group.GRP_UP_COUNTER, group.LAYOUT_1_DIGIT, group.ROT_0, color.cOrange, 0)
+    utils.checkEqual(status, @"  ... the refused settings changed nothing: the group places", morphStatus.SUCCESS)
+    removeAndWait(0)
+
+PRI checkNotPlaced()
+' setTime() needs a placed clock; on a group that is not placed it is refused.
+'
+
+    utils.checkEqual(group[0].setTime(0, 0, 0), @"setTime refuses a group that is not placed", morphStatus.E_NOT_PLACED)
+
+#IFDEF RANGE_TABLE_FULL
+PRI checkTableFull() | grpIdx, placedCount
+' Place MAX_GROUPS groups, one per cell; the next is refused because the placed-area table is full. Removing one
+' frees its entry, and then the extra group places.
+'
+' Local Variables:
+' @local grpIdx - the group being placed or removed
+' @local placedCount - how many of the first MAX_GROUPS placed
+
+    placedCount := 0
+    repeat grpIdx from 0 to LAST_TABLE_GROUP
+        group[grpIdx].setThickness(STROKE)
+        if placeInCell(grpIdx) == morphStatus.SUCCESS
+            placedCount++
+    utils.checkEqual(placedCount, @"MAX_GROUPS groups place, one per cell", group.MAX_GROUPS)
+    group[EXTRA_GROUP].setThickness(STROKE)
+    utils.checkEqual(placeInCell(EXTRA_GROUP), @"one more group is refused: the placed-area table is full", morphStatus.E_TOO_MANY_GROUPS)
+    utils.checkEqual(group[EXTRA_GROUP].isPlaced(), @"  ... and it is not placed", FALSE)
+    removeAndWait(0)
+    utils.checkEqual(placeInCell(EXTRA_GROUP), @"  ... after one is removed, it places", morphStatus.SUCCESS)
+    repeat grpIdx from FIRST_KEPT to LAST_GROUP
+        removeAndWait(grpIdx)
+
+#ENDIF
+PRI placeInCell(grpIdx) : status
+' Place group grpIdx as a one-digit counter in its own cell of the display.
+'
+' @param grpIdx - the group, which is also its cell's number, left to right then top to bottom
+' @returns status - placeGroup()'s result
+
+    status, _, _ := group[grpIdx].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, (grpIdx // CELLS_ACROSS) * cellWidth, (grpIdx / CELLS_ACROSS) * cellHeight, cellWidth, cellHeight, group.GRP_UP_COUNTER, group.LAYOUT_1_DIGIT, group.ROT_0, color.cGreen, grpIdx // group.DECIMAL_BASE)
+
+PRI removeAndWait(grpIdx) | startMs, nowMs
+' Remove a group and run frames until its morph-out completes and it frees its area.
+'
+' @param grpIdx - the group, which is also its cell's number, left to right then top to bottom
+'
+' Local Variables:
+' @local startMs, nowMs - when the removal started, and the frame's time
+
+    group[grpIdx].removeGroup()
+    startMs := nowMs := timeBase.update()
+    repeat while group[grpIdx].isPlaced() and nowMs - startMs < REMOVE_LIMIT_MS
+        group[grpIdx].animate(nowMs)
+        display.commitScreenToPanelSet()
+        nowMs := timeBase.update()
+
+CON ' ---- License ----
+
+{{
+
+
+ -------------------------------------------------------------------------------------------------
+  MIT License
+
+  Copyright (c) 2021 Iron Sheep Productions, LLC
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+ =================================================================================================
+}}
