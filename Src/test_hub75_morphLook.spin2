@@ -33,14 +33,20 @@ CON ' ---- Timing ----
   SLOW_MOVE_MS = 1_500
   SLOW_HOLD_MS = 1_000
   FAST_HOLD_MS = 400
-  THIN_STROKE = 1
-  COUNTER_STROKE = 3
 
 CON ' ---- Groups ----
 
+  ' The groups on show:
+  '  GRP_THIN_CLOCK  - the 2021-size clock, stroke 1
+  '  GRP_THICK_CLOCK - the thick HH:MM clock
+  '  GRP_BIG_FLAT    - one large digit, flat cross-section
+  '  GRP_BIG_TUBE    - the same digit with the tube cross-section
+  '  GRP_COUNTER     - the four-digit counter
   #0, GRP_THIN_CLOCK, GRP_THICK_CLOCK, GRP_BIG_FLAT, GRP_BIG_TUBE, GRP_COUNTER
   NUM_GROUPS = GRP_COUNTER + 1
   LAST_GROUP = NUM_GROUPS - 1
+  THIN_STROKE = 1                                               ' stroke of the 2021-size clock
+  COUNTER_STROKE = 3                                            ' stroke of the four-digit counter
   ' areas: left, top, width, height
   THIN_LEFT = 2
   THIN_TOP = 2
@@ -59,11 +65,9 @@ CON ' ---- Groups ----
   COUNTER_TOP = 70
   COUNTER_WIDTH = 124
   COUNTER_HEIGHT = 50
-  SEC_PER_MIN = 60
-  SEC_PER_HOUR = 60 * SEC_PER_MIN
   START_HOURS = 12                                              ' the clocks start at 12:58: the hours change soon
   START_MINUTES = 58
-  CLOCK_START = START_HOURS * SEC_PER_HOUR + START_MINUTES * SEC_PER_MIN
+  CLOCK_START = START_HOURS * group.SECONDS_PER_HOUR + START_MINUTES * group.SECONDS_PER_MINUTE
 
 OBJ
 
@@ -84,6 +88,13 @@ DAT
     nameCounter     byte    "counter, stroke 3", 0
 
 PUB go() | grpIdx, nowMs, startMs
+'' Run the by-eye look check: place the groups, run them for LOOK_MS, then end the session.
+''
+
+' Local Variables:
+' @local grpIdx - the group being set up or run
+' @local nowMs - the frame's time
+' @local startMs - the frame time when the run began
 
     display.start(display.HUB75_ADAPTER_1)
     display.clearScreen()
@@ -121,9 +132,25 @@ PUB go() | grpIdx, nowMs, startMs
     debug("LOOK     done")
     debug("END_SESSION")
 
-PRI place(grpIdx, left, top, width, height, grpType, layout, rgbColor, value) | status, usedWidth, usedHeight
+PRI place(grpIdx, left, top, width, height, grpType, layout, rgbColor, groupValue) | status, usedWidth, usedHeight
+' Place one group at rotation 0 and log where it went and what it uses.
+'
+' @param grpIdx - the group being set up or run
+' @param left - the group's area left edge
+' @param top - the group's area top edge
+' @param width - the group's area width
+' @param height - the group's area height
+' @param grpType - the group type (group.GRP_ value)
+' @param layout - the digit layout (group.LAYOUT_ value)
+' @param rgbColor - the group's color, $RRGGBB
+' @param groupValue - the group's first value
 
-    status, usedWidth, usedHeight := group[grpIdx].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, left, top, width, height, grpType, layout, group.ROT_0, rgbColor, value)
+' Local Variables:
+' @local status - placeGroup()'s result
+' @local usedWidth - the width the placed group uses
+' @local usedHeight - the height the placed group uses
+
+    status, usedWidth, usedHeight := group[grpIdx].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, left, top, width, height, grpType, layout, group.ROT_0, rgbColor, groupValue)
     debug("LOOK     ", zstr_(@@groupNames[grpIdx]), " in (", udec_(left), ",", udec_(top), ") ", udec_(width), "x", udec_(height), ": status=", sdec_(status), " uses ", udec_(usedWidth), "x", udec_(usedHeight))
 
 CON ' ---- License ----

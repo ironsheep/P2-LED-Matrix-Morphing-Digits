@@ -70,12 +70,25 @@ CON ' scenes
   NUM_GROUPS = 9                                                ' the most this program fits in hub RAM (morphCounters' MAX_GROUPS, 10, is 3_864 bytes over)
   GRID = 16                                                     ' a row's area is in sixteenths of the display
 
-  ' a scene: its length, its group count, then that many rows
+  ' A scene's header, then its rows (one long each):
+  '  SCENE_MS     - how long the scene runs, in milliseconds
+  '  SCENE_GROUPS - how many rows (groups) the scene has
+  '  SCENE_ROWS   - where the first row starts
   #0, SCENE_MS, SCENE_GROUPS, SCENE_ROWS
-  ' a row: one group
+  ' The fields of one row, which describes one group:
+  '  ROW_LEFT, ROW_TOP, ROW_WIDTH, ROW_HEIGHT - the group's area, in GRID sixteenths of the display
+  '  ROW_TYPE      - the group type (group.GRP_ value)
+  '  ROW_LAYOUT    - the digit layout (group.LAYOUT_ value)
+  '  ROW_ROTATION  - the group's rotation (group.ROT_ value)
+  '  ROW_COLOR     - the group's color
+  '  ROW_STROKE    - the stroke thickness in pixels (AUTO: sized with the digits)
+  '  ROW_FEED      - what gives the group its values (a FEED_ value)
+  '  ROW_MOVE_MS   - how long one move takes, in milliseconds
+  '  ROW_HOLD_MS   - how long a value is held after its move, in milliseconds
   #0, ROW_LEFT, ROW_TOP, ROW_WIDTH, ROW_HEIGHT, ROW_TYPE, ROW_LAYOUT, ROW_ROTATION, ROW_COLOR, ROW_STROKE, ROW_FEED, ROW_MOVE_MS, ROW_HOLD_MS
   ROW_LONGS = ROW_HOLD_MS + 1
-  NEXT_ONE = 1                                                  ' the last of a count is the count minus one
+  BYTES_PER_LONG = 4                                            ' a row's address is its long offset times this
+  COUNT_TO_LAST = 1                                             ' the last of a count is the count minus one
   ONE_DIGIT_SCALE = 1                                           ' 10^0: a value range starts here and gains a 10 per digit
   AUTO = 0                                                      ' ROW_STROKE: sized with the digits
 
@@ -88,6 +101,13 @@ CON ' scenes
   '   FEED_VERSION  - the library version, held still on a 12-hour clock: v1.0.0 shows as 1:00:00
   #0, FEED_STEP, FEED_RANDOM, FEED_FPS, FEED_CLOCK, FEED_UPTIME, FEED_VERSION
 
+  ' The scenes, in the order of the sceneList rows:
+  '  SCENE_VERSION     - the library version morphing on (shown once, at start-up)
+  '  SCENE_HERO        - one real-time HH:MM:SS clock filling the display
+  '  SCENE_MIXED       - a thick clock above a row of thin-stroked counters
+  '  SCENE_SPLATTER    - nine groups of every type, size, color, stroke and rotation
+  '  SCENE_STATUS      - time of day, uptime, a restarting countdown and the frame rate
+  '  SCENE_ORIENTATION - the same counter at all four rotations
   #0, SCENE_VERSION, SCENE_HERO, SCENE_MIXED, SCENE_SPLATTER, SCENE_STATUS, SCENE_ORIENTATION
   LAST_SCENE = SCENE_ORIENTATION
   FIRST_LOOP_SCENE = SCENE_HERO                                 ' the version shows once, at start-up
@@ -163,17 +183,18 @@ VAR
     long    feed[NUM_GROUPS]                              ' each group's FEED_ for the current scene
     long    valueRange[NUM_GROUPS]                        ' a value group's 10^digits: its values are 0 to this - 1
 
-PUB start() | chainIndex, sceneIdx
-'' Start the driver, then run the scenes: the version once, then the rest in a loop
+PUB start() | chainIdx, sceneIdx
+'' Start the driver, then run the scenes: the version once, then the rest in a loop.
+''
 
 ' Local Variables:
-' @local chainIndex - the adapter's chain index, for the display's size
+' @local chainIdx - the adapter's chain index, for the display's size
 ' @local sceneIdx - the scene being shown
 
     display.start(display.HUB75_ADAPTER_1)                     ' configures the adapter and starts the driver (aborts on failure)
-    chainIndex := hub75Bffrs.indexForHub75ChainId(hub75Bffrs.HUB75_ADAPTER_1)
-    areaWidth := hub75Bffrs.maxDisplayColumns(chainIndex)
-    areaHeight := hub75Bffrs.maxDisplayRows(chainIndex)
+    chainIdx := hub75Bffrs.indexForHub75ChainId(hub75Bffrs.HUB75_ADAPTER_1)
+    areaWidth := hub75Bffrs.maxDisplayColumns(chainIdx)
+    areaHeight := hub75Bffrs.maxDisplayRows(chainIdx)
     if BENCH_WIDTH <> 0                                         ' a bench build: lay out as if the display were that size
         areaWidth, areaHeight := BENCH_WIDTH, BENCH_HEIGHT
     debug("SHOW     area ", udec_(areaWidth), "x", udec_(areaHeight), ", library ", zstr_(group[0].versionString()))
@@ -185,21 +206,23 @@ PUB start() | chainIndex, sceneIdx
             showScene(sceneIdx)
 
 PRI showScene(sceneIdx) | pScene, rowIdx, startMs, nowMs, frames
-
 ' Place a scene's groups, run it for its length, then morph every group out. Logs the scene's frame rate.
+'
+' @param sceneIdx - the scene being shown
 
 ' Local Variables:
 ' @local pScene - the scene's DAT data
 ' @local rowIdx - the row (and group) being placed or removed
-' @local startMs, nowMs - when the scene started, and the frame's time
+' @local startMs - when the scene started
+' @local nowMs - the frame's time
 ' @local frames - frames drawn while the scene ran
 
     pScene := @@sceneList[sceneIdx]
     display.clearScreen()
     debug("SHOW     scene ", zstr_(@@sceneNames[sceneIdx]))
-    lastSceneGroup := LONG[pScene][SCENE_GROUPS] - NEXT_ONE
+    lastSceneGroup := LONG[pScene][SCENE_GROUPS] - COUNT_TO_LAST
     repeat rowIdx from 0 to lastSceneGroup
-        placeRow(rowIdx, pScene + (SCENE_ROWS + rowIdx * ROW_LONGS) * 4)
+        placeRow(rowIdx, pScene + (SCENE_ROWS + rowIdx * ROW_LONGS) * BYTES_PER_LONG)
 
     startMs := nowMs := runFrame()
     frames := 0
@@ -213,17 +236,24 @@ PRI showScene(sceneIdx) | pScene, rowIdx, startMs, nowMs, frames
     repeat while anyPlaced()
         runFrame()
 
-PRI placeRow(grpIdx, pRow) | left, top, right, bottom, grpType, layout, value, status, usedWidth, usedHeight
-
+PRI placeRow(grpIdx, pRow) | left, top, right, bottom, grpType, layout, groupValue, status, usedWidth, usedHeight
 ' Set up one group from its row and place it in its share of the area; log what happened. A refused group is
 ' skipped and the scene runs on without it.
+'
+' @param grpIdx - the group (and row) being placed
+' @param pRow - hub address of the group's row in its scene
 
 ' Local Variables:
-' @local left, top, right, bottom - the group's area, from its sixteenths of the area (right and bottom exclusive)
-' @local grpType, layout - the row's group type and layout
-' @local value - the group's first value
+' @local left - the group's left edge, from its sixteenths of the area
+' @local top - the group's top edge
+' @local right - the group's right edge (exclusive)
+' @local bottom - the group's bottom edge (exclusive)
+' @local grpType - the row's group type
+' @local layout - the row's digit layout
+' @local groupValue - the group's first value
 ' @local status - placeGroup()'s result
-' @local usedWidth, usedHeight - the size the placed group uses
+' @local usedWidth - the width the placed group uses
+' @local usedHeight - the height the placed group uses
 
     left := LONG[pRow][ROW_LEFT] * areaWidth / GRID
     top := LONG[pRow][ROW_TOP] * areaHeight / GRID
@@ -242,14 +272,14 @@ PRI placeRow(grpIdx, pRow) | left, top, right, bottom, grpType, layout, value, s
     group[grpIdx].setMoveDuration(LONG[pRow][ROW_MOVE_MS])
     group[grpIdx].setHoldDuration(LONG[pRow][ROW_HOLD_MS])
 
-    value := 0
+    groupValue := 0
     case feed[grpIdx]
         FEED_CLOCK:
-            value := (START_TIME + timeBase.elapsedMs() / timeBase.MS_PER_SECOND) // group.SECONDS_PER_DAY
+            groupValue := (START_TIME + timeBase.elapsedMs() / timeBase.MS_PER_SECOND) // group.SECONDS_PER_DAY
         FEED_UPTIME:
-            value := (timeBase.elapsedMs() / timeBase.MS_PER_SECOND) // group.SECONDS_PER_DAY
+            groupValue := (timeBase.elapsedMs() / timeBase.MS_PER_SECOND) // group.SECONDS_PER_DAY
         FEED_VERSION:
-            value := VERSION_TIME
+            groupValue := VERSION_TIME
     if grpType == group.GRP_CLOCK
         if feed[grpIdx] == FEED_VERSION                         ' held still, with no leading hour zero
             group[grpIdx].setClockMode(group.CLOCK_ACCELERATED)
@@ -258,19 +288,20 @@ PRI placeRow(grpIdx, pRow) | left, top, right, bottom, grpType, layout, value, s
             group[grpIdx].setClockMode(group.CLOCK_REAL_TIME)
             group[grpIdx].setClockHours(group.HOURS_24)
         if layout == group.LAYOUT_MM_SS
-            value //= group.SECONDS_PER_HOUR
+            groupValue //= group.SECONDS_PER_HOUR
     else
         valueRange[grpIdx] := ONE_DIGIT_SCALE
         repeat layout                                           ' LAYOUT_n_DIGITS is n
             valueRange[grpIdx] *= group.DECIMAL_BASE
 
-    status, usedWidth, usedHeight := group[grpIdx].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, left, top, right - left, bottom - top, grpType, layout, LONG[pRow][ROW_ROTATION], LONG[pRow][ROW_COLOR], value)
+    status, usedWidth, usedHeight := group[grpIdx].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, left, top, right - left, bottom - top, grpType, layout, LONG[pRow][ROW_ROTATION], LONG[pRow][ROW_COLOR], groupValue)
     debug("SHOW     group ", udec_(grpIdx), " in (", udec_(left), ",", udec_(top), ") ", udec_(right - left), "x", udec_(bottom - top), ": status=", sdec_(status), " uses ", udec_(usedWidth), "x", udec_(usedHeight))
 
 PRI runFrame() : nowMs | grpIdx
-
-' One frame: each placed group whose hold has passed takes its next value from its feed, every group draws its
+' Run one frame: each placed group whose hold has passed takes its next value from its feed, every group draws its
 ' moves for this frame's time, and the frame is committed (the commit waits for the driver, so it paces the loop).
+'
+' @returns nowMs - the frame's time
 
 ' Local Variables:
 ' @local grpIdx - the group being fed or drawn
@@ -284,13 +315,14 @@ PRI runFrame() : nowMs | grpIdx
                 FEED_RANDOM:
                     group[grpIdx].setValue(getrnd() +// valueRange[grpIdx])
                 FEED_FPS:
-                    group[grpIdx].setValue(timeBase.framesPerSecondX100() / timeBase.FPS_SCALE <# valueRange[grpIdx] - NEXT_ONE)
+                    group[grpIdx].setValue(timeBase.framesPerSecondX100() / timeBase.FPS_SCALE <# valueRange[grpIdx] - COUNT_TO_LAST)
         group[grpIdx].animate(nowMs)
     display.commitScreenToPanelSet()
 
 PRI anyPlaced() : bAny | grpIdx
-
-' TRUE while any group still holds an area (is placed, or is still morphing out).
+' Ask whether any group still holds an area (is placed, or is still morphing out).
+'
+' @returns bAny - TRUE while any group still holds an area
 
 ' Local Variables:
 ' @local grpIdx - the group being asked

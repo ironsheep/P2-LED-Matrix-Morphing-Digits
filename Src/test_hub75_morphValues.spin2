@@ -6,7 +6,7 @@
 ''               -- see below for terms of use
 ''   E-mail..... stephen@ironsheep.biz
 ''   Started.... Oct 2026
-''   Updated.... 13 Oct 2026
+''   Updated.... 14 Oct 2026
 ''
 '' =================================================================================================
 
@@ -50,15 +50,32 @@ CON ' ---- Areas, motion ----
   START_MS = 10_000
   MAX_SETTLE_FRAMES = 40                                        ' a 200 ms move ends in 4 frames of 50 ms
   STEPS = 3                                                     ' units counted in section 1
-  ONE = 1
+  LAST_OFFSET = 1                                               ' the last index of a count is the count minus this
+  FIRST_STEP = 1                                                ' counting steps are numbered from 1
+  COUNT_UP = 1                                                  ' a counter's step when it counts up ...
+  COUNT_DOWN = -1                                               ' ... and when it counts down
+  REMOVED_GROUP_VALUE = 1                                       ' a value setValue() is given when only the refusal matters
+  SINGLE_STEP = 1                                               ' a rollover case steps once
+  JUST_OVER = 1                                                 ' one past the largest value
+  BREAK_UNITS = 1                                               ' -D MORPH_BREAK_VALUES: every expected digit list is this many units late
+  BELOW_RANGE = -1                                             ' below every range: setTime() hours, setValue()
   MAX_FIELDS = 3
   MAX_TEST_DIGITS = 6
 
 CON ' ---- Case tables (DAT below) ----
 
-  #0, C_LAYOUT, C_HOURS, C_START, C_UNIT                        ' a counting or rollover case
+  ' a counting or rollover case (a row of countCases / stepCases), by long index:
+  '   C_LAYOUT - the clock layout
+  '   C_HOURS  - the hours mode
+  '   C_START  - the start, in seconds
+  '   C_UNIT   - the unit counted, in seconds
+  #0, C_LAYOUT, C_HOURS, C_START, C_UNIT
   CASE_LONGS = C_UNIT + 1
-  #0, S_LAYOUT, S_HOURS, S_H, S_M, S_S                          ' a setTime() case
+  ' a setTime() case (a row of setCases), by long index:
+  '   S_LAYOUT - the clock layout
+  '   S_HOURS  - the hours mode
+  '   S_H, S_M, S_S - the hours, minutes and seconds set
+  #0, S_LAYOUT, S_HOURS, S_H, S_M, S_S
   SET_LONGS = S_S + 1
   NUM_COUNT_CASES = 5
   NUM_STEP_CASES = 6
@@ -80,16 +97,12 @@ CON ' ---- Case tables (DAT below) ----
   REAL_SECONDS = 3                                              ' section 5: three injected seconds
   MS_PER_SECOND = 1000
   HALF_SECOND_MS = MS_PER_SECOND / 2
-  TWO_FIELDS = 2
-  THREE_FIELDS = 3
+  SECOND_FIELD = 1                                              ' expectClockDigits(): the fields of a clock, by index
+  THIRD_FIELD = 2
   COUNTER_DIGITS = 4
 
 CON ' ---- Time ----
 
-  SEC_PER_MIN = 60
-  SEC_PER_HOUR = 3600
-  HOURS_HALF_DAY = 12
-  TENS = 10
   FOUR_NINES = 9999
   NO_HOURS = -1                                                 ' expectDigits(): an MM:SS clock has no hours field
 
@@ -112,12 +125,12 @@ DAT ' cases: counting three units (layout, hours mode, start in seconds, unit in
                   long    0 + groupT.LAYOUT_HH_MM, 0 + groupT.HOURS_12, 21 * 3600 + 58 * 60, 60
                   long    0 + groupT.LAYOUT_HH_MM_SS, 0 + groupT.HOURS_24, 7 * 3600 + 59 * 60 + 58, 1
                   long    0 + groupT.LAYOUT_HH_MM_SS, 0 + groupT.HOURS_12, 15 * 3600 + 9 * 60 + 58, 1
-  countNames      word    @cn0, @cn1, @cn2, @cn3, @cn4
-  cn0             byte    "MM:SS 24h counts", 0
-  cn1             byte    "HH:MM 24h counts", 0
-  cn2             byte    "HH:MM 12h counts", 0
-  cn3             byte    "HH:MM:SS 24h counts", 0
-  cn4             byte    "HH:MM:SS 12h counts", 0
+  countNames      word    @countName0, @countName1, @countName2, @countName3, @countName4
+  countName0      byte    "MM:SS 24h counts", 0
+  countName1      byte    "HH:MM 24h counts", 0
+  countName2      byte    "HH:MM 12h counts", 0
+  countName3      byte    "HH:MM:SS 24h counts", 0
+  countName4      byte    "HH:MM:SS 12h counts", 0
 
 DAT ' cases: rollovers, one unit each
 
@@ -127,13 +140,13 @@ DAT ' cases: rollovers, one unit each
                   long    0 + groupT.LAYOUT_HH_MM, 0 + groupT.HOURS_24, 23 * 3600 + 59 * 60, 60
                   long    0 + groupT.LAYOUT_MM_SS, 0 + groupT.HOURS_24, 59 * 60 + 59, 1
                   long    0 + groupT.LAYOUT_HH_MM_SS, 0 + groupT.HOURS_24, 23 * 3600 + 59 * 60 + 59, 1
-  stepNames       word    @sn0, @sn1, @sn2, @sn3, @sn4, @sn5
-  sn0             byte    "12h 12:59 -> 1:00", 0
-  sn1             byte    "12h 11:59 -> 12:00", 0
-  sn2             byte    "12h 23:59 -> 12:00 (midnight)", 0
-  sn3             byte    "24h 23:59 -> 00:00", 0
-  sn4             byte    "MM:SS 59:59 -> 00:00", 0
-  sn5             byte    "24h 23:59:59 -> 00:00:00", 0
+  stepNames       word    @stepName0, @stepName1, @stepName2, @stepName3, @stepName4, @stepName5
+  stepName0       byte    "12h 12:59 -> 1:00", 0
+  stepName1       byte    "12h 11:59 -> 12:00", 0
+  stepName2       byte    "12h 23:59 -> 12:00 (midnight)", 0
+  stepName3       byte    "24h 23:59 -> 00:00", 0
+  stepName4       byte    "MM:SS 59:59 -> 00:00", 0
+  stepName5       byte    "24h 23:59:59 -> 00:00:00", 0
 
 DAT ' cases: setTime() to each boundary (layout, hours mode, h, m, s)
 
@@ -142,23 +155,27 @@ DAT ' cases: setTime() to each boundary (layout, hours mode, h, m, s)
                   long    0 + groupT.LAYOUT_HH_MM, 0 + groupT.HOURS_12, 0, 0, 0
                   long    0 + groupT.LAYOUT_HH_MM, 0 + groupT.HOURS_12, 12, 0, 0
                   long    0 + groupT.LAYOUT_MM_SS, 0 + groupT.HOURS_24, 0, 59, 59
-  setNames        word    @tn0, @tn1, @tn2, @tn3, @tn4
-  tn0             byte    "setTime 23:59:59 (24h)", 0
-  tn1             byte    "setTime 00:00:00 (24h)", 0
-  tn2             byte    "setTime 00:00 (12h shows 12:00)", 0
-  tn3             byte    "setTime 12:00 (12h)", 0
-  tn4             byte    "setTime 59:59 (MM:SS)", 0
+  setNames        word    @setName0, @setName1, @setName2, @setName3, @setName4
+  setName0        byte    "setTime 23:59:59 (24h)", 0
+  setName1        byte    "setTime 00:00:00 (24h)", 0
+  setName2        byte    "setTime 00:00 (12h shows 12:00)", 0
+  setName3        byte    "setTime 12:00 (12h)", 0
+  setName4        byte    "setTime 59:59 (MM:SS)", 0
 
 VAR
 
     long    chainIndex
     long    nowMs
     long    expected[MAX_TEST_DIGITS]
-    long    nExpected
+    long    expectedCount
 
 PUB go() | caseIdx, pCase
-'' Run the values test.
+'' Run the values test: counting, rollovers, setters, refusals, real time and grow-in.
 ''
+
+' Local Variables:
+' @local caseIdx - the case being run
+' @local pCase - the address of the case's row in its DAT table
 
     utils.beginSuite(@"morphValues clocks, counters, setters")
     chainIndex := hub75Bffrs.indexForHub75ChainId(hub75Bffrs.HUB75_ADAPTER_1)
@@ -169,17 +186,17 @@ PUB go() | caseIdx, pCase
     groupT.setClockMode(groupT.CLOCK_ACCELERATED)
     groupR.setClockMode(groupR.CLOCK_ACCELERATED)
 
-    repeat caseIdx from 0 to NUM_COUNT_CASES - ONE                  ' 1. counting three units
+    repeat caseIdx from 0 to NUM_COUNT_CASES - LAST_OFFSET                  ' 1. counting three units
         pCase := @countCases + caseIdx * CASE_LONGS * dig.BYTES_PER_LONG
         countClock(@@countNames[caseIdx], LONG[pCase][C_LAYOUT], LONG[pCase][C_HOURS], LONG[pCase][C_START], LONG[pCase][C_UNIT], STEPS)
-    countCounter(@"up counter counts", groupT.GRP_UP_COUNTER, UP_START, ONE, STEPS)
-    countCounter(@"down counter counts", groupT.GRP_DOWN_COUNTER, DOWN_START, -ONE, STEPS)
-    repeat caseIdx from 0 to NUM_STEP_CASES - ONE                   ' 2. rollovers, one unit each
+    countCounter(@"up counter counts", groupT.GRP_UP_COUNTER, UP_START, COUNT_UP, STEPS)
+    countCounter(@"down counter counts", groupT.GRP_DOWN_COUNTER, DOWN_START, COUNT_DOWN, STEPS)
+    repeat caseIdx from 0 to NUM_STEP_CASES - LAST_OFFSET                   ' 2. rollovers, one unit each
         pCase := @stepCases + caseIdx * CASE_LONGS * dig.BYTES_PER_LONG
-        countClock(@@stepNames[caseIdx], LONG[pCase][C_LAYOUT], LONG[pCase][C_HOURS], LONG[pCase][C_START], LONG[pCase][C_UNIT], ONE)
-    countCounter(@"up 9999 -> 0000", groupT.GRP_UP_COUNTER, FOUR_NINES, ONE, ONE)
-    countCounter(@"down 0 -> 9999", groupT.GRP_DOWN_COUNTER, 0, -ONE, ONE)
-    repeat caseIdx from 0 to NUM_SET_CASES - ONE                    ' 3. setters to each boundary
+        countClock(@@stepNames[caseIdx], LONG[pCase][C_LAYOUT], LONG[pCase][C_HOURS], LONG[pCase][C_START], LONG[pCase][C_UNIT], SINGLE_STEP)
+    countCounter(@"up 9999 -> 0000", groupT.GRP_UP_COUNTER, FOUR_NINES, COUNT_UP, SINGLE_STEP)
+    countCounter(@"down 0 -> 9999", groupT.GRP_DOWN_COUNTER, 0, COUNT_DOWN, SINGLE_STEP)
+    repeat caseIdx from 0 to NUM_SET_CASES - LAST_OFFSET                    ' 3. setters to each boundary
         pCase := @setCases + caseIdx * SET_LONGS * dig.BYTES_PER_LONG
         checkSetTime(@@setNames[caseIdx], LONG[pCase][S_LAYOUT], LONG[pCase][S_HOURS], LONG[pCase][S_H], LONG[pCase][S_M], LONG[pCase][S_S])
     checkSetValue(@"setValue 9999", FOUR_NINES)
@@ -193,10 +210,21 @@ PUB go() | caseIdx, pCase
 
 PRI countClock(pName, layout, hoursMode, startSeconds, unitSeconds, nSteps) | stepIdx, bAllOk
 ' Place clock T at startSeconds, step it nSteps units, and check each step's digits and pixels.
+'
+' @param pName - zero-terminated name of the check
+' @param layout - the clock layout (a groupT.LAYOUT_ value)
+' @param hoursMode - the clock's hours mode (groupT.HOURS_24 or groupT.HOURS_12)
+' @param startSeconds - the clock value to start at, in seconds
+' @param unitSeconds - the size of one counted unit, in seconds
+' @param nSteps - how many units to step
+'
+' Local Variables:
+' @local stepIdx - the step being checked
+' @local bAllOk - TRUE while every step so far matched
 
     placeClock(layout, hoursMode, startSeconds)
     bAllOk := TRUE
-    repeat stepIdx from ONE to nSteps
+    repeat stepIdx from FIRST_STEP to nSteps
         groupT.nextTimeCycle()
         settle()
         bAllOk &= clockMatches(layout, hoursMode, (startSeconds + stepIdx * unitSeconds) // daySpan(layout))
@@ -204,23 +232,51 @@ PRI countClock(pName, layout, hoursMode, startSeconds, unitSeconds, nSteps) | st
 
 PRI countCounter(pName, grpType, startValue, delta, nSteps) | stepIdx, bAllOk
 ' Place counter T at startValue, step it nSteps times, and check each step's digits and pixels.
+'
+' @param pName - zero-terminated name of the check
+' @param grpType - the group type (a groupT.GRP_ value)
+' @param startValue - the counter value to start at
+' @param delta - the counter's step: COUNT_UP or COUNT_DOWN
+' @param nSteps - how many units to step
+'
+' Local Variables:
+' @local stepIdx - the step being checked
+' @local bAllOk - TRUE while every step so far matched
 
     placeCounter(grpType, startValue)
     bAllOk := TRUE
-    repeat stepIdx from ONE to nSteps
+    repeat stepIdx from FIRST_STEP to nSteps
         groupT.nextTimeCycle()
         settle()
-        bAllOk &= counterMatches((startValue + stepIdx * delta + FOUR_NINES + ONE) // (FOUR_NINES + ONE))
+        bAllOk &= counterMatches((startValue + stepIdx * delta + FOUR_NINES + JUST_OVER) // (FOUR_NINES + JUST_OVER))
     utils.checkEqual(bAllOk, pName, TRUE)
 
-PRI checkSetTime(pName, layout, hoursMode, hours, minutes, seconds) | status
+PRI checkSetTime(pName, layout, hoursMode, setHours, setMinutes, setSeconds) | status
+' Place a clock away from every boundary, set it with setTime(), and check it shows the time set.
+'
+' @param pName - zero-terminated name of the check
+' @param layout - the clock layout (a groupT.LAYOUT_ value)
+' @param hoursMode - the clock's hours mode (groupT.HOURS_24 or groupT.HOURS_12)
+' @param setHours - the hours to set
+' @param setMinutes - the minutes to set
+' @param setSeconds - the seconds to set
+'
+' Local Variables:
+' @local status - setTime()'s result
 
-    placeClock(layout, hoursMode, (SEC_PER_HOUR + SEC_PER_MIN + ONE) // daySpan(layout))   ' 01:01:01 (01:01 on MM:SS): away from every boundary
-    status := groupT.setTime(hours, minutes, seconds)
+    placeClock(layout, hoursMode, (groupT.SECONDS_PER_HOUR + groupT.SECONDS_PER_MINUTE + groupT.ONE_SECOND) // daySpan(layout))   ' 01:01:01 (01:01 on MM:SS): away from every boundary
+    status := groupT.setTime(setHours, setMinutes, setSeconds)
     settle()
-    utils.checkEqual(status == morphStatus.SUCCESS and clockMatches(layout, hoursMode, (hours * SEC_PER_HOUR + minutes * SEC_PER_MIN + seconds) // daySpan(layout)), pName, TRUE)
+    utils.checkEqual(status == morphStatus.SUCCESS and clockMatches(layout, hoursMode, (setHours * groupT.SECONDS_PER_HOUR + setMinutes * groupT.SECONDS_PER_MINUTE + setSeconds) // daySpan(layout)), pName, TRUE)
 
 PRI checkSetValue(pName, newValue) | status
+' Place a counter, set it with setValue(), and check it shows the value set.
+'
+' @param pName - zero-terminated name of the check
+' @param newValue - the value to set
+
+' Local Variables:
+' @local status - setValue()'s result
 
     placeCounter(groupT.GRP_DIGITS, SET_VALUE_START)
     status := groupT.setValue(newValue)
@@ -228,33 +284,48 @@ PRI checkSetValue(pName, newValue) | status
     utils.checkEqual(status == morphStatus.SUCCESS and counterMatches(newValue), pName, TRUE)
 
 PRI checkRefusals() | beforeSum
+' Check that the setters refuse bad values and the wrong setter for the type, and that a refusal changes nothing.
 
-    placeClock(groupT.LAYOUT_HH_MM_SS, groupT.HOURS_24, KEEP_HOURS * SEC_PER_HOUR)
+' Local Variables:
+' @local beforeSum - the checksum of T's area before the refused calls
+
+    placeClock(groupT.LAYOUT_HH_MM_SS, groupT.HOURS_24, KEEP_HOURS * groupT.SECONDS_PER_HOUR)
     beforeSum := tSum()
+    ' a time with an hour, minute or second past its range, or an hour below it, is out of range: setTime() must refuse it
     utils.checkEqual(groupT.setTime(BAD_HOURS, 0, 0), @"refuse setTime 24:00:00", morphStatus.E_VALUE_OUT_OF_RANGE)
     utils.checkEqual(groupT.setTime(0, BAD_MINUTES, 0), @"refuse setTime 00:60:00", morphStatus.E_VALUE_OUT_OF_RANGE)
     utils.checkEqual(groupT.setTime(0, 0, BAD_SECONDS), @"refuse setTime 00:00:60", morphStatus.E_VALUE_OUT_OF_RANGE)
-    utils.checkEqual(groupT.setTime(-ONE, 0, 0), @"refuse setTime -1:00:00", morphStatus.E_VALUE_OUT_OF_RANGE)
+    utils.checkEqual(groupT.setTime(BELOW_RANGE, 0, 0), @"refuse setTime -1:00:00", morphStatus.E_VALUE_OUT_OF_RANGE)
+    ' a clock holds a time, not a value: setValue() on it must be refused with E_WRONG_TYPE
     utils.checkEqual(groupT.setValue(ANY_VALUE), @"refuse setValue on a clock", morphStatus.E_WRONG_TYPE)
+    ' BAD_SETTING is neither of the two hours settings nor of the two clock modes: E_UNKNOWN_CLOCK_SETTING
     utils.checkEqual(groupT.setClockHours(BAD_SETTING), @"refuse an unknown hours setting", morphStatus.E_UNKNOWN_CLOCK_SETTING)
     utils.checkEqual(groupT.setClockMode(BAD_SETTING), @"refuse an unknown clock mode", morphStatus.E_UNKNOWN_CLOCK_SETTING)
     settle()
     utils.checkEqual(tSum(), @"  ... and the clock shows what it showed", beforeSum)
     placeCounter(groupT.GRP_DIGITS, KEEP_VALUE)
     beforeSum := tSum()
-    utils.checkEqual(groupT.setValue(FOUR_NINES + ONE), @"refuse setValue 10000 on four digits", morphStatus.E_VALUE_OUT_OF_RANGE)
-    utils.checkEqual(groupT.setValue(-ONE), @"refuse setValue -1", morphStatus.E_VALUE_OUT_OF_RANGE)
+    ' four digits hold 0 to 9999: one over it, and below zero, are out of range; a value group has no time to set
+    utils.checkEqual(groupT.setValue(FOUR_NINES + JUST_OVER), @"refuse setValue 10000 on four digits", morphStatus.E_VALUE_OUT_OF_RANGE)
+    utils.checkEqual(groupT.setValue(BELOW_RANGE), @"refuse setValue -1", morphStatus.E_VALUE_OUT_OF_RANGE)
     utils.checkEqual(groupT.setTime(ANY_H, ANY_M, ANY_S), @"refuse setTime on a value group", morphStatus.E_WRONG_TYPE)
     settle()
     utils.checkEqual(tSum(), @"  ... and the value shows what it showed", beforeSum)
     groupT.removeGroup()
     settle()
-    utils.checkEqual(groupT.setValue(ONE), @"refuse setValue on a removed group", morphStatus.E_NOT_PLACED)
+    ' a removed group holds nothing: setValue() on it must be refused with E_NOT_PLACED
+    utils.checkEqual(groupT.setValue(REMOVED_GROUP_VALUE), @"refuse setValue on a removed group", morphStatus.E_NOT_PLACED)
 
 PRI checkRealTime() | stampMs, tickMs, frames, settledSum
 ' A real-time clock (MM:SS): three injected seconds advance it by three, and its colon dims over a second.
 ' R runs in real time too, stamped at T's tick and animated on the same frame times, so both colons are at
 ' the same point of their second when the pixels are compared.
+
+' Local Variables:
+' @local stampMs - the time the clock stamps its seconds at its first animate
+' @local tickMs - the time three seconds after the stamp
+' @local frames - how many frames the settle loop has run
+' @local settledSum - the checksum of T's area once settled
 
     groupT.setClockMode(groupT.CLOCK_REAL_TIME)
     clearT()                                                    ' before the stamp: placeClock() then has nothing to remove
@@ -282,6 +353,11 @@ PRI checkRealTime() | stampMs, tickMs, frames, settledSum
     groupR.setClockMode(groupR.CLOCK_ACCELERATED)
 
 PRI checkGrowIn() | blankSum, midSum
+' Check that half way through a placement the digits are partly lit: neither blank nor at rest.
+
+' Local Variables:
+' @local blankSum - the checksum of T's area when dark
+' @local midSum - the checksum of T's area half way through the grow-in
 
     clearT()
     display.clearScreen()
@@ -298,6 +374,10 @@ PRI checkGrowIn() | blankSum, midSum
 
 PRI placeClock(layout, hoursMode, seconds)
 ' Place clock T at seconds (accelerated unless set otherwise), and let it grow in and rest.
+'
+' @param layout - the clock layout (a groupT.LAYOUT_ value)
+' @param hoursMode - the clock's hours mode (groupT.HOURS_24 or groupT.HOURS_12)
+' @param seconds - the clock's value, in seconds
 
     clearT()
     display.clearScreen()
@@ -305,15 +385,24 @@ PRI placeClock(layout, hoursMode, seconds)
     groupT.placeGroup(hub75Bffrs.HUB75_ADAPTER_1, T_LEFT, BAND_TOP, AREA_WIDTH, AREA_HEIGHT, groupT.GRP_CLOCK, layout, groupT.ROT_0, color.cOrange, seconds)
     settle()
 
-PRI placeCounter(grpType, value)
+PRI placeCounter(grpType, groupValue)
+' Place counter T showing groupValue, and let it grow in and rest.
+'
+' @param grpType - the group type (a groupT.GRP_ value)
+' @param groupValue - the counter's value
 
     clearT()
     display.clearScreen()
-    groupT.placeGroup(hub75Bffrs.HUB75_ADAPTER_1, T_LEFT, BAND_TOP, AREA_WIDTH, AREA_HEIGHT, grpType, groupT.LAYOUT_4_DIGITS, groupT.ROT_0, color.cOrange, value)
+    groupT.placeGroup(hub75Bffrs.HUB75_ADAPTER_1, T_LEFT, BAND_TOP, AREA_WIDTH, AREA_HEIGHT, grpType, groupT.LAYOUT_4_DIGITS, groupT.ROT_0, color.cOrange, groupValue)
     settle()
 
 PRI clockMatches(layout, hoursMode, seconds) : bMatch
-' T shows seconds: its digits as worked out here, and its pixels as a fresh reference placement.
+' Ask whether T shows seconds: its digits as worked out here, and its pixels as a fresh reference placement.
+'
+' @param layout - the clock layout (a groupT.LAYOUT_ value)
+' @param hoursMode - the clock's hours mode (groupT.HOURS_24 or groupT.HOURS_12)
+' @param seconds - the clock's value, in seconds
+' @returns bMatch - TRUE when both the digits and the pixels match
 
     expectClockDigits(layout, hoursMode, seconds)
     bMatch := digitsMatch()
@@ -323,73 +412,111 @@ PRI clockMatches(layout, hoursMode, seconds) : bMatch
     settleR()
     bMatch &= pixelsMatch()
 
-PRI counterMatches(value) : bMatch
+PRI counterMatches(groupValue) : bMatch
+' Ask whether T shows groupValue: its digits as worked out here, and its pixels as a fresh reference placement.
+'
+' @param groupValue - the counter's value
+' @returns bMatch - TRUE when both the digits and the pixels match
 
-    expectCounterDigits(value)
+    expectCounterDigits(groupValue)
     bMatch := digitsMatch()
     clearR()
-    groupR.placeGroup(hub75Bffrs.HUB75_ADAPTER_1, R_LEFT, BAND_TOP, AREA_WIDTH, AREA_HEIGHT, groupR.GRP_DIGITS, groupR.LAYOUT_4_DIGITS, groupR.ROT_0, color.cOrange, value)
+    groupR.placeGroup(hub75Bffrs.HUB75_ADAPTER_1, R_LEFT, BAND_TOP, AREA_WIDTH, AREA_HEIGHT, groupR.GRP_DIGITS, groupR.LAYOUT_4_DIGITS, groupR.ROT_0, color.cOrange, groupValue)
     settleR()
     bMatch &= pixelsMatch()
 
 PRI digitsMatch() : bMatch | idx
+' Ask whether each digit T shows is the digit expected.
+'
+' @returns bMatch - TRUE when every digit matches
+'
+' Local Variables:
+' @local idx - the digit being compared
 
     bMatch := TRUE
-    repeat idx from 0 to nExpected - ONE
+    repeat idx from 0 to expectedCount - LAST_OFFSET
         if groupT.digitValueAt(idx) <> expected[idx]
             bMatch := FALSE
             debug("DIGITS   digit ", udec_(idx), " shows ", sdec_(groupT.digitValueAt(idx)), " expected ", sdec_(expected[idx]))
 
 PRI pixelsMatch() : bMatch
+' Ask whether T's pixels equal the reference group R's.
+'
+' @returns bMatch - TRUE when the two areas have the same checksum
 
     bMatch := tSum() == rSum()
     if not bMatch
         debug("PIXELS   T and R differ")
 
 PRI expectClockDigits(layout, hoursMode, seconds) | hours, minutes, secs, fieldIdx, fields[MAX_FIELDS], nFields
-' The digits the spec says a clock shows (R-3.3, R-3.4), worked out independently of the library.
+' Work out the digits the spec says a clock shows (R-3.3, R-3.4), independently of the library.
+'
+' @param layout - the clock layout (a groupT.LAYOUT_ value)
+' @param hoursMode - the clock's hours mode (groupT.HOURS_24 or groupT.HOURS_12)
+' @param seconds - the clock's value, in seconds
+'
+' Local Variables:
+' @local hours - the hours field shown
+' @local minutes - the minutes field shown
+' @local secs - the seconds field shown
+' @local fieldIdx - the field being split into two digits
+' @local fields - the fields shown, left to right
+' @local nFields - how many fields the layout shows
 
 #IFDEF MORPH_BREAK_VALUES
-    seconds += (layout == groupT.LAYOUT_HH_MM) ? SEC_PER_MIN : ONE  ' one unit of the smallest field shown
+    seconds += (layout == groupT.LAYOUT_HH_MM) ? groupT.SECONDS_PER_MINUTE : groupT.ONE_SECOND  ' one unit of the smallest field shown
 #ENDIF
-    hours := seconds / SEC_PER_HOUR
-    minutes := (seconds / SEC_PER_MIN) // SEC_PER_MIN
-    secs := seconds // SEC_PER_MIN
+    hours := seconds / groupT.SECONDS_PER_HOUR
+    minutes := (seconds / groupT.SECONDS_PER_MINUTE) // groupT.SECONDS_PER_MINUTE
+    secs := seconds // groupT.SECONDS_PER_MINUTE
     if hoursMode == groupT.HOURS_12
-        hours := hours // HOURS_HALF_DAY
+        hours := hours // groupT.HOURS_PER_HALF_DAY
         if hours == 0
-            hours := HOURS_HALF_DAY
+            hours := groupT.HOURS_PER_HALF_DAY
     case layout
         groupT.LAYOUT_MM_SS:
-            fields[0], fields[ONE], nFields := minutes, secs, TWO_FIELDS
+            fields[0], fields[SECOND_FIELD], nFields := minutes, secs, groupT.TWO_FIELDS
             hours := NO_HOURS
         groupT.LAYOUT_HH_MM:
-            fields[0], fields[ONE], nFields := hours, minutes, TWO_FIELDS
+            fields[0], fields[SECOND_FIELD], nFields := hours, minutes, groupT.TWO_FIELDS
         groupT.LAYOUT_HH_MM_SS:
-            fields[0], fields[ONE], fields[TWO_FIELDS], nFields := hours, minutes, secs, THREE_FIELDS
-    nExpected := 0
-    repeat fieldIdx from 0 to nFields - ONE
-        expected[nExpected++] := fields[fieldIdx] / TENS
-        expected[nExpected++] := fields[fieldIdx] // TENS
+            fields[0], fields[SECOND_FIELD], fields[THIRD_FIELD], nFields := hours, minutes, secs, groupT.THREE_FIELDS
+    expectedCount := 0
+    repeat fieldIdx from 0 to nFields - LAST_OFFSET
+        expected[expectedCount++] := fields[fieldIdx] / groupT.DECIMAL_BASE
+        expected[expectedCount++] := fields[fieldIdx] // groupT.DECIMAL_BASE
     if hours <> NO_HOURS and hoursMode == groupT.HOURS_12 and expected[0] == 0
         expected[0] := dig.DIGIT_HIDDEN                         ' 12-hour: 1:00, not 01:00
 
-PRI expectCounterDigits(value) | idx
+PRI expectCounterDigits(groupValue) | idx
+' Work out the digits a four-digit counter shows for groupValue, independently of the library.
+'
+' @param groupValue - the counter's value
+'
+' Local Variables:
+' @local idx - the digit being worked out, from the last to the first
 
 #IFDEF MORPH_BREAK_VALUES
-    value += ONE
+    groupValue += BREAK_UNITS
 #ENDIF
-    nExpected := COUNTER_DIGITS
-    repeat idx from nExpected - ONE to 0
-        expected[idx] := value // TENS
-        value /= TENS
+    expectedCount := COUNTER_DIGITS
+    repeat idx from expectedCount - LAST_OFFSET to 0
+        expected[idx] := groupValue // groupT.DECIMAL_BASE
+        groupValue /= groupT.DECIMAL_BASE
 
 PRI daySpan(layout) : span
+' Work out how many seconds a clock's value runs through before it wraps: an hour for MM:SS, a day otherwise.
+'
+' @param layout - the clock layout (a groupT.LAYOUT_ value)
+' @returns span - the clock's wrap point, in seconds
 
-    span := (layout == groupT.LAYOUT_MM_SS) ? SEC_PER_HOUR : groupT.HOURS_PER_DAY * SEC_PER_HOUR
+    span := (layout == groupT.LAYOUT_MM_SS) ? groupT.SECONDS_PER_HOUR : groupT.HOURS_PER_DAY * groupT.SECONDS_PER_HOUR
 
 PRI settle() | frames
 ' Animate T until its moves end.
+
+' Local Variables:
+' @local frames - how many frames have been animated
 
     frames := 0
     repeat
@@ -399,6 +526,9 @@ PRI settle() | frames
 PRI clearT() | frames
 ' Remove T and let it morph out: a placed group refuses placeGroup() (E_ALREADY_PLACED).
 
+' Local Variables:
+' @local frames - how many frames the morph-out has taken
+
     if groupT.removeGroup() == morphStatus.SUCCESS
         frames := 0
         repeat while groupT.isPlaced() and frames++ < MAX_SETTLE_FRAMES
@@ -407,6 +537,9 @@ PRI clearT() | frames
 PRI clearR() | frames
 ' Remove reference R and let it morph out, so a fresh R starts on a dark area (no pixels left from the last R).
 
+' Local Variables:
+' @local frames - how many frames the morph-out has taken
+
     if groupR.removeGroup() == morphStatus.SUCCESS
         frames := 0
         repeat while groupR.isPlaced() and frames++ < MAX_SETTLE_FRAMES
@@ -414,6 +547,10 @@ PRI clearR() | frames
             groupR.animate(nowMs)
 
 PRI settleR() | frames
+' Animate reference R until its moves end.
+
+' Local Variables:
+' @local frames - how many frames have been animated
 
     frames := 0
     repeat
@@ -422,17 +559,26 @@ PRI settleR() | frames
     until groupR.isAnimationComplete() or ++frames > MAX_SETTLE_FRAMES
 
 PRI animateAt(atMs)
+' Set the injected time and animate T once.
+'
+' @param atMs - the injected time to animate at
 
     nowMs := atMs
     groupT.animate(nowMs)
 
-PRI tSum() : sum
+PRI tSum() : checksum
+' Compute the checksum of T's area.
+'
+' @returns checksum - the checksum: equal areas give equal sums
 
-    sum := probe.areaChecksum(chainIndex, T_LEFT, BAND_TOP, AREA_WIDTH, AREA_HEIGHT)
+    checksum := probe.areaChecksum(chainIndex, T_LEFT, BAND_TOP, AREA_WIDTH, AREA_HEIGHT)
 
-PRI rSum() : sum
+PRI rSum() : checksum
+' Compute the checksum of reference R's area.
+'
+' @returns checksum - the checksum: equal areas give equal sums
 
-    sum := probe.areaChecksum(chainIndex, R_LEFT, BAND_TOP, AREA_WIDTH, AREA_HEIGHT)
+    checksum := probe.areaChecksum(chainIndex, R_LEFT, BAND_TOP, AREA_WIDTH, AREA_HEIGHT)
 
 CON ' ---- License ----
 

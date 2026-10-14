@@ -7,7 +7,7 @@
 ''               -- see below for terms of use
 ''   E-mail..... stephen@ironsheep.biz
 ''   Started.... Jan 2021
-''   Updated.... 13 Oct 2026
+''   Updated.... 14 Oct 2026
 ''   Version.... v1.0.0
 ''
 '' =================================================================================================
@@ -46,13 +46,17 @@
 
 CON ' public control values
 
-    DIGIT_NO_VALUE = -2   ' digit value when NOT [0-9]
-    DIGIT_HIDDEN = -1     ' digit value when NOT [0-9]
+    DIGIT_NO_VALUE = -2   ' digit value before the digit has shown any value (nothing placed or drawn yet)
+    DIGIT_HIDDEN = -1     ' digit value when the digit is blank: morphed out, or a 12-hour clock's leading zero
 
-    WITH_WRAP = TRUE
-    WITHOUT_WRAP = FALSE
+    WITH_WRAP = TRUE                    ' incrementValue(): after 9, wrap to 0
+    WITHOUT_WRAP = FALSE                ' incrementValue(): after 9, stay at 9
     MAX_SEGMENTS = 7
     LAST_SEGMENT = MAX_SEGMENTS - 1     ' index of the last segment slot (segments[] runs from 0)
+    ' the segment slots, in the order of the bits of segmentsByDigit and of segments[]:
+    '   SLOT_G - middle, SLOT_F - upper left, SLOT_E - lower left, SLOT_D - bottom,
+    '   SLOT_C - lower right, SLOT_B - upper right, SLOT_A - top
+    #0, SLOT_G, SLOT_F, SLOT_E, SLOT_D, SLOT_C, SLOT_B, SLOT_A
     ' the joints, each lit where both of its segments are (see the geometry above), then the colon
     #MAX_SEGMENTS, SLOT_CORNER_AF, SLOT_CORNER_AB, SLOT_CORNER_DE, SLOT_CORNER_DC, SLOT_JOIN_FE, SLOT_BEND_FG, SLOT_BEND_EG, SLOT_JOIN_BC, SLOT_BEND_BG, SLOT_BEND_CG
     MAX_JOINTS = SLOT_BEND_CG - LAST_SEGMENT
@@ -98,6 +102,10 @@ CON ' drawing
     SQUARE_HALF_SHIFT = SHARE_SHIFT + 1 ' u^2 / 2 in Q12: (u * u) >> 13
     NEXT_ONE = 1                        ' one pixel, column or row further on
     MIRRORED = -1                       ' a mask step that runs backwards: the arc mirrored
+    FORWARD = 1                         ' a mask step that runs forwards: the arc as built
+    COEF_ONE = 1                        ' a transform coefficient of one: one display pixel per digit pixel
+    DOUBLE_SHIFT = 1                    ' shifting left by this doubles (a length P is shifted to 2P) ...
+    HALVE_SHIFT = 1                     ' ... and shifting right by this halves (rounded down)
     BYTES_PER_LONG = 4
     LONG_SHIFT = 2                      ' a long index times BYTES_PER_LONG
     BYTE_BITS = 8                       ' the next byte of a packed color
@@ -128,25 +136,25 @@ DAT ' shared drawing tables: one cog draws, one digit at a time, so one copy ser
     ' which segment slots are vertical (G, F, E, D, C, B, A)
     slotVertical    byte    FALSE, TRUE, TRUE, FALSE, TRUE, TRUE, FALSE
     ' each joint's two segment ends, as frameShares indexes: slot x SHARES_PER_SEGMENT + end (SLOT_CORNER_AF .. SLOT_BEND_CG)
-    jointShareA     byte    6 * SHARES_PER_SEGMENT + END_START, 6 * SHARES_PER_SEGMENT + END_FAR, 2 * SHARES_PER_SEGMENT + END_FAR
-                    byte    4 * SHARES_PER_SEGMENT + END_FAR, 1 * SHARES_PER_SEGMENT + END_FAR, 1 * SHARES_PER_SEGMENT + END_FAR
-                    byte    2 * SHARES_PER_SEGMENT + END_START, 5 * SHARES_PER_SEGMENT + END_FAR, 5 * SHARES_PER_SEGMENT + END_FAR
-                    byte    4 * SHARES_PER_SEGMENT + END_START
-    jointShareB     byte    1 * SHARES_PER_SEGMENT + END_START, 5 * SHARES_PER_SEGMENT + END_START, 3 * SHARES_PER_SEGMENT + END_START
-                    byte    3 * SHARES_PER_SEGMENT + END_FAR, 2 * SHARES_PER_SEGMENT + END_START, 0 * SHARES_PER_SEGMENT + END_START
-                    byte    0 * SHARES_PER_SEGMENT + END_START, 4 * SHARES_PER_SEGMENT + END_START, 0 * SHARES_PER_SEGMENT + END_FAR
-                    byte    0 * SHARES_PER_SEGMENT + END_FAR
+    jointShareA     byte    SLOT_A * SHARES_PER_SEGMENT + END_START, SLOT_A * SHARES_PER_SEGMENT + END_FAR, SLOT_E * SHARES_PER_SEGMENT + END_FAR
+                    byte    SLOT_C * SHARES_PER_SEGMENT + END_FAR, SLOT_F * SHARES_PER_SEGMENT + END_FAR, SLOT_F * SHARES_PER_SEGMENT + END_FAR
+                    byte    SLOT_E * SHARES_PER_SEGMENT + END_START, SLOT_B * SHARES_PER_SEGMENT + END_FAR, SLOT_B * SHARES_PER_SEGMENT + END_FAR
+                    byte    SLOT_C * SHARES_PER_SEGMENT + END_START
+    jointShareB     byte    SLOT_F * SHARES_PER_SEGMENT + END_START, SLOT_B * SHARES_PER_SEGMENT + END_START, SLOT_D * SHARES_PER_SEGMENT + END_START
+                    byte    SLOT_D * SHARES_PER_SEGMENT + END_FAR, SLOT_E * SHARES_PER_SEGMENT + END_START, SLOT_G * SHARES_PER_SEGMENT + END_START
+                    byte    SLOT_G * SHARES_PER_SEGMENT + END_START, SLOT_C * SHARES_PER_SEGMENT + END_START, SLOT_G * SHARES_PER_SEGMENT + END_FAR
+                    byte    SLOT_G * SHARES_PER_SEGMENT + END_FAR
 
 VAR ' per digit
     long    chainIndex
-    long    currValue
+    long    currentValue
     long    digitGY             ' the digit's top-left in its group's coordinates (the display's, with no group)
     long    digitGX
     long    digitWidth
     long    digitHeight
-    long    segLength           ' the segment length L, and the stroke T
+    long    digitSegmentLength           ' the segment length L, and the stroke T
     long    stroke
-    long    segCols             ' the straight mask's columns: a segment's length along itself
+    long    segmentColumns             ' the straight mask's columns: a segment's length along itself
     long    pMasks              ' the group's masks: isp_hub75_morphMask.buildFigure()
     long    pRamp               ' the group's intensity ramp: 256 packed colors
     long    bNeedsRender        ' TRUE from a command until the moves it started have been drawn to their end
@@ -168,10 +176,10 @@ VAR ' per digit
     long    drawnOn[MAX_SEGMENTS]
     long    drawnOffset[MAX_SEGMENTS]
     byte    drawnJoint[MAX_JOINTS]   ' each joint's level drawn last
-    long    pCtx                ' the drawing context in use: the group's (setContext()), or ownCtx
+    long    pContext                ' the drawing context in use: the group's (setContext()), or ownContext
     long    screenOriginX       ' where digit pixel (0, 0) lands on the display, and the context's coefficients
     long    screenOriginY       '   and clip rectangle, copied at placement (placeDigit()) so drawing reads none
-    long    coefXX              '   of them through pCtx
+    long    coefXX              '   of them through pContext
     long    coefXY
     long    coefYX
     long    coefYY
@@ -179,7 +187,7 @@ VAR ' per digit
     long    clipTop
     long    clipRight
     long    clipBottom
-    long    ownCtx[CTX_LONGS]   ' a digit with no group draws unrotated, clipped to the display
+    long    ownContext[CTX_LONGS]   ' a digit with no group draws unrotated, clipped to the display
 
 PUB null()
 '' This is NOT a top level object
@@ -194,18 +202,18 @@ PUB initialize(nChainIndex, nPhysicalRows, nPhysicalColumns) | segmentIndex
 
     chainIndex := nChainIndex
     cellRows, cellColumns := hub75Bffrs.cellSizeInPixels(nChainIndex)
-    longfill(@ownCtx, 0, CTX_LONGS)                             ' screen = group coordinates:
-    ownCtx[CTX_XX] := ownCtx[CTX_YY] := NEXT_ONE                '   x = gx, y = gy
-    ownCtx[CTX_CLIP_RIGHT] := nPhysicalColumns - NEXT_ONE
-    ownCtx[CTX_CLIP_BOTTOM] := nPhysicalRows - NEXT_ONE
-    pCtx := @ownCtx
-    currValue := DIGIT_NO_VALUE
+    longfill(@ownContext, 0, CTX_LONGS)                             ' screen = group coordinates:
+    ownContext[CTX_XX] := ownContext[CTX_YY] := COEF_ONE        '   x = gx, y = gy
+    ownContext[CTX_CLIP_RIGHT] := nPhysicalColumns - NEXT_ONE
+    ownContext[CTX_CLIP_BOTTOM] := nPhysicalRows - NEXT_ONE
+    pContext := @ownContext
+    currentValue := DIGIT_NO_VALUE
     repeat segmentIndex from 0 to LAST_SEGMENT
         segments[segmentIndex].initialize()
         drawnMode[segmentIndex] := segments.MODE_NONE
 
 PUB digitSize(segmentLength, thickness) : width, height
-'' The pixel size of a digit with this segment length and stroke (see the geometry above).
+'' Return the pixel size of a digit with this segment length and stroke (see the geometry above).
 ''
 '' @param segmentLength - the segment length L, in pixels
 '' @param thickness - the stroke T, in pixels
@@ -213,7 +221,7 @@ PUB digitSize(segmentLength, thickness) : width, height
 '' @returns height - H = 2(L + 1) + T
 
     width := segmentLength + NEXT_ONE + thickness
-    height := (segmentLength + NEXT_ONE) << NEXT_ONE + thickness
+    height := (segmentLength + NEXT_ONE) << DOUBLE_SHIFT + thickness
 
 PUB placeDigit(row, column, segmentLength, thickness, digitValue, pFigureMasks, pColorRamp, tailX256) : width, height | segmentIndex
 '' Place this digit with its top-left at (row, column) and show digitValue (DIGIT_HIDDEN shows nothing).
@@ -236,29 +244,29 @@ PUB placeDigit(row, column, segmentLength, thickness, digitValue, pFigureMasks, 
 
     digitGX := column
     digitGY := row
-    coefXX := LONG[pCtx][CTX_XX]                                ' the group's transform, copied once
-    coefXY := LONG[pCtx][CTX_XY]
-    coefYX := LONG[pCtx][CTX_YX]
-    coefYY := LONG[pCtx][CTX_YY]
-    screenOriginX := coefXX * digitGX + coefXY * digitGY + LONG[pCtx][CTX_X0]
-    screenOriginY := coefYX * digitGX + coefYY * digitGY + LONG[pCtx][CTX_Y0]
-    clipLeft := LONG[pCtx][CTX_CLIP_LEFT]
-    clipTop := LONG[pCtx][CTX_CLIP_TOP]
-    clipRight := LONG[pCtx][CTX_CLIP_RIGHT]
-    clipBottom := LONG[pCtx][CTX_CLIP_BOTTOM]
-    segLength := segmentLength
+    coefXX := LONG[pContext][CTX_XX]                                ' the group's transform, copied once
+    coefXY := LONG[pContext][CTX_XY]
+    coefYX := LONG[pContext][CTX_YX]
+    coefYY := LONG[pContext][CTX_YY]
+    screenOriginX := coefXX * digitGX + coefXY * digitGY + LONG[pContext][CTX_X0]
+    screenOriginY := coefYX * digitGX + coefYY * digitGY + LONG[pContext][CTX_Y0]
+    clipLeft := LONG[pContext][CTX_CLIP_LEFT]
+    clipTop := LONG[pContext][CTX_CLIP_TOP]
+    clipRight := LONG[pContext][CTX_CLIP_RIGHT]
+    clipBottom := LONG[pContext][CTX_CLIP_BOTTOM]
+    digitSegmentLength := segmentLength
     stroke := thickness
-    segCols := figure.straightColumns(thickness, segmentLength)
+    segmentColumns := figure.straightColumns(thickness, segmentLength)
     pMasks := pFigureMasks
     pRamp := pColorRamp
     width, height := digitSize(segmentLength, thickness)
     digitWidth := width
     digitHeight := height
     repeat segmentIndex from 0 to LAST_SEGMENT
-        segments[segmentIndex].placeSegment(NEXT_ONE << segmentIndex, segCols << SUBPIXEL_SHIFT, (segmentLength + NEXT_ONE) << SUBPIXEL_SHIFT, tailX256)
+        segments[segmentIndex].placeSegment(segments.SOR_MIDDLE_G << segmentIndex, segmentColumns << SUBPIXEL_SHIFT, (segmentLength + NEXT_ONE) << SUBPIXEL_SHIFT, tailX256)
         drawnMode[segmentIndex] := segments.MODE_NONE
     bytefill(@drawnJoint, 0, MAX_JOINTS)
-    currValue := DIGIT_NO_VALUE
+    currentValue := DIGIT_NO_VALUE
     bNeedsRender := FALSE
     bColon := FALSE
     colonLevel := drawnColonLevel := 0
@@ -270,7 +278,7 @@ PUB setValue(digitValue)
 ''
 '' @param digitValue - 0-9, or DIGIT_HIDDEN
 
-    if currValue <> digitValue
+    if currentValue <> digitValue
         reconfigureForDigit(digitValue)
 
 PUB incrementValue(shouldWrap) | nextValue
@@ -278,7 +286,10 @@ PUB incrementValue(shouldWrap) | nextValue
 ''
 '' @param shouldWrap - WITH_WRAP or WITHOUT_WRAP
 
-    nextValue := currValue + NEXT_ONE
+' Local Variables:
+' @local nextValue - the digit to show next
+
+    nextValue := currentValue + NEXT_ONE
     if nextValue > MAX_DIGIT_VALUE
         if shouldWrap <> WITH_WRAP
             nextValue := MAX_DIGIT_VALUE
@@ -316,8 +327,8 @@ PUB animate(nowMs) : movingCount | segmentIndex
 PUB setMotion(durationMs, easeStyle) | segmentIndex
 '' Set how every segment of this digit moves: the duration of each move and its easing.
 ''
-'' @param durationMs - Duration of each move in ms; morphCounters.setMoveDuration() checks the range
-'' @param easeStyle - Easing style, timeBase.EASE_LINEAR or timeBase.EASE_SMOOTH; morphCounters.setEasing() checks it
+'' @param durationMs - Duration of each move in ms, MIN_MOVE_MS to MAX_TIME_MS of isp_hub75_morphCounters (timeBase.DEFAULT_MOVE_MS when never set); a move in flight follows it from the next animate()
+'' @param easeStyle - Easing style, timeBase.EASE_LINEAR (constant speed, used when never set) or timeBase.EASE_SMOOTH (slow start and end); a move in flight follows it from the next animate()
 
 ' Local Variables:
 ' @local segmentIndex - Index of the segment being set
@@ -341,7 +352,7 @@ PUB commandSegment(segmentIndex, commandBits) : status
 ''
 '' @param segmentIndex - the slot, 0 (G) to LAST_SEGMENT (A)
 '' @param commandBits - Command byte %GGG_AAAT
-'' @returns status - the segment's status: morphStatus SUCCESS or E_BAD_COMMAND
+'' @returns status - the segment's status: morphStatus.SUCCESS or morphStatus.E_BAD_COMMAND
 
     status := segments[segmentIndex].commandSegment(commandBits)
     bNeedsRender := TRUE
@@ -351,26 +362,29 @@ PUB morphOut() | segmentIndex
 '' and ends hidden.
 ''
 
+' Local Variables:
+' @local segmentIndex - the segment slot being turned off
+
     repeat segmentIndex from 0 to LAST_SEGMENT
         if slotVertical[segmentIndex]
             segments[segmentIndex].commandSegment(segments.CMD_TURN_OFF + segments.CMD_TOP_DOWN)
         else
             segments[segmentIndex].commandSegment(segments.CMD_TURN_OFF + segments.CMD_LT_TO_RT)
-    currValue := DIGIT_HIDDEN
+    currentValue := DIGIT_HIDDEN
     bNeedsRender := TRUE
 
 PUB value() : digitValue
-'' The digit this digit shows, or is morphing to: 0-9, DIGIT_HIDDEN, or DIGIT_NO_VALUE before its first value.
+'' Return the digit this digit shows, or is morphing to: 0-9, DIGIT_HIDDEN, or DIGIT_NO_VALUE before its first value.
 ''
 '' @returns digitValue - the digit's value
 
-    digitValue := currValue
+    digitValue := currentValue
 
 PUB setColon(leftU, dotSide, upperV, lowerV)
 '' Draw a colon after this digit: two round dots (digit-local), lit fully until setColonLevel() changes it. The
 '' group's masks hold a dot of this side (isp_hub75_morphMask.buildFigure()).
 ''
-'' @param leftU - the dots' left column, digit-local (past the digit's right edge)
+'' @param leftU - left column of the part or rectangle, digit-local, inclusive
 '' @param dotSide - each dot's side, in pixels
 '' @param upperV - the upper dot's top row, digit-local
 '' @param lowerV - the lower dot's top row, digit-local
@@ -399,7 +413,7 @@ PUB setContext(pGroupContext)
 ''
 '' @param pGroupContext - hub address of the group's CTX_LONGS longs
 
-    pCtx := pGroupContext
+    pContext := pGroupContext
 
 PRI setFigure() | period, inset, joinTop, pStraight, pJoin
 ' Fill the shared tables' fixed parts for this digit's figure: every part's home box, and where its mask lies
@@ -409,41 +423,54 @@ PRI setFigure() | period, inset, joinTop, pStraight, pJoin
 ' @local period - P = L + 1: the spacing of the centre lines
 ' @local inset - q = (T + 1) / 2: where a straight run's mask starts past its corner
 ' @local joinTop - a side join's top row: P - q - e
-' @local pStraight, pJoin - the straight and join masks
+' @local pStraight - the straight mask
+' @local pJoin - the join mask
 
-    if figureMasks <> pMasks or figureLength <> segLength or figureStroke <> stroke
-        figureMasks, figureLength, figureStroke := pMasks, segLength, stroke
-        period := segLength + NEXT_ONE
-        inset := (stroke + NEXT_ONE) >> NEXT_ONE
+    if figureMasks <> pMasks or figureLength <> digitSegmentLength or figureStroke <> stroke
+        figureMasks, figureLength, figureStroke := pMasks, digitSegmentLength, stroke
+        period := digitSegmentLength + NEXT_ONE
+        inset := (stroke + NEXT_ONE) >> HALVE_SHIFT
         joinTop := period - inset - figure.capsulePhase(stroke)
         pStraight := pMasks
-        pJoin := pMasks + figure.joinOffset(stroke, segLength)
-        setSlotMask(encod segments.SOR_TOP_A, inset, 0, FALSE, pStraight, segCols)
-        setSlotMask(encod segments.SOR_MIDDLE_G, inset, period, FALSE, pStraight, segCols)
-        setSlotMask(encod segments.SOR_BOTTOM_D, inset, period << NEXT_ONE, FALSE, pStraight, segCols)
-        setSlotMask(encod segments.SOR_LEFT_F, 0, inset, TRUE, pStraight, segCols)
-        setSlotMask(encod segments.SOR_LEFT_E, 0, period + inset, TRUE, pStraight, segCols)
-        setSlotMask(encod segments.SOR_RIGHT_B, period, inset, TRUE, pStraight, segCols)
-        setSlotMask(encod segments.SOR_RIGHT_C, period, period + inset, TRUE, pStraight, segCols)
+        pJoin := pMasks + figure.joinOffset(stroke, digitSegmentLength)
+        setSlotMask(encod segments.SOR_TOP_A, inset, 0, FALSE, pStraight, segmentColumns)
+        setSlotMask(encod segments.SOR_MIDDLE_G, inset, period, FALSE, pStraight, segmentColumns)
+        setSlotMask(encod segments.SOR_BOTTOM_D, inset, period << DOUBLE_SHIFT, FALSE, pStraight, segmentColumns)
+        setSlotMask(encod segments.SOR_LEFT_F, 0, inset, TRUE, pStraight, segmentColumns)
+        setSlotMask(encod segments.SOR_LEFT_E, 0, period + inset, TRUE, pStraight, segmentColumns)
+        setSlotMask(encod segments.SOR_RIGHT_B, period, inset, TRUE, pStraight, segmentColumns)
+        setSlotMask(encod segments.SOR_RIGHT_C, period, period + inset, TRUE, pStraight, segmentColumns)
         setJoinSlot(SLOT_JOIN_FE, 0, joinTop, pJoin)
         setJoinSlot(SLOT_JOIN_BC, period, joinTop, pJoin)
-        setArc(SLOT_CORNER_AF, 0, 0, NEXT_ONE, NEXT_ONE)
-        setArc(SLOT_CORNER_AB, period - NEXT_ONE, 0, MIRRORED, NEXT_ONE)
-        setArc(SLOT_CORNER_DE, 0, period << NEXT_ONE - NEXT_ONE, NEXT_ONE, MIRRORED)
-        setArc(SLOT_CORNER_DC, period - NEXT_ONE, period << NEXT_ONE - NEXT_ONE, MIRRORED, MIRRORED)
-        setArc(SLOT_BEND_FG, 0, period - NEXT_ONE, NEXT_ONE, MIRRORED)
-        setArc(SLOT_BEND_EG, 0, period, NEXT_ONE, NEXT_ONE)
+        setArc(SLOT_CORNER_AF, 0, 0, FORWARD, FORWARD)
+        setArc(SLOT_CORNER_AB, period - NEXT_ONE, 0, MIRRORED, FORWARD)
+        setArc(SLOT_CORNER_DE, 0, period << DOUBLE_SHIFT - NEXT_ONE, FORWARD, MIRRORED)
+        setArc(SLOT_CORNER_DC, period - NEXT_ONE, period << DOUBLE_SHIFT - NEXT_ONE, MIRRORED, MIRRORED)
+        setArc(SLOT_BEND_FG, 0, period - NEXT_ONE, FORWARD, MIRRORED)
+        setArc(SLOT_BEND_EG, 0, period, FORWARD, FORWARD)
         setArc(SLOT_BEND_BG, period - NEXT_ONE, period - NEXT_ONE, MIRRORED, MIRRORED)
-        setArc(SLOT_BEND_CG, period - NEXT_ONE, period, MIRRORED, NEXT_ONE)
+        setArc(SLOT_BEND_CG, period - NEXT_ONE, period, MIRRORED, FORWARD)
 
 PRI setJoinSlot(slot, leftU, topV, pMask)
 ' A side join: the join mask at (leftU, topV), along v.
+'
+' @param slot - the slot (segment, joint or colon dot) the call is for
+' @param leftU - left column of the part or rectangle, digit-local, inclusive
+' @param topV - top row of the part or rectangle, digit-local, inclusive
+' @param pMask - hub address of the mask the part is drawn through
 
     setSlotMask(slot, leftU, topV, TRUE, pMask, figure.joinColumns(stroke))
 
 PRI setSlotMask(slot, leftU, topV, bVertical, pMask, nCols) | pBox, pEntry
 ' A capsule's fixed fields: its home box, its mask read as it is (along u) or transposed (along v), and its
 ' lit shares along it; a vertical one slides sideways over its stroke's columns.
+'
+' @param slot - the slot (segment, joint or colon dot) the call is for
+' @param leftU - left column of the part or rectangle, digit-local, inclusive
+' @param topV - top row of the part or rectangle, digit-local, inclusive
+' @param bVertical - TRUE when the capsule runs along v (its mask is transposed)
+' @param pMask - hub address of the mask the part is drawn through
+' @param nCols - the mask's columns
 
 ' Local Variables:
 ' @local pBox - the slot's home box
@@ -456,24 +483,31 @@ PRI setSlotMask(slot, leftU, topV, bVertical, pMask, nCols) | pBox, pEntry
     LONG[pEntry][F_SLIDE_WIDTH] := stroke
     if bVertical
         LONG[pBox][BOX_U1], LONG[pBox][BOX_V1] := leftU + stroke - NEXT_ONE, topV + nCols - NEXT_ONE
-        LONG[pEntry][F_STEP_U], LONG[pEntry][F_STEP_V] := nCols, NEXT_ONE
-        LONG[pEntry][F_LIT_U], LONG[pEntry][F_LIT_V] := 0, NEXT_ONE
+        LONG[pEntry][F_STEP_U], LONG[pEntry][F_STEP_V] := nCols, FORWARD
+        LONG[pEntry][F_LIT_U], LONG[pEntry][F_LIT_V] := 0, FORWARD
     else
         LONG[pBox][BOX_U1], LONG[pBox][BOX_V1] := leftU + nCols - NEXT_ONE, topV + stroke - NEXT_ONE
-        LONG[pEntry][F_STEP_U], LONG[pEntry][F_STEP_V] := NEXT_ONE, nCols
-        LONG[pEntry][F_LIT_U], LONG[pEntry][F_LIT_V] := NEXT_ONE, 0
+        LONG[pEntry][F_STEP_U], LONG[pEntry][F_STEP_V] := FORWARD, nCols
+        LONG[pEntry][F_LIT_U], LONG[pEntry][F_LIT_V] := FORWARD, 0
     LONG[pEntry][F_MASK] := pMask - leftU * LONG[pEntry][F_STEP_U] - topV * LONG[pEntry][F_STEP_V]
     LONG[pEntry][F_LIT] := @litTable + slot * LIT_COLUMNS - leftU * LONG[pEntry][F_LIT_U] - topV * LONG[pEntry][F_LIT_V]
     longmove(pEntry + F_BOX_U0 * BYTES_PER_LONG, pBox, BOX_LONGS)
 
 PRI setArc(slot, leftU, topV, stepU, stepV) | side, pBox, pEntry, firstU, firstV
 ' A corner or bend: the arc mask at (leftU, topV), mirrored across (stepU MIRRORED) and/or down (stepV MIRRORED).
+'
+' @param slot - the slot (segment, joint or colon dot) the call is for
+' @param leftU - left column of the part or rectangle, digit-local, inclusive
+' @param topV - top row of the part or rectangle, digit-local, inclusive
+' @param stepU - FORWARD, or MIRRORED to read the mask right to left
+' @param stepV - FORWARD, or MIRRORED to read the mask bottom to top
 
 ' Local Variables:
 ' @local side - the arc mask's side
 ' @local pBox - the slot's home box
 ' @local pEntry - the slot's slotTable entry
-' @local firstU, firstV - the local pixel that reads the mask's first byte
+' @local firstU - the local column that reads the mask's first byte
+' @local firstV - the local row that reads the mask's first byte
 
     side := figure.arcSide(stroke)
     pBox := @homeBoxes + slot * BOX_LONGS * BYTES_PER_LONG
@@ -484,7 +518,7 @@ PRI setArc(slot, leftU, topV, stepU, stepV) | side, pBox, pEntry, firstU, firstV
     firstV := (stepV == MIRRORED) ? LONG[pBox][BOX_V1] : topV
     LONG[pEntry][F_STEP_U] := stepU
     LONG[pEntry][F_STEP_V] := stepV * side
-    LONG[pEntry][F_MASK] := pMasks + figure.arcOffset(stroke, segLength) - firstU * stepU - firstV * LONG[pEntry][F_STEP_V]
+    LONG[pEntry][F_MASK] := pMasks + figure.arcOffset(stroke, digitSegmentLength) - firstU * stepU - firstV * LONG[pEntry][F_STEP_V]
     longmove(pEntry + F_BOX_U0 * BYTES_PER_LONG, pBox, BOX_LONGS)
 
 PRI drawChanges() | slot, mode, head, tail, bFromEnd, bOn, offset, colLo, colHi, posLo, posHi, jointIdx, level, pEntry
@@ -493,9 +527,16 @@ PRI drawChanges() | slot, mode, head, tail, bFromEnd, bOn, offset, colLo, colHi,
 
 ' Local Variables:
 ' @local slot - the segment slot
-' @local mode, head, tail, bFromEnd, bOn, offset - the slot's renderState() this frame
-' @local colLo, colHi - a snake's changed columns, from its start end
-' @local posLo, posHi - the lower and higher of two positions, in 1/256 pixel
+' @local mode - the slot's renderState() mode this frame
+' @local head - the slot's snake head this frame, in 1/256 pixel
+' @local tail - the slot's snake tail this frame, in 1/256 pixel
+' @local bFromEnd - TRUE when the snake runs from the segment's far end
+' @local bOn - TRUE when the snake is turning on
+' @local offset - the slot's slide offset this frame, in 1/256 pixel
+' @local colLo - a snake's lowest changed column, from its start end
+' @local colHi - a snake's highest changed column, from its start end
+' @local posLo - the lower of two positions, in 1/256 pixel
+' @local posHi - the higher of two positions, in 1/256 pixel
 ' @local jointIdx - the joint being loaded
 ' @local level - a segment's lit share at both ends when at rest; a joint's level
 ' @local pEntry - the slot's slotTable entry
@@ -510,7 +551,7 @@ PRI drawChanges() | slot, mode, head, tail, bFromEnd, bOn, offset, colLo, colHi,
         if mode == segments.MODE_SNAKE                                      ' its lit shares, and at its two ends (a sliding
             fillLitShares(slot, head, tail, bOn, bFromEnd)                  '   column is away from its joints)
             frameShares[slot * SHARES_PER_SEGMENT + END_START] := litTable[slot * LIT_COLUMNS]
-            frameShares[slot * SHARES_PER_SEGMENT + END_FAR] := litTable[slot * LIT_COLUMNS + segCols - NEXT_ONE]
+            frameShares[slot * SHARES_PER_SEGMENT + END_FAR] := litTable[slot * LIT_COLUMNS + segmentColumns - NEXT_ONE]
         else
             level := (mode == segments.MODE_FULL) ? LEVEL_FULL : 0
             frameShares[slot * SHARES_PER_SEGMENT + END_START] := frameShares[slot * SHARES_PER_SEGMENT + END_FAR] := level
@@ -521,10 +562,10 @@ PRI drawChanges() | slot, mode, head, tail, bFromEnd, bOn, offset, colLo, colHi,
             posLo := (head <# drawnHead[slot]) - tail - segments.SUBPIXELS
             posHi := (head #> drawnHead[slot]) + segments.SUBPIXELS
             colLo := (posLo sar SUBPIXEL_SHIFT) #> 0
-            colHi := (posHi sar SUBPIXEL_SHIFT) <# (segCols - NEXT_ONE)
+            colHi := (posHi sar SUBPIXEL_SHIFT) <# (segmentColumns - NEXT_ONE)
             if bFromEnd                                                     ' columns counted from the far end: mirror the range
-                posLo := segCols - NEXT_ONE - colHi
-                colHi := segCols - NEXT_ONE - colLo
+                posLo := segmentColumns - NEXT_ONE - colHi
+                colHi := segmentColumns - NEXT_ONE - colLo
                 colLo := posLo
             if colLo <= colHi
                 drawAlong(slot, colLo, colHi)
@@ -559,6 +600,9 @@ DAT ' this frame's lit shares at each segment's ends, for its joints (the digits
 
 PRI colonStateLoad(slot, topV) | pEntry
 ' Load one colon dot's slotTable entry: the dot mask at the colon's level, or nothing (no colon, or level 0).
+'
+' @param slot - the slot (segment, joint or colon dot) the call is for
+' @param topV - top row of the part or rectangle, digit-local, inclusive
 
 ' Local Variables:
 ' @local pEntry - the slot's slotTable entry
@@ -567,21 +611,35 @@ PRI colonStateLoad(slot, topV) | pEntry
     if bColon and colonLevel > 0
         LONG[pEntry][F_MODE] := segments.MODE_LEVEL
         LONG[pEntry][F_BOX_U0], LONG[pEntry][F_BOX_V0], LONG[pEntry][F_BOX_U1], LONG[pEntry][F_BOX_V1] := colonBox(topV)
-        LONG[pEntry][F_STEP_U], LONG[pEntry][F_STEP_V] := NEXT_ONE, colonDotSize
-        LONG[pEntry][F_MASK] := pMasks + figure.dotOffset(stroke, segLength) - colonLeftU - topV * colonDotSize
+        LONG[pEntry][F_STEP_U], LONG[pEntry][F_STEP_V] := FORWARD, colonDotSize
+        LONG[pEntry][F_MASK] := pMasks + figure.dotOffset(stroke, digitSegmentLength) - colonLeftU - topV * colonDotSize
         LONG[pEntry][F_PARAM] := colonLevel
     else
         LONG[pEntry][F_MODE] := segments.MODE_NONE              ' the shared table may hold the last colon digit's dot
 
 PRI colonBox(topV) : leftU, boxTopV, rightU, bottomV
-' One colon dot's box, digit-local: the dot whose top row is topV.
+' Return one colon dot's box, digit-local: the dot whose top row is topV.
+'
+' @param topV - top row of the part or rectangle, digit-local, inclusive
+' @returns leftU - the box's left column
+' @returns boxTopV - the box's top row
+' @returns rightU - the box's right column, inclusive
+' @returns bottomV - the box's bottom row, inclusive
 
     leftU, boxTopV := colonLeftU, topV
     rightU, bottomV := colonLeftU + colonDotSize - NEXT_ONE, topV + colonDotSize - NEXT_ONE
 
 PRI stateBox(slot, mode, offset) : leftU, topV, rightU, bottomV | pBox
-' A slot's box (local, inclusive) in this mode: a slide's column moved sideways by offset (1/256 pixel), any
+' Return a slot's box (local, inclusive) in this mode: a slide's column moved sideways by offset (1/256 pixel), any
 ' other mode at home.
+'
+' @param slot - the slot (segment, joint or colon dot) the call is for
+' @param mode - the slot's renderState() mode
+' @param offset - the slide offset, in 1/256 pixel
+' @returns leftU - the box's left column
+' @returns topV - the box's top row
+' @returns rightU - the box's right column, inclusive
+' @returns bottomV - the box's bottom row, inclusive
 
 ' Local Variables:
 ' @local pBox - the slot's home box
@@ -594,6 +652,16 @@ PRI stateBox(slot, mode, offset) : leftU, topV, rightU, bottomV | pBox
 
 PRI drawStateRect(slot, mode, offset) | leftU, topV, rightU, bottomV
 ' Redraw the box a slot covers in this mode at this offset (nothing for MODE_NONE).
+'
+' @param slot - the slot (segment, joint or colon dot) the call is for
+' @param mode - the slot's renderState() mode
+' @param offset - the slide offset, in 1/256 pixel
+
+' Local Variables:
+' @local leftU - the box's left column
+' @local topV - the box's top row
+' @local rightU - the box's right column
+' @local bottomV - the box's bottom row
 
     if mode <> segments.MODE_NONE
         leftU, topV, rightU, bottomV := stateBox(slot, mode, offset)
@@ -601,6 +669,18 @@ PRI drawStateRect(slot, mode, offset) | leftU, topV, rightU, bottomV
 
 PRI drawSlideRect(slot, fromOffset, toOffset) | leftU, topV, rightU, bottomV, otherLeftU, otherRightU
 ' Redraw where a sliding column was and where it is now, as one rectangle: the two boxes overlap.
+'
+' @param slot - the slot (segment, joint or colon dot) the call is for
+' @param fromOffset - the slide offset drawn last, in 1/256 pixel
+' @param toOffset - the slide offset now, in 1/256 pixel
+
+' Local Variables:
+' @local leftU - the earlier box's left column
+' @local topV - the box's top row
+' @local rightU - the earlier box's right column
+' @local bottomV - the box's bottom row
+' @local otherLeftU - the later box's left column
+' @local otherRightU - the later box's right column
 
     leftU, topV, rightU, bottomV := stateBox(slot, segments.MODE_SLIDE, fromOffset)
     otherLeftU, _, otherRightU, _ := stateBox(slot, segments.MODE_SLIDE, toOffset)
@@ -608,6 +688,10 @@ PRI drawSlideRect(slot, fromOffset, toOffset) | leftU, topV, rightU, bottomV, ot
 
 PRI drawAlong(slot, colLo, colHi) | pBox
 ' Redraw columns colLo..colHi of a segment's straight run (along it), its full width.
+'
+' @param slot - the slot (segment, joint or colon dot) the call is for
+' @param colLo - the first column to redraw, from the run's start end
+' @param colHi - the last column to redraw, from the run's start end
 
 ' Local Variables:
 ' @local pBox - the slot's home box
@@ -621,11 +705,19 @@ PRI drawAlong(slot, colLo, colHi) | pBox
 PRI drawLocalRect(leftU, topV, rightU, bottomV) | idx, pRect, unionU0, unionV0, unionU1, unionV1, area
 ' Note a local rectangle to redraw this frame (flushDirty() draws them): merged into one already noted when
 ' their union costs less than drawing both (MERGE_SLACK_PIXELS), and the result merged again the same way.
+'
+' @param leftU - left column of the part or rectangle, digit-local, inclusive
+' @param topV - top row of the part or rectangle, digit-local, inclusive
+' @param rightU - right column of the part or rectangle, digit-local, inclusive
+' @param bottomV - bottom row of the part or rectangle, digit-local, inclusive
 
 ' Local Variables:
 ' @local idx - the noted rectangle being compared
 ' @local pRect - its entry
-' @local unionU0, unionV0, unionU1, unionV1 - the union of the two
+' @local unionU0 - the union's left column
+' @local unionV0 - the union's top row
+' @local unionU1 - the union's right column
+' @local unionV1 - the union's bottom row
 ' @local area - this rectangle's pixels
 
     area := (rightU - leftU + NEXT_ONE) * (bottomV - topV + NEXT_ONE)
@@ -652,6 +744,10 @@ PRI drawLocalRect(leftU, topV, rightU, bottomV) | idx, pRect, unionU0, unionV0, 
 PRI flushDirty() | idx, pRect
 ' Redraw every rectangle noted this frame, then forget them.
 
+' Local Variables:
+' @local idx - the noted rectangle being drawn
+' @local pRect - its entry
+
     repeat idx from 0 to dirtyCount - NEXT_ONE
         pRect := @dirtyRects + idx * DIRTY_LONGS * BYTES_PER_LONG
         drawRect(LONG[pRect][DIRTY_U0], LONG[pRect][DIRTY_V0], LONG[pRect][DIRTY_U1], LONG[pRect][DIRTY_V1])
@@ -660,11 +756,17 @@ PRI flushDirty() | idx, pRect
 PRI drawRect(leftU, topV, rightU, bottomV) | bandWidth, bandRows, bandTop, bandBottom
 ' Redraw a local rectangle, in bands of whole rows that fit levelBuffer: each band composited (composeBand()),
 ' then carried onto the display (drawBand()).
+'
+' @param leftU - left column of the part or rectangle, digit-local, inclusive
+' @param topV - top row of the part or rectangle, digit-local, inclusive
+' @param rightU - right column of the part or rectangle, digit-local, inclusive
+' @param bottomV - bottom row of the part or rectangle, digit-local, inclusive
 
 ' Local Variables:
 ' @local bandWidth - the rectangle's width: every band's
 ' @local bandRows - the rows a band holds
-' @local bandTop, bandBottom - the band being drawn (inclusive)
+' @local bandTop - the band's top row (inclusive)
+' @local bandBottom - the band's bottom row (inclusive)
 
     bandWidth := rightU - leftU + NEXT_ONE
     bandRows := LEVEL_BUFFER_BYTES / bandWidth
@@ -680,13 +782,28 @@ PRI drawBand(leftU, topV, rightU, bottomV) | firstX, lastX, firstY, lastY, corne
 ' rectangle, split into blocks that each lie in one cell (one panel), each block drawn by drawBlock() at the
 ' address and steps the driver's address rule gives (hub75Bffrs.mountedBlockRun()); then the driver's window
 ' watch is told what was written.
+'
+' @param leftU - left column of the part or rectangle, digit-local, inclusive
+' @param topV - top row of the part or rectangle, digit-local, inclusive
+' @param rightU - right column of the part or rectangle, digit-local, inclusive
+' @param bottomV - bottom row of the part or rectangle, digit-local, inclusive
 
 ' Local Variables:
-' @local firstX, lastX, firstY, lastY - the band on the display, clipped
-' @local cornerX, cornerY - the band's far corner on the display
-' @local blockX0, blockX1, blockY0, blockY1 - the block being drawn: the band's part in one cell
-' @local pPixel, rightStep, downStep - the block's top-left pixel address and its steps, or NO_PIXEL
-' @local blockU, blockV - the block's top-left display pixel in digit coordinates
+' @local firstX - the band's left column on the display, clipped
+' @local lastX - the band's right column on the display, clipped
+' @local firstY - the band's top row on the display, clipped
+' @local lastY - the band's bottom row on the display, clipped
+' @local cornerX - the band's far corner column on the display
+' @local cornerY - the band's far corner row on the display
+' @local blockX0 - the block being drawn: its left column
+' @local blockX1 - the block being drawn: its right column
+' @local blockY0 - the block being drawn: its top row
+' @local blockY1 - the block being drawn: its bottom row
+' @local pPixel - the block's top-left pixel address, or NO_PIXEL
+' @local rightStep - the signed bytes to the next pixel right in the block
+' @local downStep - the signed bytes to the next pixel down in the block
+' @local blockU - the block's top-left display pixel, digit column
+' @local blockV - the block's top-left display pixel, digit row
 ' @local bandWidth - the band's width: levelBuffer's row length
 
     bandWidth := rightU - leftU + NEXT_ONE
@@ -713,13 +830,23 @@ PRI drawBand(leftU, topV, rightU, bottomV) | firstX, lastX, firstY, lastY, corne
         hub75Bffrs.noteDrawn(chainIndex, firstY, firstX, lastY, lastX)
 
 PRI toScreen(localU, localV) : screenX, screenY
-' A digit pixel's place on the display, through the group's transform.
+' Return a digit pixel's place on the display, through the group's transform.
+'
+' @param localU - the pixel's column, digit-local
+' @param localV - the pixel's row, digit-local
+' @returns screenX - its column on the display
+' @returns screenY - its row on the display
 
     screenX := screenOriginX + coefXX * localU + coefXY * localV
     screenY := screenOriginY + coefYX * localU + coefYY * localV
 
 PRI toLocal(screenX, screenY) : localU, localV
-' A display pixel in digit coordinates: the transform's inverse (a rotation's inverse is its transpose).
+' Return a display pixel in digit coordinates: the transform's inverse (a rotation's inverse is its transpose).
+'
+' @param screenX - the pixel's column on the display
+' @param screenY - the pixel's row on the display
+' @returns localU - its column, digit-local
+' @returns localV - its row, digit-local
 
     screenX -= screenOriginX
     screenY -= screenOriginY
@@ -731,8 +858,10 @@ PRI composeBand(bandU0, bandV0, bandU1, bandV1) | pSlots, pBuf, bandWidth, slots
 ' pixel of its box inside the band, the brightest kept. A part's level is its mask byte, times its snake's lit
 ' share or its level (/ 255, rounded), or its mask slid sideways (two columns blended).
 '
-' @param bandU0, bandV0 - the band's top-left, digit-local
-' @param bandU1, bandV1 - its bottom-right, digit-local
+' @param bandU0 - the band's left column, digit-local
+' @param bandV0 - the band's top row, digit-local
+' @param bandU1 - the band's right column, digit-local
+' @param bandV1 - the band's bottom row, digit-local
 
 ' Local Variables (the first 16 longs, mapped to cog registers by name):
 ' @local pSlots - the slot entry being read
@@ -771,15 +900,15 @@ PRI composeBand(bandU0, bandV0, bandU1, bandV1) | pSlots, pBuf, bandWidth, slots
                 add     nRows, #NEXT_ONE
                 mov     rowMask, rBoxU0                         ' its first pixel's mask byte ...
                 muls    rowMask, rStepU
-                mov     t1, rBoxV0
-                muls    t1, rStepV
-                add     rowMask, t1
+                mov     scratchA, rBoxV0
+                muls    scratchA, rStepV
+                add     rowMask, scratchA
                 add     rowMask, rMask
                 mov     rowLit, rBoxU0                          ' ... lit share ...
                 muls    rowLit, rLitU
-                mov     t1, rBoxV0
-                muls    t1, rLitV
-                add     rowLit, t1
+                mov     scratchA, rBoxV0
+                muls    scratchA, rLitV
+                add     rowLit, scratchA
                 add     rowLit, rLit
                 mov     rowBuf, rBoxV0                          ' ... and level in the band
                 sub     rowBuf, bandV0
@@ -801,17 +930,17 @@ PRI composeBand(bandU0, bandV0, bandU1, bandV1) | pSlots, pBuf, bandWidth, slots
 .snakePixel
                 rdbyte  level, aMask
                 add     aMask, rStepU
-                rdbyte  t2, aLit
+                rdbyte  scratchB, aLit
                 add     aLit, rLitU
-                mul     level, t2
+                mul     level, scratchB
                 add     level, #LEVEL_ROUND + NEXT_ONE
-                mov     t2, level
-                shr     t2, #SUBPIXEL_SHIFT
-                add     level, t2
+                mov     scratchB, level
+                shr     scratchB, #SUBPIXEL_SHIFT
+                add     level, scratchB
                 shr     level, #SUBPIXEL_SHIFT
-                rdbyte  t2, aBuf                                ' the brightest part wins
-                fge     t2, level
-                wrbyte  t2, aBuf
+                rdbyte  scratchB, aBuf                          ' the brightest part wins
+                fge     scratchB, level
+                wrbyte  scratchB, aBuf
                 add     aBuf, #NEXT_ONE
                 djnz    colsLeft, #.snakePixel
                 add     rowMask, rStepV
@@ -829,13 +958,13 @@ PRI composeBand(bandU0, bandV0, bandU1, bandV1) | pSlots, pBuf, bandWidth, slots
                 add     aMask, rStepU
                 mul     level, rParam
                 add     level, #LEVEL_ROUND + NEXT_ONE
-                mov     t2, level
-                shr     t2, #SUBPIXEL_SHIFT
-                add     level, t2
+                mov     scratchB, level
+                shr     scratchB, #SUBPIXEL_SHIFT
+                add     level, scratchB
                 shr     level, #SUBPIXEL_SHIFT
-                rdbyte  t2, aBuf
-                fge     t2, level
-                wrbyte  t2, aBuf
+                rdbyte  scratchB, aBuf
+                fge     scratchB, level
+                wrbyte  scratchB, aBuf
                 add     aBuf, #NEXT_ONE
                 djnz    colsLeft, #.levelPixel
                 add     rowMask, rStepV
@@ -850,9 +979,9 @@ PRI composeBand(bandU0, bandV0, bandU1, bandV1) | pSlots, pBuf, bandWidth, slots
 .fullPixel
                 rdbyte  level, aMask
                 add     aMask, rStepU
-                rdbyte  t2, aBuf
-                fge     t2, level
-                wrbyte  t2, aBuf
+                rdbyte  scratchB, aBuf
+                fge     scratchB, level
+                wrbyte  scratchB, aBuf
                 add     aBuf, #NEXT_ONE
                 djnz    colsLeft, #.fullPixel
                 add     rowMask, rStepV
@@ -865,9 +994,9 @@ PRI composeBand(bandU0, bandV0, bandU1, bandV1) | pSlots, pBuf, bandWidth, slots
                 sar     shift, #SUBPIXEL_SHIFT                  '   column u - k weighted 1 - f, the column before it f
                 mov     coverNext, rParam
                 and     coverNext, #SUBPIXEL_MASK
-                mov     t1, shift                               ' the mask byte of column u - k, from column u's
-                muls    t1, rStepU
-                sub     rowMask, t1
+                mov     scratchA, shift                         ' the mask byte of column u - k, from column u's
+                muls    scratchA, rStepU
+                sub     rowMask, scratchA
                 mov     firstAcross, rBoxU0                     ' column u - k across the run, at the box's left
                 sub     firstAcross, shift
                 sub     firstAcross, rSlideU0
@@ -877,26 +1006,26 @@ PRI composeBand(bandU0, bandV0, bandU1, bandV1) | pSlots, pBuf, bandWidth, slots
                 mov     across, firstAcross
                 mov     colsLeft, nCols
 .slidePixel
-                mov     m0, #0
+                mov     maskNear, #0
                 cmp     across, rSlideWidth     wc              ' unsigned: a column left of the run reads as huge
-    if_c        rdbyte  m0, aMask
-                mov     m1, #0
+    if_c        rdbyte  maskNear, aMask
+                mov     maskFar, #0
                 sub     across, #NEXT_ONE
                 cmp     across, rSlideWidth     wc
-                mov     t1, aMask
-                sub     t1, rStepU
-    if_c        rdbyte  m1, t1
+                mov     scratchA, aMask
+                sub     scratchA, rStepU
+    if_c        rdbyte  maskFar, scratchA
                 add     across, #NEXT_ONE + NEXT_ONE
-                mov     t1, ##segments.SUBPIXELS
-                sub     t1, coverNext
-                mul     m0, t1
-                mul     m1, coverNext
-                add     m0, m1
-                add     m0, #LEVEL_ROUND + NEXT_ONE
-                shr     m0, #SUBPIXEL_SHIFT
-                rdbyte  t2, aBuf
-                fge     t2, m0
-                wrbyte  t2, aBuf
+                mov     scratchA, ##segments.SUBPIXELS
+                sub     scratchA, coverNext
+                mul     maskNear, scratchA
+                mul     maskFar, coverNext
+                add     maskNear, maskFar
+                add     maskNear, #LEVEL_ROUND + NEXT_ONE
+                shr     maskNear, #SUBPIXEL_SHIFT
+                rdbyte  scratchB, aBuf
+                fge     scratchB, maskNear
+                wrbyte  scratchB, aBuf
                 add     aMask, rStepU
                 add     aBuf, #NEXT_ONE
                 djnz    colsLeft, #.slidePixel
@@ -933,13 +1062,13 @@ aBuf            long    0
 colsLeft        long    0
 level           long    0
 shift           long    0
-coverNext            long    0
+coverNext       long    0
 firstAcross     long    0
 across          long    0
-m0              long    0
-m1              long    0
-t1              long    0
-t2              long    0
+maskNear        long    0
+maskFar         long    0
+scratchA        long    0
+scratchB        long    0
     end
 
 PRI drawBlock(pPixel, rightStep, downStep, bufIndex, indexStepX, indexStepY, nColumns, nRows) | pBuf, pRampB, rowPixel, colsLeft
@@ -976,12 +1105,12 @@ PRI drawBlock(pPixel, rightStep, downStep, bufIndex, indexStepX, indexStepY, nCo
                 rdlong  color, color
                 wrbyte  color, pix
                 shr     color, #BYTE_BITS
-                mov     t1, pix
-                add     t1, #NEXT_ONE
-                wrbyte  color, t1
+                mov     scratchA, pix
+                add     scratchA, #NEXT_ONE
+                wrbyte  color, scratchA
                 shr     color, #BYTE_BITS
-                add     t1, #NEXT_ONE
-                wrbyte  color, t1
+                add     scratchA, #NEXT_ONE
+                wrbyte  color, scratchA
                 add     pix, rightStep
                 add     pLevel, indexStepX
                 djnz    colsLeft, #.pixel
@@ -993,7 +1122,7 @@ PRI drawBlock(pPixel, rightStep, downStep, bufIndex, indexStepX, indexStepY, nCo
 pix             long    0
 pLevel          long    0
 color           long    0
-t1              long    0
+scratchA        long    0
     end
 
 PRI fillLitShares(slot, head, tail, bOn, bFromEnd) | fromStart, distance, pLit, fullBelow, darkFrom, behindLevel, aheadLevel, edgeLeft, lastColumn
@@ -1004,6 +1133,12 @@ PRI fillLitShares(slot, head, tail, bOn, bFromEnd) | fromStart, distance, pLit, 
 ' columns of the edge itself (about tail + 2) are worked out, in inline PASM (cog-exec, CORDIC divides): with
 ' G the integral of clamp (0 below 0, x^2 / 2 up to 1, then x - 1/2) and d = head minus the column's near edge,
 ' the column's average is tail x (G(d / tail) - G((d - 1 px) / tail)), all in Q12.
+'
+' @param slot - the slot (segment, joint or colon dot) the call is for
+' @param head - the snake's head, in 1/256 pixel
+' @param tail - the snake's tail, in 1/256 pixel
+' @param bOn - TRUE when turning on (lights the part behind the head), FALSE when turning off
+' @param bFromEnd - TRUE when the snake runs from the segment's far end
 
 ' Local Variables (the first 16 longs, mapped to cog registers by name):
 ' @local fromStart - a column's index counted from the snake's start end
@@ -1011,83 +1146,90 @@ PRI fillLitShares(slot, head, tail, bOn, bFromEnd) | fromStart, distance, pLit, 
 ' @local pLit - this slot's lit shares
 ' @local fullBelow - columns (from the start end) below this lie wholly behind head - tail
 ' @local darkFrom - columns (from the start end) from this one on lie at or past the head
-' @local behindLevel, aheadLevel - the share behind the edge and past the head
+' @local behindLevel - the share behind the edge
+' @local aheadLevel - the share past the head
 ' @local edgeLeft - the edge's columns still to work out
 ' @local lastColumn - the mask's last column: a column counted from the far end is stored at lastColumn minus it
 
     pLit := @litTable + slot * LIT_COLUMNS
-    fullBelow := (((head - tail) sar SUBPIXEL_SHIFT) - NEXT_ONE) #> 0 <# segCols
-    darkFrom := ((head + SUBPIXEL_MASK) sar SUBPIXEL_SHIFT) #> fullBelow <# segCols
+    fullBelow := (((head - tail) sar SUBPIXEL_SHIFT) - NEXT_ONE) #> 0 <# segmentColumns
+    darkFrom := ((head + SUBPIXEL_MASK) sar SUBPIXEL_SHIFT) #> fullBelow <# segmentColumns
     behindLevel := bOn ? LEVEL_FULL : 0
     aheadLevel := LEVEL_FULL - behindLevel
     if bFromEnd
-        bytefill(pLit + segCols - fullBelow, behindLevel, fullBelow)
-        bytefill(pLit, aheadLevel, segCols - darkFrom)
+        bytefill(pLit + segmentColumns - fullBelow, behindLevel, fullBelow)
+        bytefill(pLit, aheadLevel, segmentColumns - darkFrom)
     else
         bytefill(pLit, behindLevel, fullBelow)
-        bytefill(pLit + darkFrom, aheadLevel, segCols - darkFrom)
+        bytefill(pLit + darkFrom, aheadLevel, segmentColumns - darkFrom)
     fromStart := fullBelow
     edgeLeft := darkFrom - fullBelow
-    lastColumn := segCols - NEXT_ONE
+    lastColumn := segmentColumns - NEXT_ONE
     if edgeLeft > 0                                                     ' the edge's columns (none when it has no width)
         org
 .column
                 mov     distance, fromStart                     ' d = head - the column's near edge (> 0 here)
                 shl     distance, #SUBPIXEL_SHIFT
                 subr    distance, head
-                mov     x, distance                             ' G(d / tail)
-                shl     x, #SHARE_SHIFT
-                qdiv    x, tail
-                getqx   x
+                mov     shareQ12, distance                      ' G(d / tail)
+                shl     shareQ12, #SHARE_SHIFT
+                qdiv    shareQ12, tail
+                getqx   shareQ12
                 call    #.integral
-                mov     g0, x
-                mov     x, distance                             ' G((d - 1 px) / tail): 0 when d - 1 px <= 0
-                sub     x, ##segments.SUBPIXELS
-                cmps    x, #NEXT_ONE            wc
-    if_c        mov     x, #0                                   ' (the call below changes C, so nothing after it is conditional)
-                shl     x, #SHARE_SHIFT
-                qdiv    x, tail
-                getqx   x
+                mov     integralNear, shareQ12
+                mov     shareQ12, distance                      ' G((d - 1 px) / tail): 0 when d - 1 px <= 0
+                sub     shareQ12, ##segments.SUBPIXELS
+                cmps    shareQ12, #NEXT_ONE            wc
+    if_c        mov     shareQ12, #0                            ' (the call below changes C, so nothing after it is conditional)
+                shl     shareQ12, #SHARE_SHIFT
+                qdiv    shareQ12, tail
+                getqx   shareQ12
                 call    #.integral
-                mov     g1, x
-                sub     g0, g1                                  ' x tail, / 256: the column's average in Q12
-                qmul    g0, tail
-                getqx   x
-                shr     x, #SUBPIXEL_SHIFT
-                mul     x, #LEVEL_FULL                          ' Q12 to 0-255, rounded, at most full
-                add     x, ##SHARE_HALF
-                shr     x, #SHARE_SHIFT
-                fle     x, #LEVEL_FULL
+                mov     integralFar, shareQ12
+                sub     integralNear, integralFar               ' x tail, / 256: the column's average in Q12
+                qmul    integralNear, tail
+                getqx   shareQ12
+                shr     shareQ12, #SUBPIXEL_SHIFT
+                mul     shareQ12, #LEVEL_FULL                   ' Q12 to 0-255, rounded, at most full
+                add     shareQ12, ##SHARE_HALF
+                shr     shareQ12, #SHARE_SHIFT
+                fle     shareQ12, #LEVEL_FULL
                 cmp     bOn, #0                 wz              ' turning off lights the rest
-    if_z        subr    x, #LEVEL_FULL
-                mov     t1, fromStart                           ' stored from the start end, or mirrored
+    if_z        subr    shareQ12, #LEVEL_FULL
+                mov     scratchA, fromStart                     ' stored from the start end, or mirrored
                 cmp     bFromEnd, #0            wz
-    if_nz       subr    t1, lastColumn
-                add     t1, pLit
-                wrbyte  x, t1
+    if_nz       subr    scratchA, lastColumn
+                add     scratchA, pLit
+                wrbyte  shareQ12, scratchA
                 add     fromStart, #NEXT_ONE
                 djnz    edgeLeft, #.column
                 ret
 .integral                                                       ' x (Q12, >= 0) -> G(x), Q12
-                cmp     x, ##SHARE_ONE          wc
-    if_c        mul     x, x
-    if_c        shr     x, #SQUARE_HALF_SHIFT
-    if_nc       sub     x, ##SHARE_HALF
+                cmp     shareQ12, ##SHARE_ONE          wc
+    if_c        mul     shareQ12, shareQ12
+    if_c        shr     shareQ12, #SQUARE_HALF_SHIFT
+    if_nc       sub     shareQ12, ##SHARE_HALF
                 ret
 
-x               long    0
-g0              long    0
-g1              long    0
-t1              long    0
+shareQ12        long    0
+integralNear    long    0
+integralFar     long    0
+scratchA        long    0
         end
 
 PRI turnOnDigit(digit) | toSegments, bitIndex
 ' Show a digit from blank: each of its segments grows in (spec R-5.6), horizontals left to right, verticals
 ' top down, through the normal motion.
+'
+' @param digit - the digit to show, 0-9
+
+' Local Variables:
+' @local toSegments - the digit's segments, one bit per slot (segmentsByDigit)
+' @local bitIndex - the segment slot being turned on
 
     toSegments := byte[@segmentsByDigit][digit]
     repeat bitIndex from LAST_SEGMENT to 0
-        if toSegments & (NEXT_ONE << bitIndex)
+        if toSegments & (segments.SOR_MIDDLE_G << bitIndex)
             if slotVertical[bitIndex]
                 segments[bitIndex].commandSegment(segments.CMD_TURN_ON + segments.CMD_TOP_DOWN)
             else
@@ -1096,30 +1238,41 @@ PRI turnOnDigit(digit) | toSegments, bitIndex
 
 PRI reconfigureForDigit(digitValue) | pLtTable, pRtTable, actionIndex, segmentIndex, nextAction
 ' Start the transition from the value shown to digitValue: the generated table's commands, or a first showing.
+'
+' @param digitValue - 0-9, or DIGIT_HIDDEN
 
-    if currValue <> digitValue
+' Local Variables:
+' @local pLtTable - the row of the transition table for the digit shown
+' @local pRtTable - the command list for the transition to digitValue
+' @local actionIndex - the command being read
+' @local segmentIndex - the segment slot a command is for
+' @local nextAction - the command byte (%GGG_AAAT)
+
+    if currentValue <> digitValue
         if digitValue == DIGIT_HIDDEN
             morphOut()
-        elseif currValue < 0
+        elseif currentValue < 0
             turnOnDigit(digitValue)
         else
-            pLtTable := @@leftPtrs[currValue]
+            pLtTable := @@leftPtrs[currentValue]
             pRtTable := @@LONG[pLtTable][digitValue]
             if pRtTable <> NO_ACTIONS
                 actionIndex := 0
                 repeat
                     nextAction := BYTE[pRtTable][actionIndex++]
-                    if nextAction <> 0
-                        segmentIndex := (nextAction & segments.MASK_SEGMENT) >> segments.SEGMENT_ID_SHIFT - NEXT_ONE
+                    if nextAction <> ACTION_LIST_END
+                        segmentIndex := (nextAction & segments.MASK_SEGMENT) >> segments.SEGMENT_ID_SHIFT - FIRST_SEGMENT_ID
                         segments[segmentIndex].commandSegment(nextAction)
                     else
                         quit
             bNeedsRender := TRUE
-    currValue := digitValue
+    currentValue := digitValue
 
 CON ' table markers
 
-  NO_ACTIONS = 0
+  NO_ACTIONS = 0                        ' a transition-table entry with no command list: the digit does not change
+  ACTION_LIST_END = 0                   ' the byte that ends each transition's command list (the generated tables write it as 0)
+  FIRST_SEGMENT_ID = 1                  ' a command's segment ID (%GGG, shifted down) is its segments[] slot plus this: G is 1 .. A is 7
 
 DAT ' digit shapes and the generated transition table
 
@@ -1134,11 +1287,6 @@ segmentsByDigit
     byte    %0111_0000   ' 7 abc----
     byte    %0111_1111   ' 8 abcdefg
     byte    %0111_1011   ' 9 abcd-fg
-
-' NEW TABLE of Actions:
-'leftPtrsActual  long    0
-'leftPtrsAddr    long    @leftPtrs
-'objectOffset    long    0
 
 ' NOTE from spin2 doc pg4 symbol standing alone inherits last declared type!!
 ' =======================================================================================================================

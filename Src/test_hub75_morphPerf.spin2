@@ -6,7 +6,7 @@
 ''               -- see below for terms of use
 ''   E-mail..... stephen@ironsheep.biz
 ''   Started.... Oct 2026
-''   Updated.... 12 Oct 2026
+''   Updated.... 14 Oct 2026
 ''
 '' =================================================================================================
 
@@ -51,7 +51,12 @@ CON ' ---- Display (the 2021 demo's groups) ----
   MAX_COUNTERS = 4
   LAST_COUNTER = MAX_COUNTERS - 1
 
-  #0, GRP_CLOCK_LT, GRP_CLOCK_RT, GRP_DOWNCTR_2DIG, GRP_CTR_6DIG_RAND
+  ' the demo's four groups, by index into counters[]:
+  '   GRP_CLOCK_LT      - the clock on the left (HH:MM, starts at 00:00)
+  '   GRP_CLOCK_RT      - the clock on the right (HH:MM, starts at noon)
+  '   GRP_COUNTDOWN     - the down counter (3 digits)
+  '   GRP_RANDOM        - the digits group (the demo's 4 random digits)
+  #0, GRP_CLOCK_LT, GRP_CLOCK_RT, GRP_COUNTDOWN, GRP_RANDOM
 
 CON ' ---- Measurement settings ----
 
@@ -84,19 +89,22 @@ CON ' ---- Measurement settings ----
   FIRST_TIMED_HALF_STEP = 3                                     ' the middle of step 2 (step 1 is drawn by the command)
   LAST_TIMED_HALF_STEP = FIRST_TIMED_HALF_STEP + HALF_STEPS_PER_STEP * (ANIM_STEPS_TIMED - 1)
   NO_MIN_TICKS = $7FFF_FFFF                                     ' start value of a running minimum
+  NO_OVERHEAD = 0                                               ' reportPerCall()'s overhead figure when no empty-loop cost is taken off
 
   FPS_SECONDS = 10                                              ' the demo-loop window
   FPS_WINDOW_TICKS = CLK_FREQ * FPS_SECONDS
 
   ' group placement (the demo's, same arguments)
+  RIGHT_HALF_COLUMN = 64                                        ' the right-hand groups sit in the second 64 columns
   CLOCK_LT_ROW = 10
   CLOCK_LT_COLUMN = 2
+  CLOCK_LT_START = 0                                            ' the left clock shows 00:00
   CLOCK_RT_ROW = 8
-  CLOCK_RT_COLUMN = 64 + 2
+  CLOCK_RT_COLUMN = RIGHT_HALF_COLUMN + 2
   DOWNCTR_ROW = 28
   DOWNCTR_COLUMN = 3
   RANDOM_ROW = 32
-  RANDOM_COLUMN = 64 + 4
+  RANDOM_COLUMN = RIGHT_HALF_COLUMN + 4
   SEG_THICKNESS = 1
   CLOCK_SEG_LENGTH = 6
   DOWNCTR_SEG_LENGTH = 15
@@ -108,7 +116,7 @@ CON ' ---- Measurement settings ----
   DOWNCTR_AREA_HEIGHT = 33
   RANDOM_AREA_WIDTH = 50
   RANDOM_AREA_HEIGHT = 21
-  CLOCK_RT_START = 12 * 60 * 60                                 ' noon, in seconds
+  CLOCK_RT_START = counters.HOURS_PER_HALF_DAY * counters.SECONDS_PER_HOUR      ' noon, in seconds
   DOWNCTR_START = 204
   RANDOM_START = 5436
   CLOCK_STEP_INTERVALS = CLOCK_SEG_LENGTH - 1                   ' a snake of N pixels moves in N steps, N - 1 intervals
@@ -143,24 +151,24 @@ VAR
     long    backToBackTicks[COMMIT_SAMPLES]
     long    animTicks[ANIM_SAMPLE_COUNT]
 
-PUB go() | maxPhysicalRows, maxPhysicalCols, packedColor
+PUB go() | maxRows, maxColumns, packedColor
 '' Run the baseline: start the display, time each item, report, finish.
 ''
 
 ' Local Variables:
-' @local maxPhysicalRows - display height in pixels
-' @local maxPhysicalCols - display width in pixels
+' @local maxRows - display height in pixels
+' @local maxColumns - display width in pixels
 ' @local packedColor - the test color, corrected and packed
 
     utils.beginSuite(@"morphPerf baseline")
 
     chainIndex := hub75Bffrs.indexForHub75ChainId(hub75Bffrs.HUB75_ADAPTER_1)
     display.start(display.HUB75_ADAPTER_1)
-    maxPhysicalCols := hub75Bffrs.maxDisplayColumns(chainIndex)
-    maxPhysicalRows := hub75Bffrs.maxDisplayRows(chainIndex)
-    debug("DISPLAY  rows=", udec_(maxPhysicalRows), "  columns=", udec_(maxPhysicalCols), "  chain=", udec_(chainIndex))
-    utils.checkEqual(maxPhysicalRows, @"display is the quad: rows", QUAD_ROWS)
-    utils.checkEqual(maxPhysicalCols, @"display is the quad: columns", QUAD_COLUMNS)
+    maxColumns := hub75Bffrs.maxDisplayColumns(chainIndex)
+    maxRows := hub75Bffrs.maxDisplayRows(chainIndex)
+    debug("DISPLAY  rows=", udec_(maxRows), "  columns=", udec_(maxColumns), "  chain=", udec_(chainIndex))
+    utils.checkEqual(maxRows, @"display is the quad: rows", QUAD_ROWS)
+    utils.checkEqual(maxColumns, @"display is the quad: columns", QUAD_COLUMNS)
     display.clearScreen()
     packedColor := pixels.packedCorrectedRgb(chainIndex, TEST_RED, TEST_GREEN, TEST_BLUE)
     longfill(@colorList, packedColor, COLOR_LIST_LONGS)
@@ -172,7 +180,7 @@ PUB go() | maxPhysicalRows, maxPhysicalCols, packedColor
 
     ' the groups are placed after the primitives so the digits are drawn on a clean screen
     display.clearScreen()
-    placeGroups(maxPhysicalRows, maxPhysicalCols)
+    placeGroups(maxRows, maxColumns)
     display.commitScreenToPanelSet()
     measureAnimateSteps()
     measureFrameRate()
@@ -181,23 +189,33 @@ PUB go() | maxPhysicalRows, maxPhysicalCols, packedColor
 
 
 PRI measureOverheads() | startTick, bracketTicks, readTick
-    ' the cost of the measurement itself: one counter read, and an empty repeat loop
+' Measure the cost of the measurement itself: one counter read, and an empty repeat loop.
+
+' Local Variables:
+' @local startTick - the system counter when the bracket began
+' @local bracketTicks - the ticks the bracket took
+' @local readTick - the counter value read in the loop (read only to be timed)
 
     startTick := getct()
     repeat BRACKET_REPS
         readTick := getct()
     bracketTicks := getct() - startTick
-    reportPerCall(@"one getct read in a loop (bracket cost)", bracketTicks, BRACKET_REPS, 0)
+    reportPerCall(@"one getct read in a loop (bracket cost)", bracketTicks, BRACKET_REPS, NO_OVERHEAD)
 
     startTick := utils.timeStart()
     repeat LOOP_REPS
     bracketTicks := utils.timeReport(@"empty repeat loop (total)", startTick)
     loopX100 := muldiv64(bracketTicks, PER_CALL_SCALE, LOOP_REPS)
-    reportPerCall(@"empty repeat loop", bracketTicks, LOOP_REPS, 0)
+    reportPerCall(@"empty repeat loop", bracketTicks, LOOP_REPS, NO_OVERHEAD)
 
 
 PRI measureColorAndPixel() | startTick, totalTicks, packedColor
-    ' one packedCorrectedRgb (colorUtils, and the screenUtils wrapper) and one drawPixelAtRCwithRGB
+' Measure one packedCorrectedRgb (colorUtils, and the screenUtils wrapper) and one drawPixelAtRCwithRGB.
+
+' Local Variables:
+' @local startTick - the system counter when the bracket began
+' @local totalTicks - the ticks the bracket took
+' @local packedColor - the packed color the call returns (assigned, not used: only the call is timed)
 
     startTick := utils.timeStart()
     repeat PIXEL_REPS
@@ -219,7 +237,10 @@ PRI measureColorAndPixel() | startTick, totalTicks, packedColor
 
 
 PRI measureRuns() | packedColor
-    ' fillRowRun and copyRowRun of 8, 32 and 128 pixels
+' Measure fillRowRun and copyRowRun of 8, 32 and 128 pixels.
+
+' Local Variables:
+' @local packedColor - the test color, corrected and packed
 
     packedColor := colorList[0]
     timeFillRun(@"fillRowRun 8 px", RUN_SHORT, packedColor)
@@ -231,6 +252,16 @@ PRI measureRuns() | packedColor
 
 
 PRI timeFillRun(pName, nPixels, packedColor) | startTick, totalTicks
+' Time RUN_REPS fillRowRun calls of one run length and report them.
+'
+' @param pName - zero-terminated name of the measurement
+' @param nPixels - the run length in pixels
+' @param packedColor - the test color, corrected and packed
+'
+' Local Variables:
+' @local startTick - the system counter when the bracket began
+' @local totalTicks - the ticks the bracket took
+
     startTick := utils.timeStart()
     repeat RUN_REPS
         pixels.fillRowRun(chainIndex, TEST_ROW, TEST_RUN_COLUMN, nPixels, packedColor)
@@ -239,6 +270,15 @@ PRI timeFillRun(pName, nPixels, packedColor) | startTick, totalTicks
 
 
 PRI timeCopyRun(pName, nPixels) | startTick, totalTicks
+' Time RUN_REPS copyRowRun calls of one run length and report them.
+'
+' @param pName - zero-terminated name of the measurement
+' @param nPixels - the run length in pixels
+'
+' Local Variables:
+' @local startTick - the system counter when the bracket began
+' @local totalTicks - the ticks the bracket took
+
     startTick := utils.timeStart()
     repeat RUN_REPS
         pixels.copyRowRun(chainIndex, TEST_ROW, TEST_RUN_COLUMN, nPixels, @colorList)
@@ -246,22 +286,29 @@ PRI timeCopyRun(pName, nPixels) | startTick, totalTicks
     reportPerCall(pName, totalTicks, RUN_REPS, loopX100)
 
 
-PRI measureCommits() | sampleIndex, startTick, endTick, withTicks, withoutTicks
-    ' commit after a quiet period (no wait), commit back to back (waits for the previous one), and the
-    ' differential method: whole loops of quiet+commit and quiet only, the difference over the cycles
+PRI measureCommits() | sampleIdx, startTick, endTick, withTicks, withoutTicks
+' Measure a commit after a quiet period (no wait), a commit back to back (waits for the previous one), and the
+' differential method: whole loops of quiet+commit and quiet only, the difference over the cycles.
 
-    repeat sampleIndex from 0 to LAST_COMMIT_SAMPLE
+' Local Variables:
+' @local sampleIdx - the one-call bracket being stored
+' @local startTick - the system counter when the bracket began
+' @local endTick - the system counter when the bracket ended
+' @local withTicks - the ticks the loop of quiet+commit took
+' @local withoutTicks - the ticks the loop of quiet only took
+
+    repeat sampleIdx from 0 to LAST_COMMIT_SAMPLE
         waitms(QUIET_MS)
         startTick := getct()
         display.commitScreenToPanelSet()
-        quietTicks[sampleIndex] := getct() - startTick
+        quietTicks[sampleIdx] := getct() - startTick
     reportSamples(@"commit after quiet period", @quietTicks, COMMIT_SAMPLES)
 
     display.commitScreenToPanelSet()                            ' the first of the train, not timed
-    repeat sampleIndex from 0 to LAST_COMMIT_SAMPLE
+    repeat sampleIdx from 0 to LAST_COMMIT_SAMPLE
         startTick := getct()
         display.commitScreenToPanelSet()
-        backToBackTicks[sampleIndex] := getct() - startTick
+        backToBackTicks[sampleIdx] := getct() - startTick
     reportSamples(@"commit back to back", @backToBackTicks, COMMIT_SAMPLES)
 
     startTick := getct()
@@ -278,8 +325,14 @@ PRI measureCommits() | sampleIndex, startTick, endTick, withTicks, withoutTicks
     reportDifference(@"commit by loop difference", withTicks, withoutTicks, DIFF_CYCLES)
 
 
-PRI placeGroups(maxPhysicalRows, maxPhysicalCols) | ctrIdx
-    ' place the demo's four groups where the 2021 demo did, with the same digits
+PRI placeGroups(maxRows, maxColumns) | ctrIdx
+' Place the demo's four groups where the 2021 demo did, with the same digits.
+'
+' @param maxRows - the display's height in pixels
+' @param maxColumns - the display's width in pixels
+'
+' Local Variables:
+' @local ctrIdx - the counter group being set up
 
     repeat ctrIdx from 0 to LAST_COUNTER
         counters[ctrIdx].setThickness(SEG_THICKNESS)
@@ -290,37 +343,48 @@ PRI placeGroups(maxPhysicalRows, maxPhysicalCols) | ctrIdx
     display.setColoredTextAtLnCol(TEXT_ROW, TEXT_COLUMN, string("Iron Sheep"), color.cMaroon)
     display.commitScreenToPanelSet()
 
-    counters[GRP_CLOCK_LT].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, CLOCK_LT_COLUMN, CLOCK_LT_ROW, CLOCK_AREA_WIDTH, CLOCK_AREA_HEIGHT, counters.GRP_CLOCK, counters.LAYOUT_HH_MM, counters.ROT_0, color.cOrange, 0)
-    if maxPhysicalCols > FULL_WIDTH_COLUMNS
+    counters[GRP_CLOCK_LT].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, CLOCK_LT_COLUMN, CLOCK_LT_ROW, CLOCK_AREA_WIDTH, CLOCK_AREA_HEIGHT, counters.GRP_CLOCK, counters.LAYOUT_HH_MM, counters.ROT_0, color.cOrange, CLOCK_LT_START)
+    if maxColumns > FULL_WIDTH_COLUMNS
         counters[GRP_CLOCK_RT].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, CLOCK_RT_COLUMN, CLOCK_RT_ROW, CLOCK_AREA_WIDTH, CLOCK_AREA_HEIGHT, counters.GRP_CLOCK, counters.LAYOUT_HH_MM, counters.ROT_0, color.cGreen, CLOCK_RT_START)
-    if maxPhysicalRows > FULL_HEIGHT_ROWS
-        counters[GRP_DOWNCTR_2DIG].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, DOWNCTR_COLUMN, DOWNCTR_ROW, DOWNCTR_AREA_WIDTH, DOWNCTR_AREA_HEIGHT, counters.GRP_DOWN_COUNTER, counters.LAYOUT_3_DIGITS, counters.ROT_0, color.cTeal, DOWNCTR_START)
-    if maxPhysicalCols > FULL_WIDTH_COLUMNS && maxPhysicalRows > FULL_HEIGHT_ROWS
-        counters[GRP_CTR_6DIG_RAND].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, RANDOM_COLUMN, RANDOM_ROW, RANDOM_AREA_WIDTH, RANDOM_AREA_HEIGHT, counters.GRP_DIGITS, counters.LAYOUT_4_DIGITS, counters.ROT_0, color.cRed, RANDOM_START)
+    if maxRows > FULL_HEIGHT_ROWS
+        counters[GRP_COUNTDOWN].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, DOWNCTR_COLUMN, DOWNCTR_ROW, DOWNCTR_AREA_WIDTH, DOWNCTR_AREA_HEIGHT, counters.GRP_DOWN_COUNTER, counters.LAYOUT_3_DIGITS, counters.ROT_0, color.cTeal, DOWNCTR_START)
+    if maxColumns > FULL_WIDTH_COLUMNS && maxRows > FULL_HEIGHT_ROWS
+        counters[GRP_RANDOM].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, RANDOM_COLUMN, RANDOM_ROW, RANDOM_AREA_WIDTH, RANDOM_AREA_HEIGHT, counters.GRP_DIGITS, counters.LAYOUT_4_DIGITS, counters.ROT_0, color.cRed, RANDOM_START)
 
     ' the demo's pacing, so the frame-rate item runs the demo's loop as the demo runs it
     counters[GRP_CLOCK_LT].setMoveDuration(CLOCK_MOVE_MS)
     counters[GRP_CLOCK_RT].setMoveDuration(CLOCK_MOVE_MS)
-    counters[GRP_DOWNCTR_2DIG].setMoveDuration(DOWNCTR_MOVE_MS)
-    counters[GRP_CTR_6DIG_RAND].setMoveDuration(RANDOM_MOVE_MS)
+    counters[GRP_COUNTDOWN].setMoveDuration(DOWNCTR_MOVE_MS)
+    counters[GRP_RANDOM].setMoveDuration(RANDOM_MOVE_MS)
     repeat ctrIdx from 0 to LAST_COUNTER
         counters[ctrIdx].setHoldDuration(HOLD_MS)
 
 
 PRI measureAnimateSteps()
-    ' one step of each group's animate (4 digits: both clocks and the random group; 3 digits: the down counter)
+' Measure one step of each group's animate (4 digits: both clocks and the random group; 3 digits: the down counter).
 
     timeGroupSteps(@"animate clock left (4 digits, seg 6)", GRP_CLOCK_LT, CLOCK_STEP_INTERVALS, CLOCK_MOVE_MS)
     timeGroupSteps(@"animate clock right (4 digits, seg 6)", GRP_CLOCK_RT, CLOCK_STEP_INTERVALS, CLOCK_MOVE_MS)
-    timeGroupSteps(@"animate down counter (3 digits, seg 15)", GRP_DOWNCTR_2DIG, DOWNCTR_STEP_INTERVALS, DOWNCTR_MOVE_MS)
-    timeGroupSteps(@"animate random (4 digits, seg 9)", GRP_CTR_6DIG_RAND, RANDOM_STEP_INTERVALS, RANDOM_MOVE_MS)
+    timeGroupSteps(@"animate down counter (3 digits, seg 15)", GRP_COUNTDOWN, DOWNCTR_STEP_INTERVALS, DOWNCTR_MOVE_MS)
+    timeGroupSteps(@"animate random (4 digits, seg 9)", GRP_RANDOM, RANDOM_STEP_INTERVALS, RANDOM_MOVE_MS)
 
 
-PRI timeGroupSteps(pName, ctrIdx, stepIntervals, moveMs) | sampleIndex, startTick, halfStep, stepTimeMs
-    ' change the group's value, then time the animate calls given the middle of steps 2 to 5 (each draws one more
-    ' step of every moving snake, as each 2021 animateStep did); nothing is committed
+PRI timeGroupSteps(pName, ctrIdx, stepIntervals, moveMs) | sampleIdx, startTick, halfStep, stepTimeMs
+' Change the group's value, then time the animate calls given the middle of steps 2 to 5 (each draws one more
+' step of every moving snake, as each 2021 animateStep did); nothing is committed.
+'
+' @param pName - zero-terminated name of the measurement
+' @param ctrIdx - the counter group's index (a GRP_ value)
+' @param stepIntervals - the intervals between a snake's steps: its length minus one
+' @param moveMs - the group's move duration in milliseconds
+'
+' Local Variables:
+' @local sampleIdx - the animate call being stored
+' @local startTick - the system counter when the call began
+' @local halfStep - the time of the call, in half steps of the move
+' @local stepTimeMs - the injected time of the call, in milliseconds
 
-    sampleIndex := 0
+    sampleIdx := 0
     repeat ANIM_CYCLES
         counters[ctrIdx].nextTimeCycle()
         counters[ctrIdx].animate(ANIM_START_MS)                 ' stamps the moves' start; step 1 was drawn by the command
@@ -328,15 +392,22 @@ PRI timeGroupSteps(pName, ctrIdx, stepIntervals, moveMs) | sampleIndex, startTic
             stepTimeMs := ANIM_START_MS + muldiv64(moveMs, halfStep, HALF_STEPS_PER_STEP * stepIntervals)
             startTick := getct()
             counters[ctrIdx].animate(stepTimeMs)
-            animTicks[sampleIndex] := getct() - startTick
-            sampleIndex++
+            animTicks[sampleIdx] := getct() - startTick
+            sampleIdx++
         counters[ctrIdx].animate(ANIM_START_MS + moveMs)        ' the moves' end: every segment completes
     reportStats(pName, @animTicks, ANIM_SAMPLE_COUNT)
 
 
 PRI measureFrameRate() | startTick, windowTicks, frameCount, nowMs, ctrIdx
-    ' the demo's frame loop, as it is in demo_hub75_morphSeg.spin2, for FPS_SECONDS: one commit per pass, so
-    ' commits = passes; the time base's meter is printed beside the test's own count, never instead of it
+' Run the demo's frame loop, as it is in demo_hub75_morphSeg.spin2, for FPS_SECONDS: one commit per pass, so
+' commits = passes; the time base's meter is printed beside the test's own count, never instead of it.
+
+' Local Variables:
+' @local startTick - the system counter when the window began
+' @local windowTicks - the ticks the window took
+' @local frameCount - how many passes (and commits) the window held
+' @local nowMs - the time base's time at the latest pass
+' @local ctrIdx - the counter group being stepped or animated
 
     frameCount := 0
     timeBase.reset()
@@ -355,7 +426,18 @@ PRI measureFrameRate() | startTick, windowTicks, frameCount, nowMs, ctrIdx
 
 
 PRI reportPerCall(pName, totalTicks, nReps, overheadX100) | ticksX100, netX100, nanos, netNanos
-    ' print the PERCALL line: per-call ticks, and the figure net of the empty loop's per-iteration cost
+' Print the PERCALL line: per-call ticks, and the figure net of the empty loop's per-iteration cost.
+'
+' @param pName - zero-terminated name of the measurement
+' @param totalTicks - the ticks the whole bracket took
+' @param nReps - how many calls the bracket held
+' @param overheadX100 - the empty loop's cost per iteration, ticks x100 (NO_OVERHEAD for none)
+'
+' Local Variables:
+' @local ticksX100 - the ticks per call, times 100
+' @local netX100 - the ticks per call net of the overhead, times 100
+' @local nanos - the nanoseconds per call
+' @local netNanos - the nanoseconds per call net of the overhead
 
     ticksX100 := muldiv64(totalTicks, PER_CALL_SCALE, nReps)
     netX100 := (ticksX100 - overheadX100) #> 0
@@ -364,40 +446,69 @@ PRI reportPerCall(pName, totalTicks, nReps, overheadX100) | ticksX100, netX100, 
     debug("PERCALL  ", zstr_(pName), "  reps=", udec_(nReps), "  total_ticks=", udec_(totalTicks), "  ticks_x100_per_call=", udec_(ticksX100), "  net_ticks_x100=", sdec_(netX100), "  ns_per_call=", udec_(nanos), "  net_ns=", sdec_(netNanos), "  net_us_whole=", udec_(netNanos / NANOS_PER_MICRO))
 
 
-PRI reportSamples(pName, pTicks, nSamples) | sampleIndex
-    ' print each stored one-call bracket as a TIME line, then their STATS line
+PRI reportSamples(pName, pTicks, nSamples) | sampleIdx
+' Print each stored one-call bracket as a TIME line, then their STATS line.
+'
+' @param pName - zero-terminated name of the measurement
+' @param pTicks - the address of the stored brackets, one long of ticks each
+' @param nSamples - how many brackets are stored
+'
+' Local Variables:
+' @local sampleIdx - the stored bracket being printed
 
-    sampleIndex := 0
+    sampleIdx := 0
     repeat nSamples
-        reportTicks(pName, LONG[pTicks][sampleIndex])
-        sampleIndex++
+        reportTicks(pName, LONG[pTicks][sampleIdx])
+        sampleIdx++
     reportStats(pName, pTicks, nSamples)
 
 
 PRI reportTicks(pName, elapsedTicks)
-    ' print a TIME line (the harness's format) for an interval that was measured and stored earlier
+' Print a TIME line (the harness's format) for an interval that was measured and stored earlier.
+'
+' @param pName - zero-terminated name of the measurement
+' @param elapsedTicks - the interval, in system clock ticks
 
     debug("TIME     ", zstr_(pName), "  ticks=", udec_(elapsedTicks), "  us=", udec_(muldiv64(elapsedTicks, utils.MICROS_PER_SECOND, clkfreq)), "  clkfreq=", udec_(clkfreq))
 
 
-PRI reportStats(pName, pTicks, nSamples) | sampleIndex, minTicks, maxTicks, sumTicks, meanTicks
-    ' print the STATS line: min, mean and max of nSamples stored brackets
+PRI reportStats(pName, pTicks, nSamples) | sampleIdx, minTicks, maxTicks, sumTicks, meanTicks
+' Print the STATS line: min, mean and max of nSamples stored brackets.
+'
+' @param pName - zero-terminated name of the measurement
+' @param pTicks - the address of the stored brackets, one long of ticks each
+' @param nSamples - how many brackets are stored
+'
+' Local Variables:
+' @local sampleIdx - the stored bracket being summed
+' @local minTicks - the shortest bracket
+' @local maxTicks - the longest bracket
+' @local sumTicks - the sum of all brackets
+' @local meanTicks - the mean bracket
 
     minTicks := NO_MIN_TICKS
     maxTicks := 0
     sumTicks := 0
-    sampleIndex := 0
+    sampleIdx := 0
     repeat nSamples
-        sumTicks += LONG[pTicks][sampleIndex]
-        minTicks := minTicks <# LONG[pTicks][sampleIndex]
-        maxTicks := maxTicks #> LONG[pTicks][sampleIndex]
-        sampleIndex++
+        sumTicks += LONG[pTicks][sampleIdx]
+        minTicks := minTicks <# LONG[pTicks][sampleIdx]
+        maxTicks := maxTicks #> LONG[pTicks][sampleIdx]
+        sampleIdx++
     meanTicks := sumTicks / nSamples
     debug("STATS    ", zstr_(pName), "  n=", udec_(nSamples), "  min_ticks=", udec_(minTicks), "  mean_ticks=", udec_(meanTicks), "  max_ticks=", udec_(maxTicks), "  min_us=", udec_(muldiv64(minTicks, utils.MICROS_PER_SECOND, clkfreq)), "  mean_us=", udec_(muldiv64(meanTicks, utils.MICROS_PER_SECOND, clkfreq)), "  max_us=", udec_(muldiv64(maxTicks, utils.MICROS_PER_SECOND, clkfreq)))
 
 
 PRI reportDifference(pName, withTicks, withoutTicks, nCycles) | perCommitTicks
-    ' print the DIFF line: the commit time as the difference between two whole loops, over the cycles
+' Print the DIFF line: the commit time as the difference between two whole loops, over the cycles.
+'
+' @param pName - zero-terminated name of the measurement
+' @param withTicks - the ticks the loop with the commit took
+' @param withoutTicks - the ticks the loop without the commit took
+' @param nCycles - how many cycles each loop ran
+'
+' Local Variables:
+' @local perCommitTicks - the commit's ticks: the difference over the cycles
 
     perCommitTicks := (withTicks - withoutTicks) / nCycles
     debug("DIFF     ", zstr_(pName), "  cycles=", udec_(nCycles), "  with_ticks=", udec_(withTicks), "  without_ticks=", udec_(withoutTicks), "  per_commit_ticks=", sdec_(perCommitTicks), "  per_commit_us=", sdec_(muldiv64(perCommitTicks, utils.MICROS_PER_SECOND, clkfreq)))

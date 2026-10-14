@@ -6,7 +6,7 @@
 ''               -- see below for terms of use
 ''   E-mail..... stephen@ironsheep.biz
 ''   Started.... Oct 2026
-''   Updated.... 13 Oct 2026
+''   Updated.... 14 Oct 2026
 ''   Version.... v1.0.0
 ''
 '' =================================================================================================
@@ -22,8 +22,9 @@
                 and lower segments where both are lit.
       arc       a quarter circle of centre-line radius ARC_RADIUS = (T + 1) / 2, its centre at the
                 mask's bottom-right pixel centre, bending from the left of the mask to its top: the
-                figure's top-left corner. At stroke 1 its corner pixel is THIN_CORNER_LEVEL (by eye). Every corner and every place the middle segment meets a side
-                is this arc, mirrored. Its inner edge has a radius of half a pixel at every thickness.
+                figure's top-left corner. At stroke 1 its corner pixel is THIN_CORNER_LEVEL (by eye).
+                Every corner and every place the middle segment meets a side is this arc, mirrored.
+                Its inner edge has a radius of half a pixel at every thickness.
       dot       a disc of the colon dot's size, centred in its square.
 
   Every mask is row-major, one byte per pixel: BYTE[pMask][row * nCols + col], 0 = not covered ...
@@ -63,7 +64,9 @@ CON ' stroke settings
 CON ' geometry
 
   JOIN_EXTRA = 1                                                ' a join's centre line is the stroke plus this: twice the arc radius
-  CENTER_DIVISOR = 2                                            ' half of a thickness (integer)
+  ARC_SIDE_EXTRA = 1                                            ' the arc mask's side is the stroke plus this: twice the arc radius, as JOIN_EXTRA
+  PHASE_BIAS = 1                                                ' added to a thickness before its parity is taken, so an even stroke gives a phase of 1
+  CENTER_DIVISOR = 2                                            ' half of a thickness (integer); also the divisor whose remainder is a thickness's parity
   LAST_OFFSET = 1                                               ' the last index of a count is the count minus this
 
 CON ' float constants (Spin2 float operators take float operands)
@@ -92,15 +95,15 @@ PUB validateSection(crossSection) : status
         status := morphStatus.E_UNKNOWN_CROSS_SECTION
 
 PUB capsulePhase(thickness) : phase
-'' The whole pixels a capsule's mask adds for a half-pixel start: 1 when the thickness is even, else 0.
+'' Return the whole pixels a capsule's mask adds for a half-pixel start: 1 when the thickness is even, else 0.
 ''
 '' @param thickness - the stroke, in pixels
 '' @returns phase - 0 or 1
 
-    phase := (thickness + LAST_OFFSET) // CENTER_DIVISOR
+    phase := (thickness + PHASE_BIAS) // CENTER_DIVISOR
 
 PUB straightColumns(thickness, segLength) : nCols
-'' The straight mask's columns: a centre line of segLength - thickness (the stroke at most segLength), the pen's
+'' Return the straight mask's columns: a centre line of segLength - thickness (the stroke at most segLength), the pen's
 '' half at each end, and the phase.
 ''
 '' @param thickness - the stroke, in pixels
@@ -110,7 +113,7 @@ PUB straightColumns(thickness, segLength) : nCols
     nCols := segLength + capsulePhase(thickness)
 
 PUB joinColumns(thickness) : nCols
-'' The join mask's columns: a centre line of thickness + JOIN_EXTRA, the pen's half at each end, and the phase.
+'' Return the join mask's columns: a centre line of thickness + JOIN_EXTRA, the pen's half at each end, and the phase.
 ''
 '' @param thickness - the stroke, in pixels
 '' @returns nCols - its columns (it has thickness rows)
@@ -118,30 +121,42 @@ PUB joinColumns(thickness) : nCols
     nCols := CENTER_DIVISOR * thickness + JOIN_EXTRA + capsulePhase(thickness)
 
 PUB arcSide(thickness) : side
-'' The arc mask's side: it is square.
+'' Return the arc mask's side: it is square.
 ''
 '' @param thickness - the stroke, in pixels
 '' @returns side - its rows and columns
 
-    side := thickness + LAST_OFFSET
+    side := thickness + ARC_SIDE_EXTRA
 
-PUB joinOffset(thickness, segLength) : offset
-'' Where the join mask starts in the figure's buffer.
+PUB joinOffset(thickness, segLength) : maskOffset
+'' Return where the join mask starts in the figure's buffer.
+''
+'' @param thickness - the stroke, in pixels
+'' @param segLength - the segment length, in pixels
+'' @returns maskOffset - the byte offset of the join mask from the start of the buffer
 
-    offset := thickness * straightColumns(thickness, segLength)
+    maskOffset := thickness * straightColumns(thickness, segLength)
 
-PUB arcOffset(thickness, segLength) : offset
-'' Where the arc mask starts in the figure's buffer.
+PUB arcOffset(thickness, segLength) : maskOffset
+'' Return where the arc mask starts in the figure's buffer.
+''
+'' @param thickness - the stroke, in pixels
+'' @param segLength - the segment length, in pixels
+'' @returns maskOffset - the byte offset of the arc mask from the start of the buffer
 
-    offset := joinOffset(thickness, segLength) + thickness * joinColumns(thickness)
+    maskOffset := joinOffset(thickness, segLength) + thickness * joinColumns(thickness)
 
-PUB dotOffset(thickness, segLength) : offset
-'' Where the dot mask starts in the figure's buffer.
+PUB dotOffset(thickness, segLength) : maskOffset
+'' Return where the dot mask starts in the figure's buffer.
+''
+'' @param thickness - the stroke, in pixels
+'' @param segLength - the segment length, in pixels
+'' @returns maskOffset - the byte offset of the dot mask from the start of the buffer
 
-    offset := arcOffset(thickness, segLength) + arcSide(thickness) * arcSide(thickness)
+    maskOffset := arcOffset(thickness, segLength) + arcSide(thickness) * arcSide(thickness)
 
 PUB figureBytes(thickness, segLength, dotSize) : nBytes
-'' The bytes buildFigure() needs: the straight, join, arc and dot masks, one after another.
+'' Return the bytes buildFigure() needs: the straight, join, arc and dot masks, one after another.
 ''
 '' @param thickness - the stroke, in pixels
 '' @param segLength - the segment length, in pixels
@@ -155,7 +170,7 @@ PUB buildFigure(pMask, maskCapacity, thickness, segLength, dotSize, crossSection
 '' The stroke runs from MIN_THICKNESS up to segLength, and the dot is MIN_THICKNESS or more. A refused request
 '' writes nothing.
 ''
-'' @param pMask - hub address of the caller's buffer: maskCapacity bytes
+'' @param pMask - hub address of the mask buffer, row-major (the caller's)
 '' @param maskCapacity - size of that buffer in bytes
 '' @param thickness - the stroke, in pixels
 '' @param segLength - the segment length, in pixels
@@ -179,15 +194,24 @@ PUB buildFigure(pMask, maskCapacity, thickness, segLength, dotSize, crossSection
         buildCapsule(pMask + dotOffset(thickness, segLength), dotSize, 0, 0, crossSection)
 
 PRI buildCapsule(pMask, thickness, centreLength, phase, crossSection) | nCols, row, col, fHalfT, fStart, fEnd, fX, fY, fAlong, fMaxWeight
-' The pen drawn along a centre line of centreLength pixels: thickness rows, centreLength + thickness + phase
-' columns. The centre line runs at y = T/2 from x = T/2 + phase / 2.
+' Fill a mask with the pen drawn along a centre line of centreLength pixels: thickness rows, centreLength +
+' thickness + phase columns. The centre line runs at y = T/2 from x = T/2 + phase / 2.
+'
+' @param pMask - hub address of the mask buffer, row-major (the caller's)
+' @param thickness - the stroke, in pixels
+' @param centreLength - the centre line's length, in pixels
+' @param phase - 1 for a half-pixel start (even stroke), else 0
+' @param crossSection - SECTION_FLAT or SECTION_TUBE
 
 ' Local Variables:
 ' @local nCols - the mask's columns
-' @local row, col - the pixel being filled
+' @local row - the mask row being filled
+' @local col - the mask column being filled
 ' @local fHalfT - half the thickness (float)
-' @local fStart, fEnd - the centre line's ends along x (float)
-' @local fX, fY - the pixel's centre (float)
+' @local fStart - the centre line's start along x (float)
+' @local fEnd - the centre line's end along x (float)
+' @local fX - the pixel's centre along x (float)
+' @local fY - the pixel's centre along y (float)
 ' @local fAlong - the nearest point of the centre line to the pixel's centre, along x (float)
 ' @local fMaxWeight - the weight of the pixel nearest the centre line (float)
 
@@ -204,23 +228,29 @@ PRI buildCapsule(pMask, thickness, centreLength, phase, crossSection) | nCols, r
             BYTE[pMask][row * nCols + col] := coverByte(distance(fX -. fAlong, fY -. fHalfT), fHalfT, crossSection, fMaxWeight)
 
 PRI buildArc(pMask, thickness, crossSection) | side, row, col, fHalfT, fCentre, fRadius, fX, fY, fDistance, fMaxWeight
-' The top-left corner: a quarter circle of centre-line radius (T + 1) / 2, its centre on the centre of the
+' Fill a mask with the top-left corner: a quarter circle of centre-line radius (T + 1) / 2, its centre on the centre of the
 ' mask's bottom-right pixel, from its left end (pointing down) to its top end (pointing right); round ends.
+'
+' @param pMask - hub address of the mask buffer, row-major (the caller's)
+' @param thickness - the stroke, in pixels
+' @param crossSection - SECTION_FLAT or SECTION_TUBE
 
 ' Local Variables:
 ' @local side - the mask's rows and columns
-' @local row, col - the pixel being filled
+' @local row - the mask row being filled
+' @local col - the mask column being filled
 ' @local fHalfT - half the thickness (float)
 ' @local fCentre - the circle's centre, in x and in y (float)
 ' @local fRadius - the centre line's radius (float)
-' @local fX, fY - the pixel's centre, from the circle's centre (float)
+' @local fX - the pixel's centre along x, from the circle's centre (float)
+' @local fY - the pixel's centre along y, from the circle's centre (float)
 ' @local fDistance - from the pixel's centre to the centre line (float)
 ' @local fMaxWeight - the weight of the pixel nearest the centre line (float)
 
     side := arcSide(thickness)
     fHalfT := float(thickness) /. F_HALVES
     fCentre := float(thickness) +. F_HALF
-    fRadius := float(thickness + LAST_OFFSET) /. F_HALVES
+    fRadius := float(thickness + ARC_SIDE_EXTRA) /. F_HALVES
     fMaxWeight := tubeWeight(nearestCentre(thickness), fHalfT, crossSection)
     repeat row from 0 to side - LAST_OFFSET
         fY := float(row) +. F_HALF -. fCentre
@@ -235,12 +265,21 @@ PRI buildArc(pMask, thickness, crossSection) | side, row, col, fHalfT, fCentre, 
         BYTE[pMask][0] := THIN_CORNER_LEVEL
 
 PRI nearestCentre(thickness) : fDistance
-' How far the pixel centres nearest a straight centre line are from it: 0 (odd thickness) or half a pixel (even).
+' Return how far the pixel centres nearest a straight centre line are from it: 0 (odd thickness) or half a pixel (even).
+'
+' @param thickness - the stroke, in pixels
+' @returns fDistance - 0.0 or 0.5 (float)
 
     fDistance := (thickness // CENTER_DIVISOR == 0) ? F_HALF : F_NONE
 
 PRI coverByte(fDistance, fHalfT, crossSection, fMaxWeight) : level | fCover
-' A pixel's byte: its coverage at this distance from the centre line, times the cross-section's weight there.
+' Return a pixel's byte: its coverage at this distance from the centre line, times the cross-section's weight there.
+'
+' @param fDistance - from the pixel's centre to the centre line (float)
+' @param fHalfT - half the thickness (float)
+' @param crossSection - SECTION_FLAT or SECTION_TUBE
+' @param fMaxWeight - the weight of the pixel nearest the centre line (float)
+' @returns level - the pixel's byte, 0 to COVER_FULL
 
 ' Local Variables:
 ' @local fCover - the pixel's coverage, 0.0 to 1.0 (float)
@@ -249,7 +288,12 @@ PRI coverByte(fDistance, fHalfT, crossSection, fMaxWeight) : level | fCover
     level := round(float(COVER_FULL) *. fCover *. tubeWeight(fMin(fDistance, fHalfT), fHalfT, crossSection) /. fMaxWeight) <# COVER_FULL
 
 PRI tubeWeight(fDistance, fHalfT, crossSection) : fWeight | fRatio
-' The cross-section's weight at this distance from the centre line: 1.0 for flat (float).
+' Return the cross-section's weight at this distance from the centre line: 1.0 for flat (float).
+'
+' @param fDistance - from the pixel's centre to the centre line (float)
+' @param fHalfT - half the thickness (float)
+' @param crossSection - SECTION_FLAT or SECTION_TUBE
+' @returns fWeight - the weight, 0.0 to 1.0 (float)
 
 ' Local Variables:
 ' @local fRatio - the distance as a fraction of the pen's half-width (float)
@@ -260,17 +304,29 @@ PRI tubeWeight(fDistance, fHalfT, crossSection) : fWeight | fRatio
         fWeight := F_ONE -. (F_ONE -. TUBE_EDGE_LEVEL) *. fRatio *. fRatio
 
 PRI distance(fX, fY) : fLength
-' The length of the vector (fX, fY) (float).
+' Return the length of the vector (fX, fY) (float).
+'
+' @param fX - the vector's x (float)
+' @param fY - the vector's y (float)
+' @returns fLength - its length (float)
 
     fLength := fsqrt(fX *. fX +. fY *. fY)
 
 PRI fMin(fA, fB) : fLower
-' The lower of two floats.
+' Return the lower of two floats.
+'
+' @param fA - the first float
+' @param fB - the second float
+' @returns fLower - the lower of the two
 
     fLower := fA <. fB ? fA : fB
 
 PRI fMax(fA, fB) : fHigher
-' The higher of two floats.
+' Return the higher of two floats.
+'
+' @param fA - the first float
+' @param fB - the second float
+' @returns fHigher - the higher of the two
 
     fHigher := fA >. fB ? fA : fB
 

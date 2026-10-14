@@ -7,7 +7,7 @@
 ''               -- see below for terms of use
 ''   E-mail..... stephen@ironsheep.biz
 ''   Started.... Oct 2026
-''   Updated.... 12 Oct 2026
+''   Updated.... 14 Oct 2026
 ''   Version.... v1.0.0
 ''
 '' =================================================================================================
@@ -88,12 +88,12 @@ PUB curveAt(intensity) : curveValue
     buildCurve()
     curveValue := curve[intensity & RAMP_MAX]
 
-PUB buildRamp(pRamp, nChainIdx, rgbColor) | levelIdx, red, green, blue, factor
-'' Fill an intensity ramp for one color on one adapter: LONG[pRamp][i] is the packed color at
-'' intensity i, from 0 (black) to RAMP_MAX (exactly the driver's packing of rgbColor).
+PUB buildRamp(pRamp, chainIdx, rgbColor) | levelIdx, red, green, blue, factor
+'' Fill an intensity ramp for one color on one adapter: LONG[pRamp][level] is the packed color at
+'' that intensity level, from 0 (black) to RAMP_MAX (exactly the driver's packing of rgbColor).
 ''
 '' @param pRamp - hub address of RAMP_LEVELS LONGs, owned by the caller
-'' @param nChainIdx - the index of the adapter the ramp is drawn on (its color table packs the bytes)
+'' @param chainIdx - the index of the adapter the ramp is drawn on (its color table packs the bytes)
 '' @param rgbColor - the full color, $RRGGBB
 
 ' Local Variables:
@@ -107,10 +107,14 @@ PUB buildRamp(pRamp, nChainIdx, rgbColor) | levelIdx, red, green, blue, factor
     red, green, blue := colorUtils.rgbForCValue(rgbColor)
     repeat levelIdx from RAMP_OFF to RAMP_MAX
         factor := curve[levelIdx]
-        LONG[pRamp][levelIdx] := pixels.packedCorrectedRgb(nChainIdx, scaled(red, factor), scaled(green, factor), scaled(blue, factor))
+        LONG[pRamp][levelIdx] := pixels.packedCorrectedRgb(chainIdx, scaled(red, factor), scaled(green, factor), scaled(blue, factor))
 
 PRI scaled(channel, factor) : level
-' A channel scaled by a curve factor (a fraction of CURVE_FULL), rounded to nearest.
+' Return a channel scaled by a curve factor (a fraction of CURVE_FULL), rounded to nearest.
+'
+' @param channel - the color's channel at full intensity, 0 to 255
+' @param factor - the curve at the intensity, a fraction of CURVE_FULL
+' @returns level - the channel at that intensity
 
     level := (channel * factor + CURVE_HALF) / CURVE_FULL
 

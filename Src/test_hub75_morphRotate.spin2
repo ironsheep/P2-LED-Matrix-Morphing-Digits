@@ -6,7 +6,7 @@
 ''               -- see below for terms of use
 ''   E-mail..... stephen@ironsheep.biz
 ''   Started.... Oct 2026
-''   Updated.... 12 Oct 2026
+''   Updated.... 14 Oct 2026
 ''
 '' =================================================================================================
 
@@ -53,6 +53,7 @@ CON ' ---- Group under test ----
   MAX_REMOVE_FRAMES = 10                                        ' a morph-out ends within one GAP_MS step; the cap turns a stuck one into a FAIL, not a hang
   MAX_GROUP_PIXELS = 1024                                       ' room for the group's unturned area (20 x 30 = 600)
   BYTES_PER_PIXEL = 3
+  NAME_BYTES = 96                                               ' room for a check's name: the rotation, then what is counted
   OPEN_ROW = 10                                                 ' open space, away from seams and edges
   OPEN_COLUMN = 10
   SEAM_ROW = 64                                                 ' panel seams of the quad
@@ -65,8 +66,12 @@ CON ' ---- Group under test ----
   DIGIT_INSET = (SEG_THICKNESS + 1) / 2                         ' the digit is L + 2 ceil(T/2) wide, 2W - T tall (morph7seg)
   AREA_WIDTH = SEG_LENGTH + 2 * DIGIT_INSET                     ' a one-digit group's area that fits exactly that digit
   AREA_HEIGHT = 2 * AREA_WIDTH - SEG_THICKNESS
-  ONE = 1
-  MIN_LIT_PIXELS = 50                                           ' an 8 of thickness 3 lights far more than this
+  LAST_OFFSET = 1                                               ' the last index of a count is the count minus this
+  GREEN_BYTE = 1                                                ' a pixel's bytes: red at 0, green here, blue next
+  BLUE_BYTE = 2
+  BREAK_PIXELS = 1                                              ' -D MORPH_BREAK_ROTATE: the expected place moves this far
+  NO_MISMATCHES = 0                                             ' the expected count of pixels off their turned place
+  MIN_LIT_PIXELS = 50                                          ' an 8 of thickness 3 lights far more than this
 
 CON ' ---- By-eye section ----
 
@@ -98,12 +103,21 @@ VAR
     long    nowMs
     long    groupWidth                                          ' the group's unturned size
     long    groupHeight
-    byte    refRest[MAX_GROUP_PIXELS * BYTES_PER_PIXEL]
-    byte    refMid[MAX_GROUP_PIXELS * BYTES_PER_PIXEL]
+    byte    referenceRest[MAX_GROUP_PIXELS * BYTES_PER_PIXEL]
+    byte    referenceMid[MAX_GROUP_PIXELS * BYTES_PER_PIXEL]
 
-PUB go() | rot, mismatches, row, column, placedW, placedH, status
+PUB go() | rot, mismatches, row, column, placedWidth, placedHeight, status
 '' Run the rotation test: references at ROT_0, then each turn in open space, at the seams and edges, side by side.
 ''
+
+' Local Variables:
+' @local rot - the rotation being tested (a group.ROT_ value, also the group's index in a side-by-side run)
+' @local mismatches - the pixels found off their turned place
+' @local row - the top row the group is placed at
+' @local column - the left column the group is placed at
+' @local placedWidth - the width placeGroup() reports
+' @local placedHeight - the height placeGroup() reports
+' @local status - placeGroup()'s result
 
     utils.beginSuite(@"morphRotate group rotation")
     chainIndex := hub75Bffrs.indexForHub75ChainId(hub75Bffrs.HUB75_ADAPTER_1)
@@ -118,24 +132,24 @@ PUB go() | rot, mismatches, row, column, placedW, placedH, status
     ' references: the unturned group at rest and half way through 6 -> 7
     display.clearScreen()
     groupWidth, groupHeight := placeAndRest(0, group.ROT_0, OPEN_ROW, OPEN_COLUMN, REST_VALUE)
-    capture(@refRest, OPEN_ROW, OPEN_COLUMN)
+    capture(@referenceRest, OPEN_ROW, OPEN_COLUMN)
     display.clearScreen()
     placeAndRest(0, group.ROT_0, OPEN_ROW, OPEN_COLUMN, MOVE_FROM)
     stepToMid(0)
-    capture(@refMid, OPEN_ROW, OPEN_COLUMN)
+    capture(@referenceMid, OPEN_ROW, OPEN_COLUMN)
     debug("GROUP    unturned ", udec_(groupWidth), " x ", udec_(groupHeight))
-    utils.checkEqual(litPixels(@refRest) > MIN_LIT_PIXELS, @"the rest reference shows a lit digit (the comparisons can see a shape)", TRUE)
-    utils.checkEqual(litPixels(@refMid) > MIN_LIT_PIXELS, @"the mid-move reference shows a lit digit", TRUE)
+    utils.checkEqual(litPixels(@referenceRest) > MIN_LIT_PIXELS, @"the rest reference shows a lit digit (the comparisons can see a shape)", TRUE)
+    utils.checkEqual(litPixels(@referenceMid) > MIN_LIT_PIXELS, @"the mid-move reference shows a lit digit", TRUE)
 
     repeat rot from group.ROT_90 to group.ROT_270
         display.clearScreen()
-        placedW, placedH := placeAndRest(0, rot, OPEN_ROW, OPEN_COLUMN, REST_VALUE)
-        utils.checkEqual(placedW == turnedWidth(rot) and placedH == turnedHeight(rot), @"placement returns the turned size", TRUE)
-        utils.checkEqual(compare(@refRest, rot, OPEN_ROW, OPEN_COLUMN), rotationName(rot, @"at rest: pixels off their turned place"), 0)
+        placedWidth, placedHeight := placeAndRest(0, rot, OPEN_ROW, OPEN_COLUMN, REST_VALUE)
+        utils.checkEqual(placedWidth == turnedWidth(rot) and placedHeight == turnedHeight(rot), @"placement returns the turned size", TRUE)
+        utils.checkEqual(compare(@referenceRest, rot, OPEN_ROW, OPEN_COLUMN), rotationName(rot, @"at rest: pixels off their turned place"), NO_MISMATCHES)
         display.clearScreen()
         placeAndRest(0, rot, OPEN_ROW, OPEN_COLUMN, MOVE_FROM)
         stepToMid(0)
-        utils.checkEqual(compare(@refMid, rot, OPEN_ROW, OPEN_COLUMN), rotationName(rot, @"mid 6 -> 7: pixels off their turned place"), 0)
+        utils.checkEqual(compare(@referenceMid, rot, OPEN_ROW, OPEN_COLUMN), rotationName(rot, @"mid 6 -> 7: pixels off their turned place"), NO_MISMATCHES)
 
     ' the panel seams, and the display's right and bottom edges
     repeat rot from group.ROT_0 to group.ROT_270
@@ -143,12 +157,12 @@ PUB go() | rot, mismatches, row, column, placedW, placedH, status
         row := SEAM_ROW - turnedHeight(rot) / group.HALF
         column := SEAM_COLUMN - turnedWidth(rot) / group.HALF
         placeAndRest(0, rot, row, column, REST_VALUE)
-        utils.checkEqual(compare(@refRest, rot, row, column), rotationName(rot, @"across both seams: pixels off"), 0)
+        utils.checkEqual(compare(@referenceRest, rot, row, column), rotationName(rot, @"across both seams: pixels off"), NO_MISMATCHES)
         display.clearScreen()
         row := maxRows - turnedHeight(rot)
         column := maxColumns - turnedWidth(rot)
         placeAndRest(0, rot, row, column, REST_VALUE)
-        utils.checkEqual(compare(@refRest, rot, row, column), rotationName(rot, @"at the right and bottom edges: pixels off"), 0)
+        utils.checkEqual(compare(@referenceRest, rot, row, column), rotationName(rot, @"at the right and bottom edges: pixels off"), NO_MISMATCHES)
 
     ' all four side by side
     display.clearScreen()
@@ -159,18 +173,19 @@ PUB go() | rot, mismatches, row, column, placedW, placedH, status
     mismatches := 0
     column := OPEN_COLUMN
     repeat rot from group.ROT_0 to group.ROT_270
-        mismatches += compare(@refRest, rot, MIXED_ROW, column)
+        mismatches += compare(@referenceRest, rot, MIXED_ROW, column)
         column += turnedWidth(rot) + MIXED_GAP
-    utils.checkEqual(mismatches, @"four turns side by side: pixels off", 0)
+    utils.checkEqual(mismatches, @"four turns side by side: pixels off", NO_MISMATCHES)
 
-    ' refusal: an unknown rotation changes nothing
+    ' refusal: an unknown rotation changes nothing. No rotation has the value BAD_ROTATION, so placeGroup() must refuse it
+    ' with E_UNKNOWN_ROTATION and leave the placed ROT_180 group untouched
     display.clearScreen()
     placeAndRest(0, group.ROT_180, OPEN_ROW, OPEN_COLUMN, REST_VALUE)
-    status, placedW, placedH := group[0].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, OPEN_COLUMN, OPEN_ROW, AREA_WIDTH, AREA_HEIGHT, group.GRP_UP_COUNTER, group.LAYOUT_1_DIGIT, BAD_ROTATION, color.cOrange, MOVE_FROM)
+    status, placedWidth, placedHeight := group[0].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, OPEN_COLUMN, OPEN_ROW, AREA_WIDTH, AREA_HEIGHT, group.GRP_UP_COUNTER, group.LAYOUT_1_DIGIT, BAD_ROTATION, color.cOrange, MOVE_FROM)
     utils.checkEqual(status, @"placeGroup refuses an unknown rotation", morphStatus.E_UNKNOWN_ROTATION)
     nowMs += GAP_MS
     group[0].animate(nowMs)
-    utils.checkEqual(compare(@refRest, group.ROT_180, OPEN_ROW, OPEN_COLUMN), @"  ... and the refused call left the ROT_180 group as it was", 0)
+    utils.checkEqual(compare(@referenceRest, group.ROT_180, OPEN_ROW, OPEN_COLUMN), @"  ... and the refused call left the ROT_180 group as it was", NO_MISMATCHES)
 
     display.commitScreenToPanelSet()
 #IFDEF MORPH_BYEYE
@@ -178,18 +193,32 @@ PUB go() | rot, mismatches, row, column, placedW, placedH, status
 #ENDIF
     utils.finish()
 
-PRI placeAndRest(grpIdx, rot, row, column, value) : width, height | status, areaW, areaH, frames
+PRI placeAndRest(grpIdx, rot, row, column, digitValue) : usedWidth, usedHeight | status, areaWidth, areaHeight, frames
 ' Place group grpIdx turned rot, in the area that fits its digit exactly (top-left at row, column), showing
-' value at rest, and draw it.
+' digitValue at rest, and draw it.
+'
+' @param grpIdx - the group's index (0 to NUM_ROTATIONS - 1)
+' @param rot - the group's rotation (a group.ROT_ value)
+' @param row - the group's top row
+' @param column - the group's left column
+' @param digitValue - the digit to show
+' @returns usedWidth - the width placeGroup() reports
+' @returns usedHeight - the height placeGroup() reports
 
-    areaW := (rot == group.ROT_90 or rot == group.ROT_270) ? AREA_HEIGHT : AREA_WIDTH
-    areaH := (rot == group.ROT_90 or rot == group.ROT_270) ? AREA_WIDTH : AREA_HEIGHT
+' Local Variables:
+' @local status - placeGroup()'s result
+' @local areaWidth - the area's width, swapped with its height at a quarter turn
+' @local areaHeight - the area's height, swapped with its width at a quarter turn
+' @local frames - how many frames the morph-out has taken
+
+    areaWidth := (rot == group.ROT_90 or rot == group.ROT_270) ? AREA_HEIGHT : AREA_WIDTH
+    areaHeight := (rot == group.ROT_90 or rot == group.ROT_270) ? AREA_WIDTH : AREA_HEIGHT
     if group[grpIdx].removeGroup() == morphStatus.SUCCESS       ' a placed group refuses placeGroup(): morph it out first
         repeat while group[grpIdx].isPlaced() and frames++ < MAX_REMOVE_FRAMES
             nowMs += GAP_MS
             group[grpIdx].animate(nowMs)
     group[grpIdx].setMoveDuration(MOVE_MS)
-    status, width, height := group[grpIdx].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, column, row, areaW, areaH, group.GRP_UP_COUNTER, group.LAYOUT_1_DIGIT, rot, color.cOrange, value)
+    status, usedWidth, usedHeight := group[grpIdx].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, column, row, areaWidth, areaHeight, group.GRP_UP_COUNTER, group.LAYOUT_1_DIGIT, rot, color.cOrange, digitValue)
     if status <> morphStatus.SUCCESS
         debug("PLACE    refused  status=", sdec_(status))
     nowMs += GAP_MS
@@ -199,6 +228,8 @@ PRI placeAndRest(grpIdx, rot, row, column, value) : width, height | status, area
 
 PRI stepToMid(grpIdx)
 ' Start the group's next value and draw it half way through its move.
+'
+' @param grpIdx - the group's index (0 to NUM_ROTATIONS - 1)
 
     group[grpIdx].nextTimeCycle()
     nowMs += GAP_MS
@@ -207,27 +238,51 @@ PRI stepToMid(grpIdx)
     group[grpIdx].animate(nowMs)
 
 PRI litPixels(pRef) : nLit | idx
-' Pixels of a reference that are not black.
+' Count the pixels of a reference that are not black.
+'
+' @param pRef - the address of the reference's first byte
+' @returns nLit - how many pixels are not black
+'
+' Local Variables:
+' @local idx - the reference pixel being examined
 
     nLit := 0
-    repeat idx from 0 to groupWidth * groupHeight - ONE
-        if BYTE[pRef][idx * BYTES_PER_PIXEL] | BYTE[pRef][idx * BYTES_PER_PIXEL + ONE] | BYTE[pRef][idx * BYTES_PER_PIXEL + group.HALF]
+    repeat idx from 0 to groupWidth * groupHeight - LAST_OFFSET
+        if BYTE[pRef][idx * BYTES_PER_PIXEL] | BYTE[pRef][idx * BYTES_PER_PIXEL + GREEN_BYTE] | BYTE[pRef][idx * BYTES_PER_PIXEL + BLUE_BYTE]
             nLit++
 
 PRI turnedWidth(rot) : width
+' Work out the group's width once turned: its unturned height at a quarter turn, else its width.
+'
+' @param rot - the group's rotation (a group.ROT_ value)
+' @returns width - the turned width in pixels
 
     width := (rot == group.ROT_90 or rot == group.ROT_270) ? groupHeight : groupWidth
 
 PRI turnedHeight(rot) : height
+' Work out the group's height once turned: its unturned width at a quarter turn, else its height.
+'
+' @param rot - the group's rotation (a group.ROT_ value)
+' @returns height - the turned height in pixels
 
     height := (rot == group.ROT_90 or rot == group.ROT_270) ? groupWidth : groupHeight
 
 PRI capture(pRef, row, column) | gy, gx, pPixel, pOut
 ' Read the unturned group's pixels into pRef, by group coordinate.
+'
+' @param pRef - the address of the reference's first byte
+' @param row - the group's top row
+' @param column - the group's left column
+'
+' Local Variables:
+' @local gy - the group row being read
+' @local gx - the group column being read
+' @local pPixel - the address of the screen pixel being read
+' @local pOut - the address of the reference pixel being filled
 
     bytefill(pRef, 0, MAX_GROUP_PIXELS * BYTES_PER_PIXEL)
-    repeat gy from 0 to groupHeight - ONE
-        repeat gx from 0 to groupWidth - ONE
+    repeat gy from 0 to groupHeight - LAST_OFFSET
+        repeat gx from 0 to groupWidth - LAST_OFFSET
             pPixel := pixels.pixelAddressAtRC(chainIndex, row + gy, column + gx)
             pOut := pRef + (gy * groupWidth + gx) * BYTES_PER_PIXEL
             if pPixel <> hub75Bffrs.NO_PIXEL
@@ -235,45 +290,73 @@ PRI capture(pRef, row, column) | gy, gx, pPixel, pOut
 
 PRI compare(pRef, rot, row, column) : mismatches | gy, gx, screenX, screenY, pPixel, pIn, idx
 ' Count the reference pixels that are not where the turn sends them (pixels off the display are skipped).
+'
+' @param pRef - the address of the reference's first byte
+' @param rot - the group's rotation (a group.ROT_ value)
+' @param row - the group's top row
+' @param column - the group's left column
+' @returns mismatches - how many reference pixels are off their turned place
+'
+' Local Variables:
+' @local gy - the group row of the reference pixel
+' @local gx - the group column of the reference pixel
+' @local screenX - the screen column the turn sends the pixel to
+' @local screenY - the screen row the turn sends the pixel to
+' @local pPixel - the address of the screen pixel
+' @local pIn - the address of the reference pixel
+' @local idx - the byte of the pixel being compared
 
     mismatches := 0
-    repeat gy from 0 to groupHeight - ONE
-        repeat gx from 0 to groupWidth - ONE
+    repeat gy from 0 to groupHeight - LAST_OFFSET
+        repeat gx from 0 to groupWidth - LAST_OFFSET
             case rot
                 group.ROT_0:
                     screenX := column + gx
                     screenY := row + gy
                 group.ROT_90:
-                    screenX := column + groupHeight - ONE - gy
+                    screenX := column + groupHeight - LAST_OFFSET - gy
                     screenY := row + gx
                 group.ROT_180:
-                    screenX := column + groupWidth - ONE - gx
-                    screenY := row + groupHeight - ONE - gy
+                    screenX := column + groupWidth - LAST_OFFSET - gx
+                    screenY := row + groupHeight - LAST_OFFSET - gy
                 group.ROT_270:
                     screenX := column + gy
-                    screenY := row + groupWidth - ONE - gx
+                    screenY := row + groupWidth - LAST_OFFSET - gx
 #IFDEF MORPH_BREAK_ROTATE
-            screenX += ONE
+            screenX += BREAK_PIXELS
 #ENDIF
             if screenX >= 0 and screenX < maxColumns and screenY >= 0 and screenY < maxRows
                 pPixel := pixels.pixelAddressAtRC(chainIndex, screenY, screenX)
                 pIn := pRef + (gy * groupWidth + gx) * BYTES_PER_PIXEL
-                repeat idx from 0 to BYTES_PER_PIXEL - ONE
+                repeat idx from 0 to BYTES_PER_PIXEL - LAST_OFFSET
                     if BYTE[pPixel][idx] <> BYTE[pIn][idx]
                         mismatches++
                         quit
 
 PRI rotationName(rot, pWhat) : pName
-' The check's name: the rotation, then what is counted (both strings live in DAT; one buffer, used at once).
+' Build the check's name: the rotation, then what is counted (both strings live in DAT; one buffer, used at once).
+'
+' @param rot - the group's rotation (a group.ROT_ value)
+' @param pWhat - zero-terminated text saying what is counted
+' @returns pName - zero-terminated name of the check, in the shared name buffer
 
     pName := @nameBuffer
     bytefill(@nameBuffer, 0, NAME_BYTES)
     bytemove(@nameBuffer, @@rotNames[rot], strsize(@@rotNames[rot]))
-    bytemove(@nameBuffer + strsize(@nameBuffer), pWhat, strsize(pWhat) <# (NAME_BYTES - ONE - strsize(@nameBuffer)))
+    bytemove(@nameBuffer + strsize(@nameBuffer), pWhat, strsize(pWhat) <# (NAME_BYTES - LAST_OFFSET - strsize(@nameBuffer)))
 
 #IFDEF MORPH_BYEYE
 PRI showByEye() | rot, column, startMs, status, width, height, frames
-' Four groups, one per rotation, counting up from 1 with slow moves, for Stephen to judge each turn's direction.
+' Show four groups, one per rotation, counting up from 1 with slow moves, for Stephen to judge each turn's direction.
+
+' Local Variables:
+' @local rot - the rotation (and group index) being set up or animated
+' @local column - the left column of the next group's area
+' @local startMs - the time the by-eye run began
+' @local status - placeGroup()'s result
+' @local width - the width placeGroup() reports
+' @local height - the height placeGroup() reports
+' @local frames - how many frames the morph-outs have taken
 
     repeat rot from group.ROT_0 to group.ROT_270                ' free every area the checks left placed
         group[rot].removeGroup()
@@ -304,16 +387,17 @@ PRI showByEye() | rot, column, startMs, status, width, height, frames
         nowMs := timeBase.update()
 
 PRI anyPlaced() : bAny | rot
-' TRUE while any of the four groups still holds its area.
+' Ask whether any of the four groups still holds its area.
+'
+' @returns bAny - TRUE while any of the four groups is placed
+'
+' Local Variables:
+' @local rot - the group being asked
 
     bAny := FALSE
     repeat rot from group.ROT_0 to group.ROT_270
         bAny |= group[rot].isPlaced()
 #ENDIF
-
-CON ' ---- Check names ----
-
-  NAME_BYTES = 96
 
 DAT ' rotation names
 

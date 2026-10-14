@@ -6,7 +6,7 @@
 ''               -- see below for terms of use
 ''   E-mail..... stephen@ironsheep.biz
 ''   Started.... Oct 2026
-''   Updated.... 12 Oct 2026
+''   Updated.... 14 Oct 2026
 ''
 '' =================================================================================================
 
@@ -50,10 +50,10 @@ CON ' ---- Test segment and moves ----
   SEG_COLUMN = DIGIT_COLUMN + 1
   SEG_LENGTH = 31                                               ' 31 pixels: the head runs 32 pixels over a move
   SEG_THICKNESS = 1
-  SLOT_A = 6                                                    ' segment A's slot in the digit
   MASK_BYTES = 64                                               ' the figure's masks at T1 L31: 31 + 3 + 4 + 1 bytes
   EDGE_TAIL_X256 = 256                                          ' the edge profile: a 1-pixel tail
   TENTHS = 10                                                   ' lit amounts are compared in tenths of a pixel
+  HALF_DIVISOR = 2                                              ' adds half a step before dividing, to round to nearest
   FULL_TENTHS = SEG_LENGTH * TENTHS
   MOVE_MS = 300                                                 ' the plan's verify case
   HALF_MOVE_MS = MOVE_MS / 2
@@ -66,7 +66,9 @@ CON ' ---- Test segment and moves ----
   X100 = 100                                                    ' onTenths() works in hundredths of a pixel ...
   HALF_X100 = X100 / 2                                          ' ... half a pixel
   SQUARE_X100_TO_TENTHS = 2 * X100 * X100 / TENTHS              ' (h x 100)^2 / this = h^2 / 2 in tenths
-  ONE_PIXEL = 1
+  ONE_PIXEL = 1                                                 ' the head runs one pixel past the segment's last pixel (L + 1)
+  DARK_TENTHS = 0                                               ' the expected lit amount of a segment that is off
+  NO_LIT_PIXELS = 0                                             ' the expected count of lit pixels of a segment that is off
   HALF_OFF_TENTHS = 155                                         ' p = 0.5 turning off: h = 16, on amount 15.5, off = 31 - 15.5
 
 CON ' ---- Long frame ----
@@ -85,7 +87,7 @@ CON ' ---- Injected times and easing ----
   INJECT_GAP_MS = 10_000                                        ' each injected move starts this far after the previous one
   ' smoothstep, worked out by hand: p_s = 3p^2 - 2p^3, h = 32 p_s, on amount h - 1/2
   SMOOTH_TENTHS_AT_QUARTER = 45                                 ' p = 0.25: p_s = 0.15625, h = 5.0, amount 4.5
-  SMOOTH_TENTHS_AT_3_QUARTERS = 265                         ' p = 0.75: p_s = 0.84375, h = 27.0, amount 26.5
+  SMOOTH_TENTHS_AT_3_QUARTERS = 265                             ' p = 0.75: p_s = 0.84375, h = 27.0, amount 26.5
   LINEAR_TENTHS_AT_QUARTER = 75                                 ' p = 0.25 linear: h = 8.0, amount 7.5 (smoothstep must differ from this)
 
 CON ' ---- Group under test ----
@@ -131,6 +133,9 @@ PUB go() | level
 '' Run the motion test: start the display, run each section, finish.
 ''
 
+' Local Variables:
+' @local level - the ramp level being filled in (its red byte is the level)
+
     utils.beginSuite(@"morphMotion time-based motion")
     chainIndex := hub75Bffrs.indexForHub75ChainId(hub75Bffrs.HUB75_ADAPTER_1)
     display.start(display.HUB75_ADAPTER_1)
@@ -147,10 +152,10 @@ PUB go() | level
     dig.initialize(chainIndex, maxRows, maxColumns)
     dig.placeDigit(DIGIT_ROW, DIGIT_COLUMN, SEG_LENGTH, SEG_THICKNESS, dig.DIGIT_HIDDEN, @mask, @linearRamp, EDGE_TAIL_X256)
     dig.animate(timeBase.update())
-    utils.checkEqual(litTenths(), @"probe: the placed segment reads all dark", 0)
+    utils.checkEqual(litTenths(), @"probe: the placed segment reads all dark", DARK_TENTHS)
 
     checkMoveTiming(@"natural frame rate, turning on", NO_EXTRA_MS, seg.CMD_TURN_ON | seg.CMD_LT_TO_RT, FULL_TENTHS)
-    checkMoveTiming(@"slow frame rate, turning off", SLOW_FRAME_EXTRA_MS, seg.CMD_TURN_OFF | seg.CMD_LT_TO_RT, 0)
+    checkMoveTiming(@"slow frame rate, turning off", SLOW_FRAME_EXTRA_MS, seg.CMD_TURN_OFF | seg.CMD_LT_TO_RT, DARK_TENTHS)
     checkLongFrame()
     checkSnap()
     checkEasing()
@@ -160,11 +165,27 @@ PUB go() | level
 
 
 PRI checkMoveTiming(pName, extraMs, command, endTenths) | nowMs, startMs, prevMs, maxFrameMs, frameCount, startTick, endTick, measuredMs, tickMs
-    ' run a MOVE_MS move in a real frame loop (update, animate, commit) and time it from the frame that stamps its start
-    ' to the frame that completes it
+' Run a MOVE_MS move in a real frame loop (update, animate, commit) and time it from the frame that stamps its start
+' to the frame that completes it.
+'
+' @param pName - zero-terminated name of the check
+' @param extraMs - milliseconds waited in every frame (0 for the natural frame rate)
+' @param command - the segment command to run: a turn on or off, with its style
+' @param endTenths - the lit amount the segment must end on, in tenths of a pixel
+
+' Local Variables:
+' @local nowMs - the time base's time at the latest frame
+' @local startMs - the time of the frame that stamps the move's start
+' @local prevMs - the time of the frame before this one
+' @local maxFrameMs - the longest frame seen
+' @local frameCount - how many frames the move took
+' @local startTick - the system counter when the move started
+' @local endTick - the system counter at the latest frame
+' @local measuredMs - the move's length by the time base
+' @local tickMs - the move's length by the system counter
 
     dig.setMotion(MOVE_MS, timeBase.EASE_LINEAR)
-    dig.commandSegment(SLOT_A, command)
+    dig.commandSegment(dig.SLOT_A, command)
     nowMs := timeBase.update()
     startTick := getct()
     startMs := nowMs
@@ -195,7 +216,20 @@ PRI checkMoveTiming(pName, extraMs, command, endTenths) | nowMs, startMs, prevMs
 
 
 PRI checkLongFrame() | nowMs, leadStartMs, startMs, litBefore, litAfter, elapsedBefore, elapsedAfter, expectedBefore, expectedAfter, fpsBeforeX100, fpsAfterX100
-    ' natural frames, then a 3 s move whose middle holds one frame of LONG_FRAME_MS
+' Run natural frames, then a 3 s move whose middle holds one frame of LONG_FRAME_MS, and check the jump.
+
+' Local Variables:
+' @local nowMs - the time base's time at the latest frame
+' @local leadStartMs - the time the idle lead-in frames began
+' @local startMs - the time of the frame that starts the move
+' @local litBefore - the lit amount before the long frame, in tenths of a pixel
+' @local litAfter - the lit amount after the long frame, in tenths of a pixel
+' @local elapsedBefore - the move's elapsed time before the long frame
+' @local elapsedAfter - the move's elapsed time after the long frame
+' @local expectedBefore - the lit amount the elapsed time says before the long frame
+' @local expectedAfter - the lit amount the elapsed time says after the long frame
+' @local fpsBeforeX100 - the frame-rate meter's figure before the long frame, times 100
+' @local fpsAfterX100 - the frame-rate meter's figure after the long frame, times 100
 
     dig.setMotion(LONG_MOVE_MS, timeBase.EASE_LINEAR)
     nowMs := timeBase.update()
@@ -205,7 +239,7 @@ PRI checkLongFrame() | nowMs, leadStartMs, startMs, litBefore, litAfter, elapsed
         nowMs := timeBase.update()
     fpsBeforeX100 := timeBase.framesPerSecondX100()
 
-    dig.commandSegment(SLOT_A, seg.CMD_TURN_ON | seg.CMD_LT_TO_RT)
+    dig.commandSegment(dig.SLOT_A, seg.CMD_TURN_ON | seg.CMD_LT_TO_RT)
     nowMs := timeBase.update()
     startMs := nowMs
     dig.animate(nowMs)
@@ -242,43 +276,49 @@ PRI checkLongFrame() | nowMs, leadStartMs, startMs, litBefore, litAfter, elapsed
 
 
 PRI checkSnap() | injectMs
-    ' injected times: a command that arrives mid-move, opposite and same-direction
+' Check a command that arrives mid-move, opposite and same-direction, using injected times.
+
+' Local Variables:
+' @local injectMs - the injected time of the current frame
 
     dig.setMotion(MOVE_MS, timeBase.EASE_LINEAR)
     injectMs := INJECT_BASE_MS
 
     ' the segment is on: turning it off left to right, half way
-    dig.commandSegment(SLOT_A, seg.CMD_TURN_OFF | seg.CMD_LT_TO_RT)
+    dig.commandSegment(dig.SLOT_A, seg.CMD_TURN_OFF | seg.CMD_LT_TO_RT)
     dig.animate(injectMs)
     dig.animate(injectMs + HALF_MOVE_MS)
     utils.checkEqual(litTenths(), @"mid-move: half of the segment has turned off (15.5 px lit)", HALF_OFF_TENTHS)
 
     ' the opposite command: the off move snaps to its end (dark), then the on move starts from nothing lit
-    dig.commandSegment(SLOT_A, seg.CMD_TURN_ON | seg.CMD_RT_TO_LT)
+    dig.commandSegment(dig.SLOT_A, seg.CMD_TURN_ON | seg.CMD_RT_TO_LT)
     injectMs += INJECT_GAP_MS
     dig.animate(injectMs)
-    utils.checkEqual(litTenths(), @"opposite command mid-move: snapped to off, the new move starts dark", 0)
+    utils.checkEqual(litTenths(), @"opposite command mid-move: snapped to off, the new move starts dark", DARK_TENTHS)
     utils.checkEqual(dig.isAnimationComplete(), @"opposite command mid-move: the new move is running", FALSE)
     dig.animate(injectMs + MOVE_MS)
     utils.checkEqual(litTenths(), @"opposite command mid-move: the digit ends on the last command's target", FULL_TENTHS)
 
     ' the same command again mid-move: the move snaps to its end, and the repeat has nothing left to do
-    dig.commandSegment(SLOT_A, seg.CMD_TURN_OFF | seg.CMD_LT_TO_RT)
+    dig.commandSegment(dig.SLOT_A, seg.CMD_TURN_OFF | seg.CMD_LT_TO_RT)
     injectMs += INJECT_GAP_MS
     dig.animate(injectMs)
     dig.animate(injectMs + HALF_MOVE_MS)
-    dig.commandSegment(SLOT_A, seg.CMD_TURN_OFF | seg.CMD_LT_TO_RT)
+    dig.commandSegment(dig.SLOT_A, seg.CMD_TURN_OFF | seg.CMD_LT_TO_RT)
     dig.animate(injectMs + HALF_MOVE_MS)
-    utils.checkEqual(litTenths(), @"same command mid-move: snapped to its end (off)", 0)
+    utils.checkEqual(litTenths(), @"same command mid-move: snapped to its end (off)", DARK_TENTHS)
     utils.checkEqual(dig.isAnimationComplete(), @"same command mid-move: nothing left to move", TRUE)
 
 
 PRI checkEasing() | injectMs
-    ' injected times: smoothstep at a quarter and three quarters of the move
+' Check smoothstep easing at a quarter and three quarters of the move, using injected times.
+
+' Local Variables:
+' @local injectMs - the injected time of the current frame
 
     dig.setMotion(MOVE_MS, timeBase.EASE_SMOOTH)
     injectMs := INJECT_BASE_MS
-    dig.commandSegment(SLOT_A, seg.CMD_TURN_ON | seg.CMD_LT_TO_RT)
+    dig.commandSegment(dig.SLOT_A, seg.CMD_TURN_ON | seg.CMD_LT_TO_RT)
     dig.animate(injectMs)
     dig.animate(injectMs + QUARTER_MOVE_MS)
     utils.checkEqual(litTenths(), @"smoothstep at a quarter of the move", SMOOTH_TENTHS_AT_QUARTER)
@@ -291,7 +331,11 @@ PRI checkEasing() | injectMs
 
 
 PRI checkGroupSetters() | injectMs, bAllComplete
-    ' the group's setters: accepted values, refused values, then the 0 -> 1 transition shows nothing changed
+' Check the group's setters: accepted values, refused values, then the 0 -> 1 transition shows nothing changed.
+
+' Local Variables:
+' @local injectMs - the injected time of the current frame
+' @local bAllComplete - TRUE while every asked isAnimationComplete() has answered TRUE
 
     group.setProfile(timeBase.PROFILE_EDGE)
     group.setThickness(SEG_THICKNESS)
@@ -301,12 +345,14 @@ PRI checkGroupSetters() | injectMs, bAllComplete
     utils.checkEqual(groupALit(), @"probe: digit 0 shows segment A fully lit", GROUP_SEG_LENGTH)
 
     utils.checkEqual(group.setMoveDuration(MOVE_MS), @"setMoveDuration accepts 300 ms", morphStatus.SUCCESS)
+    ' one ms under the minimum, and one ms over the maximum, are out of range: each setter must refuse with E_OUT_OF_RANGE (R-10.2)
     utils.checkEqual(group.setMoveDuration(group.MIN_MOVE_MS - ONE_MS), @"setMoveDuration refuses 0 ms", morphStatus.E_OUT_OF_RANGE)
     utils.checkEqual(group.setMoveDuration(group.MAX_TIME_MS + ONE_MS), @"setMoveDuration refuses one ms over the limit", morphStatus.E_OUT_OF_RANGE)
     utils.checkEqual(group.setHoldDuration(HOLD_MS), @"setHoldDuration accepts 200 ms", morphStatus.SUCCESS)
     utils.checkEqual(group.setHoldDuration(group.MIN_HOLD_MS - ONE_MS), @"setHoldDuration refuses -1 ms", morphStatus.E_OUT_OF_RANGE)
     utils.checkEqual(group.setHoldDuration(group.MAX_TIME_MS + ONE_MS), @"setHoldDuration refuses one ms over the limit", morphStatus.E_OUT_OF_RANGE)
     utils.checkEqual(group.setEasing(timeBase.EASE_SMOOTH), @"setEasing accepts smoothstep", morphStatus.SUCCESS)
+    ' no easing style has the value UNKNOWN_EASING_STYLE: setEasing() must refuse it with E_UNKNOWN_EASING
     utils.checkEqual(group.setEasing(UNKNOWN_EASING_STYLE), @"setEasing refuses an unknown style", morphStatus.E_UNKNOWN_EASING)
 
     ' the 0 -> 1 transition runs with what was accepted: 300 ms, smoothstep, a 200 ms hold
@@ -319,7 +365,7 @@ PRI checkGroupSetters() | injectMs, bAllComplete
     utils.checkEqual(group.isAnimationComplete(), @"refused durations left 300 ms in place: still moving at 299 ms", FALSE)
     group.animate(injectMs + MOVE_MS)
     utils.checkEqual(group.isAnimationComplete(), @"refused durations left 300 ms in place: complete at 300 ms", TRUE)
-    utils.checkEqual(groupALit(), @"the group's transition ends on its target (A dark)", 0)
+    utils.checkEqual(groupALit(), @"the group's transition ends on its target (A dark)", NO_LIT_PIXELS)
     bAllComplete := TRUE
     repeat REPEAT_ASKS
         if group.isAnimationComplete() == FALSE
@@ -330,7 +376,14 @@ PRI checkGroupSetters() | injectMs, bAllComplete
 
 
 PRI onTenths(elapsedMs, moveMs) : amountTenths | headX100
-    ' the lit amount turning on, in tenths of a pixel, after elapsedMs of a linear moveMs move (see the notes above)
+' Work out the lit amount turning on, in tenths of a pixel, after elapsedMs of a linear moveMs move (see the notes above).
+'
+' @param elapsedMs - the time passed since the move started
+' @param moveMs - the move's duration
+' @returns amountTenths - the lit amount, in tenths of a pixel
+
+' Local Variables:
+' @local headX100 - how far the head has run, in hundredths of a pixel
 
     headX100 := muldiv64(elapsedMs <# moveMs, (SEG_LENGTH + ONE_PIXEL) * X100, moveMs)
     if headX100 <= X100
@@ -342,7 +395,14 @@ PRI onTenths(elapsedMs, moveMs) : amountTenths | headX100
 
 
 PRI litTenths() : amountTenths | column, pPixel, total
-    ' the test segment's lit amount, in tenths of a pixel: the red bytes of its row (the level, through the linear ramp)
+' Read the test segment's lit amount, in tenths of a pixel: the red bytes of its row (the level, through the linear ramp).
+'
+' @returns amountTenths - the lit amount, in tenths of a pixel
+
+' Local Variables:
+' @local column - the pixel column being read
+' @local pPixel - the address of the pixel being read
+' @local total - the sum of the red bytes
 
     total := 0
     column := SEG_COLUMN
@@ -350,17 +410,31 @@ PRI litTenths() : amountTenths | column, pPixel, total
         pPixel := pixels.pixelAddressAtRC(chainIndex, SEG_ROW, column++)
         if pPixel <> hub75Bffrs.NO_PIXEL
             total += BYTE[pPixel]
-    amountTenths := (total * TENTHS + morphColor.RAMP_MAX / (TENTHS / TENTHS + ONE_PIXEL)) / morphColor.RAMP_MAX
+    amountTenths := (total * TENTHS + morphColor.RAMP_MAX / HALF_DIVISOR) / morphColor.RAMP_MAX
 
 
 PRI groupALit() : nLit
-    ' lit pixels of the group's segment A
+' Count the lit pixels of the group's segment A.
+'
+' @returns nLit - how many pixels of segment A are lit
 
     nLit := litCount(GROUP_ROW, GROUP_A_COLUMN, GROUP_SEG_LENGTH)
 
 
 PRI litCount(row, firstColumn, nColumns) : nLit | column, pPixel, byteIdx, nBytes, bLit
-    ' count the pixels of a row run whose screen-buffer bytes are not all zero (black is all zero)
+' Count the pixels of a row run whose screen-buffer bytes are not all zero (black is all zero).
+'
+' @param row - the pixel row
+' @param firstColumn - the run's first column
+' @param nColumns - how many columns the run has
+' @returns nLit - how many pixels of the run are lit
+
+' Local Variables:
+' @local column - the pixel column being read
+' @local pPixel - the address of the pixel being read
+' @local byteIdx - the byte of the pixel being read
+' @local nBytes - how many bytes make up one pixel
+' @local bLit - TRUE once a byte of the pixel is not zero
 
     nLit := 0
     nBytes := hub75Bffrs.bytesPerColor(chainIndex)

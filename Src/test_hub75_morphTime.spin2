@@ -6,7 +6,7 @@
 ''               -- see below for terms of use
 ''   E-mail..... stephen@ironsheep.biz
 ''   Started.... Oct 2026
-''   Updated.... 12 Oct 2026
+''   Updated.... 14 Oct 2026
 ''
 '' =================================================================================================
 
@@ -77,9 +77,9 @@ VAR
     long    elapsedAtEnd
     long    getMsAtEnd
     long    otherElapsedAtEnd
-    long    refFrames                                           ' update() calls the test counts itself, seconds 60 to 70
-    long    refStartTick
-    long    refRateX100
+    long    referenceFrames                                     ' update() calls the test counts itself, seconds 60 to 70
+    long    referenceStartTick
+    long    referenceRateX100
     long    fpsBeforeLongX100
     long    fpsAfterLongX100
 
@@ -95,8 +95,12 @@ PUB go()
 
 
 PRI measureUpdateCost() | bracketStart, bracketTicks
-    ' the whole per-frame cost of the clock and the meter: UPDATE_COST_REPS calls in one bracket, loop pass included;
-    ' runs before the timeline, which starts again from reset()
+' Measure the whole per-frame cost of the clock and the meter: UPDATE_COST_REPS calls in one bracket, loop pass
+' included; runs before the timeline, which starts again from reset().
+
+' Local Variables:
+' @local bracketStart - the system counter when the bracket began
+' @local bracketTicks - clock ticks the bracket took
 
     timeBase.reset()
     bracketStart := utils.timeStart()
@@ -107,7 +111,12 @@ PRI measureUpdateCost() | bracketStart, bracketTicks
 
 
 PRI runTimeline() | secondIdx, nextTick, guardTicks
-    ' frame the time object between whole-second boundaries, and compare at each boundary
+' Frame the time object between whole-second boundaries, and compare at each boundary.
+
+' Local Variables:
+' @local secondIdx - the whole second of the run being reached
+' @local nextTick - the absolute counter value of that second's boundary
+' @local guardTicks - ticks before a boundary at which framing stops
 
     guardTicks := muldiv64(clkfreq, FRAME_US * GUARD_FRAMES, utils.MICROS_PER_SECOND)
     timeBase.reset()
@@ -125,30 +134,41 @@ PRI runTimeline() | secondIdx, nextTick, guardTicks
 
 
 PRI runFramesUntil(targetTick, guardTicks, secondIdx)
-    ' call update() once per frame until fewer than GUARD_FRAMES frames remain before targetTick
+' Call update() once per frame until fewer than GUARD_FRAMES frames remain before targetTick.
+'
+' @param targetTick - the absolute counter value of the boundary being approached
+' @param guardTicks - ticks before targetTick at which framing stops
+' @param secondIdx - the whole second of the run being reached
 
     repeat while (targetTick - sampleTick()) > guardTicks
         waitus(FRAME_US)
         timeBase.update()
         if secondIdx > NORMAL_CHECK_SECOND && secondIdx <= LONG_FRAME_START_SECOND
-            refFrames++
+            referenceFrames++
 
 
 PRI checkBoundary(secondIdx) | boundaryTick, nowMs, deviationMs
-    ' at a whole second: one update(), compared with secondIdx x 1000 ms
+' Compare the time object with the reference at a whole second: one update(), compared with secondIdx x 1000 ms.
+'
+' @param secondIdx - the whole second of the run being reached
+
+' Local Variables:
+' @local boundaryTick - the counter value read at the boundary
+' @local nowMs - the elapsed milliseconds update() returned
+' @local deviationMs - nowMs minus the seconds counted by the reference, in milliseconds
 
     boundaryTick := sampleTick()
     nowMs := timeBase.update()
     deviationMs := nowMs - secondIdx * timeBase.MS_PER_SECOND
     maxDeviationMs := maxDeviationMs #> abs deviationMs
     if secondIdx > NORMAL_CHECK_SECOND && secondIdx <= LONG_FRAME_START_SECOND
-        refFrames++
+        referenceFrames++
     case secondIdx
         NORMAL_CHECK_SECOND:
             deviationAtNormal := deviationMs
-            refStartTick := boundaryTick
+            referenceStartTick := boundaryTick
         LONG_FRAME_START_SECOND:
-            refRateX100 := muldiv64(refFrames * timeBase.FPS_SCALE, clkfreq, boundaryTick - refStartTick)
+            referenceRateX100 := muldiv64(referenceFrames * timeBase.FPS_SCALE, clkfreq, boundaryTick - referenceStartTick)
             fpsBeforeLongX100 := timeBase.framesPerSecondX100()
         LONG_FRAME_END_SECOND:
             deviationAfterLong := deviationMs
@@ -163,7 +183,9 @@ PRI checkBoundary(secondIdx) | boundaryTick, nowMs, deviationMs
 
 
 PRI sampleTick() : nowTick
-    ' read the counter; count a wrap when it reads lower (unsigned) than the previous sample
+' Read the counter; count a wrap when it reads lower (unsigned) than the previous sample.
+'
+' @returns nowTick - the system counter now
 
     nowTick := getct()
     if nowTick +< lastSeenTick
@@ -172,11 +194,14 @@ PRI sampleTick() : nowTick
 
 
 PRI reportChecks() | getMsElapsed
-    ' print the summary lines, then one PASS/FAIL line per check
+' Print the summary lines, then one PASS/FAIL line per check.
+
+' Local Variables:
+' @local getMsElapsed - milliseconds between the start and the end of the run, from GETMS()
 
     getMsElapsed := getMsAtEnd - startGetMs
     debug("TIMEBASE  summary  elapsed_ms=", sdec_(elapsedAtEnd), "  expected_ms=", sdec_(RUN_SECONDS * timeBase.MS_PER_SECOND), "  max_deviation_ms=", sdec_(maxDeviationMs), "  wraps=", udec_(wrapCount), "  getms_elapsed_ms=", sdec_(getMsElapsed), "  second_instance_ms=", sdec_(otherElapsedAtEnd))
-    debug("FPS       meter_x100=", udec_(fpsBeforeLongX100), "  reference_x100=", udec_(refRateX100), "  reference_frames=", udec_(refFrames), "  after_long_frame_x100=", udec_(fpsAfterLongX100))
+    debug("FPS       meter_x100=", udec_(fpsBeforeLongX100), "  reference_x100=", udec_(referenceRateX100), "  reference_frames=", udec_(referenceFrames), "  after_long_frame_x100=", udec_(fpsAfterLongX100))
 
     utils.checkEqual(abs deviationAtNormal <= TOLERANCE_MS, @"60 s: elapsed total within 1 ms of the seconds counted by waitct", TRUE)
     utils.checkEqual(abs deviationAtEnd <= TOLERANCE_MS, @"90 s: elapsed total within 1 ms of the seconds counted by waitct", TRUE)
@@ -185,7 +210,7 @@ PRI reportChecks() | getMsElapsed
     utils.checkEqual(abs deviationAfterLong <= TOLERANCE_MS, @"a 10 s frame (over 2^31 ticks) is counted in full", TRUE)
     utils.checkEqual(abs (getMsElapsed - elapsedAtEnd) <= TOLERANCE_MS, @"GETMS cross-check: 64-bit counter agrees within 1 ms", TRUE)
     utils.checkEqual(otherElapsedAtEnd, @"a second OBJ declaration sees the same total (DAT singleton)", elapsedAtEnd)
-    utils.checkEqual(abs (fpsBeforeLongX100 - refRateX100) * PERCENT <= refRateX100 * FPS_TOLERANCE_PERCENT, @"FPS meter within 2 percent of the test's own frame count", TRUE)
+    utils.checkEqual(abs (fpsBeforeLongX100 - referenceRateX100) * PERCENT <= referenceRateX100 * FPS_TOLERANCE_PERCENT, @"FPS meter within 2 percent of the test's own frame count", TRUE)
     utils.checkEqual(fpsAfterLongX100 < fpsBeforeLongX100 / DROP_DIVISOR, @"FPS meter reports the drop after the long frame", TRUE)
 
 

@@ -6,7 +6,7 @@
 ''               -- see below for terms of use
 ''   E-mail..... stephen@ironsheep.biz
 ''   Started.... Oct 2026
-''   Updated.... 12 Oct 2026
+''   Updated.... 14 Oct 2026
 ''
 '' =================================================================================================
 
@@ -46,6 +46,10 @@ CON ' ---- Curve values worked out by hand ----
   MID_ORANGE_RED = 56
   MID_ORANGE_GREEN = 36
   NO_CHANNEL = 0
+  ' expected results of zero
+  NO_LIGHT = 0                                                  ' the curve at intensity 0
+  NO_DROPS = 0                                                  ' levels where a channel is lower than at the level below
+  NO_LEAK_BITS = 0                                              ' bits set in a channel that is 0 in the color
 
 CON ' ---- Gradient bar ----
 
@@ -96,6 +100,10 @@ PUB go() | colorIdx, startTick
 '' Run the color test: start the display, check the curve and each color's ramp, time them, show the bars.
 ''
 
+' Local Variables:
+' @local colorIdx - the color under test
+' @local startTick - the system counter when the timed build began
+
     utils.beginSuite(@"morphColor gamma and ramps")
     chainIndex := hub75Bffrs.indexForHub75ChainId(hub75Bffrs.HUB75_ADAPTER_1)
     display.start(display.HUB75_ADAPTER_1)
@@ -126,13 +134,17 @@ PUB go() | colorIdx, startTick
     utils.finish()
 
 PRI checkCurve()
+' Check the gamma curve: zero at intensity 0, CURVE_FULL at the top, and the same on a second call.
 
-    utils.checkEqual(morphColor.curveAt(morphColor.RAMP_OFF), @"curve: 0 at intensity 0", 0)
+    utils.checkEqual(morphColor.curveAt(morphColor.RAMP_OFF), @"curve: 0 at intensity 0", NO_LIGHT)
     utils.checkEqual(morphColor.curveAt(morphColor.RAMP_MAX), @"curve: CURVE_FULL at intensity 255", morphColor.CURVE_FULL)
     utils.checkEqual(morphColor.curveAt(morphColor.RAMP_MAX), @"curve: a second call returns the same (built once)", morphColor.CURVE_FULL)
 
 PRI checkRamp(rgbColor, pName) | leakMask, leakBits, drops, levelIdx
-' One color's ramp, just built in ramp[]: the full entry, black, never decreasing, no leak.
+' Check one color's ramp, just built in ramp[]: the full entry, black, never decreasing, no leak.
+'
+' @param rgbColor - the color under test, $RRGGBB
+' @param pName - zero-terminated name of the color
 
 ' Local Variables:
 ' @local leakMask - packed bytes of the channels that are 0 in rgbColor, at full level
@@ -148,49 +160,72 @@ PRI checkRamp(rgbColor, pName) | leakMask, leakBits, drops, levelIdx
     repeat levelIdx from morphColor.RAMP_FIRST_LIT to morphColor.RAMP_MAX
         if channelDropped(ramp[levelIdx - PREV_LEVEL], ramp[levelIdx])
             drops++
-    utils.checkEqual(drops, @"every channel never decreases from one level to the next", 0)
+    utils.checkEqual(drops, @"every channel never decreases from one level to the next", NO_DROPS)
 
     leakMask := leakMaskOf(rgbColor)
     leakBits := 0
     repeat levelIdx from morphColor.RAMP_OFF to morphColor.RAMP_MAX
         leakBits |= ramp[levelIdx]
-    utils.checkEqual(leakBits & leakMask, @"a channel that is 0 in the color is 0 at every level", 0)
+    utils.checkEqual(leakBits & leakMask, @"a channel that is 0 in the color is 0 at every level", NO_LEAK_BITS)
 
 PRI checkMidWhite()
+' Check white at intensities 128 and 64 against the hand-worked curve.
 
     utils.checkEqual(ramp[MID_LEVEL], @"white at 128 matches the hand-worked curve (56)", pixels.packedCorrectedRgb(chainIndex, MID_WHITE, MID_WHITE, MID_WHITE))
     utils.checkEqual(ramp[QUARTER_LEVEL], @"white at 64 matches the hand-worked curve (12)", pixels.packedCorrectedRgb(chainIndex, QUARTER_WHITE, QUARTER_WHITE, QUARTER_WHITE))
 
 PRI checkMidOrange()
+' Check orange at intensity 128 against the hand-worked curve: it keeps its hue.
 
     utils.checkEqual(ramp[MID_LEVEL], @"orange at 128 keeps its hue (56, 36, 0)", pixels.packedCorrectedRgb(chainIndex, MID_ORANGE_RED, MID_ORANGE_GREEN, NO_CHANNEL))
 
 PRI channelDropped(lowerPacked, upperPacked) : bDropped
-' TRUE when any packed channel of upperPacked is below the same channel of lowerPacked.
+' Ask whether any packed channel of upperPacked is below the same channel of lowerPacked.
+'
+' @param lowerPacked - the packed color at the lower level
+' @param upperPacked - the packed color at the level above it
+' @returns bDropped - TRUE when some channel is lower at the upper level
 
     bDropped := packedChannel(upperPacked, 0) < packedChannel(lowerPacked, 0)
     bDropped |= packedChannel(upperPacked, colorUtils.PACKED_GREEN_SHIFT) < packedChannel(lowerPacked, colorUtils.PACKED_GREEN_SHIFT)
     bDropped |= packedChannel(upperPacked, colorUtils.PACKED_BLUE_SHIFT) < packedChannel(lowerPacked, colorUtils.PACKED_BLUE_SHIFT)
 
 PRI packedChannel(packedColor, channelShift) : channelByte
-' One byte of a packed color: red at shift 0, green at PACKED_GREEN_SHIFT, blue at PACKED_BLUE_SHIFT.
+' Extract one byte of a packed color: red at shift 0, green at PACKED_GREEN_SHIFT, blue at PACKED_BLUE_SHIFT.
+'
+' @param packedColor - the color packed by the driver
+' @param channelShift - the shift that brings the wanted channel to the low byte
+' @returns channelByte - that channel, 0 to CHANNEL_MASK
 
     channelByte := (packedColor >> channelShift) & colorUtils.CHANNEL_MASK
 
 PRI leakMaskOf(rgbColor) : leakMask | red, green, blue
-' The packed bytes, at full level, of every channel that is 0 in rgbColor: a ramp entry must have none of these bits.
+' Build the packed bytes, at full level, of every channel that is 0 in rgbColor: a ramp entry must have none of these bits.
+'
+' @param rgbColor - the color under test, $RRGGBB
+' @returns leakMask - the packed bytes of the channels that are 0 in rgbColor
+
+' Local Variables:
+' @local red - the color's red channel
+' @local green - the color's green channel
+' @local blue - the color's blue channel
 
     red, green, blue := colorUtils.rgbForCValue(rgbColor)
     leakMask := pixels.packedCorrectedRgb(chainIndex, zeroChannelMask(red), zeroChannelMask(green), zeroChannelMask(blue))
 
 PRI zeroChannelMask(channelLevel) : maskLevel
-' Full level when a color's channel is 0, else 0: the level to pack for the leak mask.
+' Choose full level when a color's channel is 0, else 0: the level to pack for the leak mask.
+'
+' @param channelLevel - the color's channel, 0 to CHANNEL_MASK
+' @returns maskLevel - CHANNEL_MASK when the channel is 0, else 0
 
     maskLevel := channelLevel == 0 ? colorUtils.CHANNEL_MASK : 0
 
 #IFDEF MORPH_BREAK_RAMP
 PRI breakRamp(rgbColor)
-' Falsification hook: damage the ramp so the full-color, never-decreases and no-leak checks must fail.
+' Damage the ramp (falsification hook) so the full-color, never-decreases and no-leak checks must fail.
+'
+' @param rgbColor - the color under test, $RRGGBB
 
     ramp[morphColor.RAMP_MAX] ^= BREAK_LEAK_BITS << colorUtils.PACKED_GREEN_SHIFT
     ramp[BREAK_MID_LEVEL] := ramp[morphColor.RAMP_OFF]
@@ -198,9 +233,10 @@ PRI breakRamp(rgbColor)
 #ENDIF
 
 PRI showGradientBars() | colorIdx, bandRows, row, column, lastColumn
-' One band of rows per color, intensity rising from 0 at the left edge to RAMP_MAX at the right; held for GRADIENT_HOLD_MS.
+' Draw one band of rows per color, intensity rising from 0 at the left edge to RAMP_MAX at the right; held for GRADIENT_HOLD_MS.
 
 ' Local Variables:
+' @local colorIdx - the color whose band is being drawn
 ' @local bandRows - display rows per color band
 ' @local row - display row being drawn
 ' @local column - display column whose intensity is being looked up

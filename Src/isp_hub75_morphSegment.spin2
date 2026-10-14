@@ -7,7 +7,7 @@
 ''               -- see below for terms of use
 ''   E-mail..... stephen@ironsheep.biz
 ''   Started.... Jan 2021
-''   Updated.... 12 Oct 2026
+''   Updated.... 14 Oct 2026
 ''   Version.... v1.0.0
 ''
 '' =================================================================================================
@@ -34,9 +34,19 @@
 
 CON ' segment states, orientations and the command byte
 
-' Segment Orientation Values
+' Segment Orientation Values (one bit each; the bit position is the segment's digit slot, G=0 .. A=6):
+'  SOR_UNKNOWN  - not placed yet
+'  SOR_TOP_A    - the top horizontal       SOR_RIGHT_B - the upper right vertical
+'  SOR_RIGHT_C  - the lower right vertical SOR_BOTTOM_D - the bottom horizontal
+'  SOR_LEFT_E   - the lower left vertical  SOR_LEFT_F  - the upper left vertical
+'  SOR_MIDDLE_G - the middle horizontal
 #0, SOR_UNKNOWN, #$40, SOR_TOP_A, #$20, SOR_RIGHT_B, #$10, SOR_RIGHT_C, #$08, SOR_BOTTOM_D, #$04, SOR_LEFT_E, #$02, SOR_LEFT_F, #$01, SOR_MIDDLE_G
-' Segment State values
+' Segment State values:
+'  STATE_UNKNOWN     - not initialized
+'  STATE_TURNING_OFF - a move that ends dark is in flight
+'  STATE_OFF         - at rest, dark
+'  STATE_TURNING_ON  - a move that ends lit is in flight
+'  STATE_ON          - at rest, lit
 #0, STATE_UNKNOWN, STATE_TURNING_OFF, STATE_OFF, STATE_TURNING_ON, STATE_ON
 
 ' Command Flags %GGG-AAAT where: %GGGx_xxxx = segment, %xxxx_AAAx = style, %xxxx_xxxT = ON/OFF
@@ -142,8 +152,8 @@ PUB setTail(segTailX256)
 PUB setMotion(durationMs, easeStyle)
 '' Set how this segment moves: the duration of every move and its easing; a move in flight follows them from the next animate().
 ''
-'' @param durationMs - Duration of each move in ms; morphCounters.setMoveDuration() checks the range
-'' @param easeStyle - Easing style, timeBase.EASE_LINEAR or timeBase.EASE_SMOOTH; morphCounters.setEasing() checks it
+'' @param durationMs - Duration of each move in ms, MIN_MOVE_MS to MAX_TIME_MS of isp_hub75_morphCounters (timeBase.DEFAULT_MOVE_MS when never set); a move in flight follows it from the next animate()
+'' @param easeStyle - Easing style, timeBase.EASE_LINEAR (constant speed, used when never set) or timeBase.EASE_SMOOTH (slow start and end); a move in flight follows it from the next animate()
 
     moveDurationMs := durationMs
     moveEaseStyle := easeStyle
@@ -219,7 +229,7 @@ PUB animate(nowMs) : movingCount | moveElapsedMs, progress
         movingCount := STILL_MOVING
 
 PUB renderState() : mode, headPos, tailLen, bFromEnd, bOn, offsetPos
-'' What the digit draws for this segment now (see MODE_ above).
+'' Return what the digit draws for this segment now (see MODE_ above).
 ''
 '' @returns mode - MODE_NONE, MODE_FULL, MODE_SNAKE or MODE_SLIDE
 '' @returns headPos - snake: the head's position from the start end, in 1/SUBPIXELS pixel
@@ -242,8 +252,11 @@ PUB renderState() : mode, headPos, tailLen, bFromEnd, bOn, offsetPos
             mode := (moveStyle == CMD_COL_TO_RT or moveStyle == CMD_COL_TO_LT) ? MODE_SLIDE : MODE_SNAKE
 
 PRI isStyleAllowed(style) : bAllowed
-' TRUE when this segment can move in this style: horizontals snake left/right, verticals up/down,
+' Return TRUE when this segment can move in this style: horizontals snake left/right, verticals up/down,
 ' and only the left verticals E and F slide as a column. Every segment can turn on or off at once.
+'
+' @param style - the command's style (MASK_STYLE bits)
+' @returns bAllowed - TRUE when this segment can do the style
 
     case segOrientation
         SOR_TOP_A, SOR_MIDDLE_G, SOR_BOTTOM_D:
@@ -268,6 +281,7 @@ PRI easedProgress(linearProgress) : shapedProgress
 
 PRI finishMove()
 ' End the move in flight: the segment is fully on or fully off. Shared by a snap (commandSegment) and a move's end (animate).
+'
 
     currentState := desiredEndState
     headX256 := lengthX256 + tailX256

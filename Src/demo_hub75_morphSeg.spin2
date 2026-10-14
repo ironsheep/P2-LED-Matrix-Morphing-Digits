@@ -45,10 +45,22 @@ CON ' the area the demo lays itself out in: the whole display, or a panel-sized 
 
 CON ' the groups
 
+  ' The demo's groups, in the order of the groupPlaces rows:
+  '  GRP_CLOCK_LT  - the left HH:MM clock
+  '  GRP_CLOCK_RT  - the right HH:MM clock, 12 hours ahead of the left one
+  '  GRP_COUNTDOWN - the three-digit down counter
+  '  GRP_RANDOM    - the four-digit group that shows random values
   #0, GRP_CLOCK_LT, GRP_CLOCK_RT, GRP_COUNTDOWN, GRP_RANDOM
   NUM_GROUPS = GRP_RANDOM + 1
   LAST_GROUP = NUM_GROUPS - 1
 
+  ' The fields of one groupPlaces row (one long each):
+  '  PLACE_LEFT, PLACE_TOP, PLACE_WIDTH, PLACE_HEIGHT - the group's area on the 128 x 64 panel
+  '  PLACE_TYPE      - the group type (counters.GRP_ value)
+  '  PLACE_LAYOUT    - the digit layout (counters.LAYOUT_ value)
+  '  PLACE_COLOR     - the group's color
+  '  PLACE_VALUE     - the group's first value
+  '  PLACE_MOVE_MS   - how long one move takes, in milliseconds
   #0, PLACE_LEFT, PLACE_TOP, PLACE_WIDTH, PLACE_HEIGHT, PLACE_TYPE, PLACE_LAYOUT, PLACE_COLOR, PLACE_VALUE, PLACE_MOVE_MS
   PLACE_LONGS = PLACE_MOVE_MS + 1
 
@@ -89,20 +101,22 @@ DAT ' the 2021 places on a 128 x 64 panel, one row of PLACE_ fields per group, i
     nameDown        byte    "countdown", 0
     nameRandom      byte    "random digits", 0
 
-PUB start() | chainIndex, areaWidth, areaHeight, scale, grpIdx, nowMs
-'' Start the driver, lay the demo out on the display and run it
+PUB start() | chainIdx, areaWidth, areaHeight, scale, grpIdx, nowMs
+'' Start the driver, lay the demo out on the display and run it.
+''
 
 ' Local Variables:
-' @local chainIndex - the adapter's chain index, for the display's size
-' @local areaWidth, areaHeight - the area the demo lays itself out in: the display, or a bench size
+' @local chainIdx - the adapter's chain index, for the display's size
+' @local areaWidth - the width of the area the demo lays itself out in: the display, or a bench size
+' @local areaHeight - the height of that area
 ' @local scale - how many times the 2021 size the layout is drawn
 ' @local grpIdx - the group being placed or run
 ' @local nowMs - the frame's time
 
     display.start(display.HUB75_ADAPTER_1)                     ' configures the adapter and starts the driver (aborts on failure)
-    chainIndex := hub75Bffrs.indexForHub75ChainId(hub75Bffrs.HUB75_ADAPTER_1)
-    areaWidth := hub75Bffrs.maxDisplayColumns(chainIndex)
-    areaHeight := hub75Bffrs.maxDisplayRows(chainIndex)
+    chainIdx := hub75Bffrs.indexForHub75ChainId(hub75Bffrs.HUB75_ADAPTER_1)
+    areaWidth := hub75Bffrs.maxDisplayColumns(chainIdx)
+    areaHeight := hub75Bffrs.maxDisplayRows(chainIdx)
     if BENCH_WIDTH <> 0                                         ' a bench build: lay out as if the display were that size
         areaWidth, areaHeight := BENCH_WIDTH, BENCH_HEIGHT
     scale := MIN_SCALE #> (areaWidth / DESIGN_WIDTH <# areaHeight / DESIGN_HEIGHT)
@@ -130,15 +144,23 @@ PUB start() | chainIndex, areaWidth, areaHeight, scale, grpIdx, nowMs
         display.commitScreenToPanelSet()                        ' 4. the one commit: it waits for the driver, so it paces the loop
 
 PRI placeScaled(grpIdx, areaWidth, areaHeight, scale) | pPlace, left, top, width, height, status, usedWidth, usedHeight
-
 ' Place one group at its 2021 place times scale, if that place lies inside the area; log what happened. A group that
 ' does not fit is left out, and a refused placement logs its code; either way the demo runs on.
+'
+' @param grpIdx - the group being placed or run
+' @param areaWidth - the width of the area the demo lays itself out in: the display, or a bench size
+' @param areaHeight - the height of that area
+' @param scale - how many times the 2021 size the layout is drawn
 
 ' Local Variables:
 ' @local pPlace - the group's row of groupPlaces
-' @local left, top, width, height - the group's place, scaled
+' @local left - the group's left edge, scaled
+' @local top - the group's top edge, scaled
+' @local width - the group's width, scaled
+' @local height - the group's height, scaled
 ' @local status - placeGroup()'s result
-' @local usedWidth, usedHeight - the size the placed group uses
+' @local usedWidth - the width the placed group uses
+' @local usedHeight - the height the placed group uses
 
     pPlace := @groupPlaces[grpIdx * PLACE_LONGS]
     left := LONG[pPlace][PLACE_LEFT] * scale

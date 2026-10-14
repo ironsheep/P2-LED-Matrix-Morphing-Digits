@@ -6,7 +6,7 @@
 ''               -- see below for terms of use
 ''   E-mail..... stephen@ironsheep.biz
 ''   Started.... Oct 2026
-''   Updated.... 12 Oct 2026
+''   Updated.... 14 Oct 2026
 ''
 '' =================================================================================================
 
@@ -17,11 +17,15 @@
 
 CON ' ---- Pixel bytes and the checksum ----
 
-  #0, RED_BYTE, GREEN_BYTE, BLUE_BYTE                           ' a pixel's three bytes (the driver's writePacked() order)
+  ' A pixel's three bytes, in the driver's writePacked() order:
+  '  RED_BYTE   - the red channel (offset 0)
+  '  GREEN_BYTE - the green channel (offset 1)
+  '  BLUE_BYTE  - the blue channel (offset 2)
+  #0, RED_BYTE, GREEN_BYTE, BLUE_BYTE
   SUM_MULTIPLIER = 31                                           ' rolling checksum: sum x 31 + the bytes, weighted, so a moved
   GREEN_WEIGHT = 7                                              '   or recolored pixel changes it
   BLUE_WEIGHT = 13
-  PIXEL_STEP = 1
+  LAST_PIXEL_OFFSET = 1                                         ' the last pixel of a size is the first plus the size minus this
   NONE = -1                                                     ' litBox(): no pixel lit
 
 OBJ
@@ -33,41 +37,59 @@ PUB null()
 '' This is not a top level object
 ''
 
-PUB areaChecksum(chainIdx, left, top, width, height) : sum | row, column, lastRow, lastColumn
-'' A rolling checksum of every pixel of an area (clipped to the display).
+PUB areaChecksum(chainIdx, left, top, width, height) : checksum | row, column, lastRow, lastColumn
+'' Compute a rolling checksum of every pixel of an area (clipped to the display).
 ''
 '' @param chainIdx - the adapter's chain index
-'' @param left, top - the area's top-left pixel
-'' @param width, height - the area's size
-'' @returns sum - the checksum: equal areas give equal sums
+'' @param left - the area's left column
+'' @param top - the area's top row
+'' @param width - the area's width in pixels
+'' @param height - the area's height in pixels
+'' @returns checksum - the checksum: equal areas give equal sums
 
-    lastRow := (top + height - PIXEL_STEP) <# (hub75Bffrs.maxDisplayRows(chainIdx) - PIXEL_STEP)
-    lastColumn := (left + width - PIXEL_STEP) <# (hub75Bffrs.maxDisplayColumns(chainIdx) - PIXEL_STEP)
-    sum := 0
+' Local Variables:
+' @local row - the pixel row being summed
+' @local column - the pixel column being summed
+' @local lastRow - the last row summed (the area's, or the display's if smaller)
+' @local lastColumn - the last column summed (the area's, or the display's if smaller)
+
+    lastRow := (top + height - LAST_PIXEL_OFFSET) <# (hub75Bffrs.maxDisplayRows(chainIdx) - LAST_PIXEL_OFFSET)
+    lastColumn := (left + width - LAST_PIXEL_OFFSET) <# (hub75Bffrs.maxDisplayColumns(chainIdx) - LAST_PIXEL_OFFSET)
+    checksum := 0
     repeat row from top #> 0 to lastRow
         repeat column from left #> 0 to lastColumn
-            sum := sum * SUM_MULTIPLIER + pixelSum(chainIdx, row, column)
+            checksum := checksum * SUM_MULTIPLIER + pixelSum(chainIdx, row, column)
 
 PUB isLit(chainIdx, row, column) : bLit
-'' TRUE when the pixel is not black.
+'' Ask whether the pixel is not black.
 ''
 '' @param chainIdx - the adapter's chain index
-'' @param row, column - the pixel
+'' @param row - the pixel's row
+'' @param column - the pixel's column
 '' @returns bLit - TRUE when any of its bytes is not zero
 
     bLit := pixelSum(chainIdx, row, column) <> 0
 
 PUB litBox(chainIdx, left, top, width, height) : litLeft, litTop, litRight, litBottom | row, column
-'' The bounding box of an area's lit pixels (NONE in every field when none is lit).
+'' Find the bounding box of an area's lit pixels (NONE in every field when none is lit).
 ''
 '' @param chainIdx - the adapter's chain index
-'' @param left, top - the area's top-left pixel
-'' @param width, height - the area's size
-'' @returns litLeft, litTop, litRight, litBottom - the box, inclusive
+'' @param left - the area's left column
+'' @param top - the area's top row
+'' @param width - the area's width in pixels
+'' @param height - the area's height in pixels
+'' @returns litLeft - the leftmost lit column
+'' @returns litTop - the topmost lit row
+'' @returns litRight - the rightmost lit column
+'' @returns litBottom - the bottommost lit row
+
+' Local Variables:
+' @local row - the pixel row being read
+' @local column - the pixel column being read
 
     litLeft := litTop := litRight := litBottom := NONE
-    repeat row from top to top + height - PIXEL_STEP
-        repeat column from left to left + width - PIXEL_STEP
+    repeat row from top to top + height - LAST_PIXEL_OFFSET
+        repeat column from left to left + width - LAST_PIXEL_OFFSET
             if isLit(chainIdx, row, column)
                 if litLeft == NONE or column < litLeft
                     litLeft := column
@@ -76,13 +98,21 @@ PUB litBox(chainIdx, left, top, width, height) : litLeft, litTop, litRight, litB
                     litTop := row
                 litBottom := row
 
-PRI pixelSum(chainIdx, row, column) : value | pPixel
-' One pixel's bytes, weighted (0 for black or for a pixel no panel holds).
+PRI pixelSum(chainIdx, row, column) : pixelWeight | pPixel
+' Weigh one pixel's bytes (0 for black or for a pixel no panel holds).
+'
+' @param chainIdx - the adapter's chain index
+' @param row - the pixel's row
+' @param column - the pixel's column
+' @returns pixelWeight - the pixel's three bytes, weighted
 
-    value := 0
+' Local Variables:
+' @local pPixel - the pixel's address in the screen buffer
+
+    pixelWeight := 0
     pPixel := pixels.pixelAddressAtRC(chainIdx, row, column)
     if pPixel <> hub75Bffrs.NO_PIXEL
-        value := BYTE[pPixel][RED_BYTE] + BYTE[pPixel][GREEN_BYTE] * GREEN_WEIGHT + BYTE[pPixel][BLUE_BYTE] * BLUE_WEIGHT
+        pixelWeight := BYTE[pPixel][RED_BYTE] + BYTE[pPixel][GREEN_BYTE] * GREEN_WEIGHT + BYTE[pPixel][BLUE_BYTE] * BLUE_WEIGHT
 
 CON ' ---- License ----
 

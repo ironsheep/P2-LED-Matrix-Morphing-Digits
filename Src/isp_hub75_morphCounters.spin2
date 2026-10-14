@@ -7,7 +7,7 @@
 ''               -- see below for terms of use
 ''   E-mail..... stephen@ironsheep.biz
 ''   Started.... Jan 2021
-''   Updated.... 12 Oct 2026
+''   Updated.... 14 Oct 2026
 ''   Version.... v1.0.0
 ''
 '' =================================================================================================
@@ -69,26 +69,43 @@ CON ' clock settings (spec R-3.3-3.6): set with setClockHours() and setClockMode
 
 CON ' layouts: how the group looks (digits, and colons between clock fields)
 
+    '   LAYOUT_1_DIGIT .. LAYOUT_6_DIGITS - counters and values: that many digits, no colons
+    '   LAYOUT_MM_SS     - a clock of minutes and seconds, one colon
+    '   LAYOUT_HH_MM     - a clock of hours and minutes, one colon
+    '   LAYOUT_HH_MM_SS  - a clock of hours, minutes and seconds, two colons
     #1, LAYOUT_1_DIGIT, LAYOUT_2_DIGITS, LAYOUT_3_DIGITS, LAYOUT_4_DIGITS, LAYOUT_5_DIGITS, LAYOUT_6_DIGITS
     #20, LAYOUT_MM_SS, LAYOUT_HH_MM, LAYOUT_HH_MM_SS
 
-    MAX_DIGITS = 6
+    MAX_DIGITS = 6                  ' the most digits a layout shows (LAYOUT_6_DIGITS)
     LAST_DIGIT = MAX_DIGITS - 1     ' index of the last digit slot (digits[] runs from 0)
-    MAX_COLONS = 2
+    MAX_COLONS = 2                  ' the most colons a layout shows (LAYOUT_HH_MM_SS)
     FIELD_DIGITS = 2                ' a clock field (hours, minutes, seconds) is two digits
+    TWO_FIELDS = 2                  ' the fields of LAYOUT_MM_SS and LAYOUT_HH_MM
+    THREE_FIELDS = 3                ' the fields of LAYOUT_HH_MM_SS
+    ONE_COLON = 1                   ' the colons of LAYOUT_MM_SS and LAYOUT_HH_MM
+
+CON ' clock time units: a clock's value is seconds
+
     SECONDS_PER_MINUTE = 60         ' a clock's value is seconds: since midnight (HH_MM, HH_MM_SS) or within the hour (MM_SS)
     MINUTES_PER_HOUR = 60
     SECONDS_PER_HOUR = SECONDS_PER_MINUTE * MINUTES_PER_HOUR
     HOURS_PER_DAY = 24
     HOURS_PER_HALF_DAY = 12
+    FIRST_HALF_DAY_HOUR = 1         ' a 12-hour clock's lowest hour: it shows 1 to 12, never 0
+    ONE_SECOND = 1                  ' the step of an accelerated clock whose smallest field is seconds
     SECONDS_PER_DAY = SECONDS_PER_HOUR * HOURS_PER_DAY
     MAX_DAY_SECONDS = SECONDS_PER_DAY - 1       ' the largest HH_MM / HH_MM_SS value: 23:59:59
     MAX_HOUR_SECONDS = SECONDS_PER_HOUR - 1     ' the largest MM_SS value: 59:59
-    #0, FIELD_HOURS, FIELD_MINUTES, FIELD_SECONDS   ' a clock's fields, left to right (MM_SS starts at FIELD_MINUTES)
+    ' a clock's fields, left to right (MM_SS starts at FIELD_MINUTES):
+    '   FIELD_HOURS - hours, FIELD_MINUTES - minutes, FIELD_SECONDS - seconds
+    #0, FIELD_HOURS, FIELD_MINUTES, FIELD_SECONDS
     DECIMAL_BASE = 10
+    POWER_START = 1                 ' DECIMAL_BASE to the power 0: where the product of a layout's digits' bases starts
 
 CON ' sizing a group to its area (spec R-8.1)
 
+    MIN_AREA_SIDE = 1               ' the least width or height an area can have, in pixels
+    UNIT_STEP = 1                   ' a drawing-context coefficient of one: one display pixel per group pixel
     MIN_SEGMENT_LENGTH = 2          ' the shortest segment placement will use: a digit 4 x 7 at thickness 1
     AUTO_THICKNESS_DIVISOR = 4      ' with no setThickness(): thickness = segment length / 4, rounded, at least 1 ...
     AUTO_THICKNESS_ROUND = AUTO_THICKNESS_DIVISOR / 2
@@ -97,9 +114,8 @@ CON ' sizing a group to its area (spec R-8.1)
     MIN_DOT = 2                     ' a colon dot is the stroke's thickness square, at least MIN_DOT
     COLON_DIM_LEVEL = 64            ' the colon's level: digits.LEVEL_FULL at each real second, fading to this by its
                                     '   end (an accelerated clock's colon stays full)
-    NEXT_PIXEL = 1                  ' one pixel further on
     ONE_STEP = 1                    ' a counter's step
-    HALF = 2
+    HALF = 2                        ' the divisor that halves a size, to centre a part in its space
     MAX_MASK_BYTES = 2048           ' the figure's masks: isp_hub75_morphMask.figureBytes() (about segment length x thickness x 2)
 
 CON ' the placed-area table: one entry per placed group, shared by every group object (spec R-8.5)
@@ -107,6 +123,10 @@ CON ' the placed-area table: one entry per placed group, shared by every group o
     MAX_GROUPS = 10                 ' entries in the placed-area table. Hub memory is the real limit (spec R-9.5): one group's
                                     '   VAR is 9_224 bytes, and with the quad's 8-bit driver the showcase demo fits 9 groups
                                     '   (measured 2026-10-14; 10 is 3_864 bytes over). The compiler refuses a build that does not fit.
+    ' one entry's fields (longs):
+    '   AREA_IN_USE - TRUE while a placed group holds the entry
+    '   AREA_CHAIN  - the adapter's chain index the area is on
+    '   AREA_LEFT, AREA_TOP, AREA_RIGHT, AREA_BOTTOM - the area's pixels, inclusive
     #0, AREA_IN_USE, AREA_CHAIN, AREA_LEFT, AREA_TOP, AREA_RIGHT, AREA_BOTTOM
     AREA_LONGS = AREA_BOTTOM + 1
     NO_SLOT = -1                    ' claimArea(): no entry found yet
@@ -135,7 +155,7 @@ VAR ' per group
     long    groupType
     long    groupLayout
     long    numberDigits
-    long    currValue
+    long    currentValue
     long    valueCap
     long    maxValueDivisor
     long    groupColor
@@ -166,7 +186,7 @@ VAR ' per group
     long    bRampBuilt          ' TRUE once ramp holds this adapter's color below
     long    rampChain
     long    rampColor
-    long    drawCtx[digits.CTX_LONGS]   ' this group's drawing context, shared by its digits (morph7seg CTX_ fields)
+    long    drawContext[digits.CTX_LONGS]   ' this group's drawing context, shared by its digits (morph7seg CTX_ fields)
 
     ' clock
     long    clockHours          ' HOURS_24 or HOURS_12
@@ -200,8 +220,10 @@ PUB placeGroup(adapter, areaLeft, areaTop, areaWidth, areaHeight, grpType, layou
 '' to move it, removeGroup() it and animate until isPlaced() is FALSE, then place it again. A refused call changes nothing.
 ''
 '' @param adapter - the display: hub75Bffrs.HUB75_ADAPTER_1, _2 or _3 (one started with display.start())
-'' @param areaLeft, areaTop - the area's top-left pixel on that display, as mounted
-'' @param areaWidth, areaHeight - the area's size in pixels (both at least 1; the area must lie on the display)
+'' @param areaLeft - the area's left column on that display, as mounted
+'' @param areaTop - the area's top row on that display, as mounted
+'' @param areaWidth - the area's width in pixels (at least 1; the area must lie on the display)
+'' @param areaHeight - the area's height in pixels (at least 1; the area must lie on the display)
 '' @param grpType - GRP_CLOCK, GRP_UP_COUNTER, GRP_DOWN_COUNTER or GRP_DIGITS
 '' @param layout - LAYOUT_1_DIGIT .. LAYOUT_6_DIGITS for counters and values; LAYOUT_MM_SS, LAYOUT_HH_MM or LAYOUT_HH_MM_SS for a clock
 '' @param groupRotation - ROT_0, ROT_90 (clockwise), ROT_180 or ROT_270 (counter-clockwise)
@@ -209,13 +231,17 @@ PUB placeGroup(adapter, areaLeft, areaTop, areaWidth, areaHeight, grpType, layou
 '' @param initialValue - counters and values: 0 to 10^digits - 1; a clock: seconds, 0 to MAX_DAY_SECONDS (MAX_HOUR_SECONDS for MM_SS)
 '' @returns status - morphStatus.SUCCESS, or E_UNKNOWN_ADAPTER, E_BAD_AREA, E_UNKNOWN_TYPE, E_UNKNOWN_LAYOUT,
 ''   E_UNKNOWN_ROTATION, E_VALUE_OUT_OF_RANGE, E_AREA_TOO_SMALL, E_AREA_OVERLAP, E_TOO_MANY_GROUPS or E_ALREADY_PLACED
-'' @returns usedWidth, usedHeight - the size the group uses on the display (0, 0 when refused)
+'' @returns usedWidth - the width the group uses on the display (0 when refused)
+'' @returns usedHeight - the height the group uses on the display (0 when refused)
 
 ' Local Variables:
 ' @local chain - the adapter's chain index
-' @local rows, columns - the adapter's display, as mounted
-' @local segLength, thickness - the digits' segment length and stroke chosen to fit
-' @local groupWidth, groupHeight - the group's size, unturned
+' @local rows - the adapter's display rows, as mounted
+' @local columns - the adapter's display columns, as mounted
+' @local segLength - the digits' segment length chosen to fit
+' @local thickness - the digits' stroke chosen to fit
+' @local groupWidth - the group's width, unturned
+' @local groupHeight - the group's height, unturned
 ' @local slot - the areaTable entry the group will hold
 ' @local digitIdx - the digit being placed
 ' @local colonIdx - the colon being set up
@@ -231,7 +257,7 @@ PUB placeGroup(adapter, areaLeft, areaTop, areaWidth, areaHeight, grpType, layou
         chain := hub75Bffrs.indexForHub75ChainId(adapter)
         rows := hub75Bffrs.maxDisplayRows(chain)
         columns := hub75Bffrs.maxDisplayColumns(chain)
-        if areaWidth < NEXT_PIXEL or areaHeight < NEXT_PIXEL or areaLeft < 0 or areaTop < 0 or areaLeft + areaWidth > columns or areaTop + areaHeight > rows
+        if areaWidth < MIN_AREA_SIDE or areaHeight < MIN_AREA_SIDE or areaLeft < 0 or areaTop < 0 or areaLeft + areaWidth > columns or areaTop + areaHeight > rows
             status := morphStatus.E_BAD_AREA
         elseif grpType < GRP_CLOCK or grpType > GRP_DIGITS
             status := morphStatus.E_UNKNOWN_TYPE
@@ -250,7 +276,7 @@ PUB placeGroup(adapter, areaLeft, areaTop, areaWidth, areaHeight, grpType, layou
             elseif bPlaced                                          ' after the argument checks, so a bad argument reports its own code
                 status := morphStatus.E_ALREADY_PLACED
             else
-                status, slot := claimArea(chain, areaLeft, areaTop, areaLeft + areaWidth - NEXT_PIXEL, areaTop + areaHeight - NEXT_PIXEL)
+                status, slot := claimArea(chain, areaLeft, areaTop, areaLeft + areaWidth - morphMask.LAST_OFFSET, areaTop + areaHeight - morphMask.LAST_OFFSET)
 
     if status == morphStatus.SUCCESS                                ' nothing has changed before this line
         areaSlot := slot
@@ -262,9 +288,9 @@ PUB placeGroup(adapter, areaLeft, areaTop, areaWidth, areaHeight, grpType, layou
         rotation := groupRotation
         groupColor := rgbColor
         numberDigits := layoutDigits(layout)
-        currValue := initialValue
+        currentValue := initialValue
         valueCap := maxValue
-        maxValueDivisor := (valueCap + NEXT_PIXEL) / DECIMAL_BASE
+        maxValueDivisor := (valueCap + morphMask.LAST_OFFSET) / DECIMAL_BASE
         if not bMaskBuilt or maskThickness <> thickness or maskLength <> segLength or maskSection <> crossSection
             morphMask.buildFigure(@mask, MAX_MASK_BYTES, thickness, segLength, dotFor(thickness), crossSection)
             maskThickness, maskLength, maskSection := thickness, segLength, crossSection
@@ -277,14 +303,14 @@ PUB placeGroup(adapter, areaLeft, areaTop, areaWidth, areaHeight, grpType, layou
         setSizes(layout, segLength, thickness)
         usedWidth, usedHeight := turnedSize(groupWidth, groupHeight)
         setDrawContext(areaTop + (areaHeight - usedHeight) / HALF, areaLeft + (areaWidth - usedWidth) / HALF, groupWidth, groupHeight)
-        clipToArea(areaLeft, areaTop, areaLeft + areaWidth - NEXT_PIXEL, areaTop + areaHeight - NEXT_PIXEL)
+        clipToArea(areaLeft, areaTop, areaLeft + areaWidth - morphMask.LAST_OFFSET, areaTop + areaHeight - morphMask.LAST_OFFSET)
         bClockRunning := FALSE
         tail := tailX256()
-        repeat digitIdx from 0 to numberDigits - NEXT_PIXEL
+        repeat digitIdx from 0 to numberDigits - morphMask.LAST_OFFSET
             digits[digitIdx].initialize(chainIndex, rows, columns)
             digits[digitIdx].setMotion(moveDurationMs, moveEaseStyle)
-            digits[digitIdx].setContext(@drawCtx)
-            digits[digitIdx].placeDigit(0, digitX(digitIdx), segLength, thickness, shownDigit(currValue, digitIdx), @mask, @ramp, tail)
+            digits[digitIdx].setContext(@drawContext)
+            digits[digitIdx].placeDigit(0, digitX(digitIdx), segLength, thickness, shownDigit(currentValue, digitIdx), @mask, @ramp, tail)
         colonIdx := 0
         repeat colonCount                                           ' a plain count: 0 skips (see setColonsLevel())
             digits[colonDigit(colonIdx++)].setColon(digitWidth + digitGap, dotSize, dotUpperY, dotLowerY)
@@ -298,7 +324,7 @@ PUB removeGroup() : status | digitIdx
 
     status := morphStatus.E_NOT_PLACED
     if bPlaced and not bRemoving
-        repeat digitIdx from 0 to numberDigits - NEXT_PIXEL
+        repeat digitIdx from 0 to numberDigits - morphMask.LAST_OFFSET
             digits[digitIdx].morphOut()
         setColonsLevel(0)                                           ' the colon goes dark at once
         bRemoving := TRUE
@@ -374,7 +400,7 @@ PUB setTailLength(tailLengthPixels) : status
 PUB setMoveDuration(durationMs) : status
 '' Set how long every segment move of this group takes: the same real time for every segment length (spec R-5.4).
 ''
-'' @param durationMs - Duration of each move in ms, MIN_MOVE_MS to MAX_TIME_MS (timeBase.DEFAULT_MOVE_MS when never set); a move in flight follows it from the next animate()
+'' @param durationMs - Duration of each move in ms, MIN_MOVE_MS to MAX_TIME_MS of isp_hub75_morphCounters (timeBase.DEFAULT_MOVE_MS when never set); a move in flight follows it from the next animate()
 '' @returns status - morphStatus.SUCCESS, or morphStatus.E_OUT_OF_RANGE with nothing changed
 
     ensureDefaults()
@@ -399,7 +425,7 @@ PUB setHoldDuration(holdMs) : status
 PUB setEasing(easeStyle) : status
 '' Set how the position of every segment move of this group follows its time.
 ''
-'' @param easeStyle - Easing style, timeBase.EASE_LINEAR (constant speed, used when never set) or timeBase.EASE_SMOOTH (slow start and end)
+'' @param easeStyle - Easing style, timeBase.EASE_LINEAR (constant speed, used when never set) or timeBase.EASE_SMOOTH (slow start and end); a move in flight follows it from the next animate()
 '' @returns status - morphStatus.SUCCESS, or morphStatus.E_UNKNOWN_EASING with nothing changed
 
     ensureDefaults()
@@ -436,7 +462,7 @@ PUB animate(nowMs) : movingCount | digitIdx
     if bPlaced
         if groupType == GRP_CLOCK and clockMode == CLOCK_REAL_TIME and not bRemoving
             runClock(nowMs)
-        repeat digitIdx from 0 to numberDigits - NEXT_PIXEL
+        repeat digitIdx from 0 to numberDigits - morphMask.LAST_OFFSET
             movingCount += digits[digitIdx].animate(nowMs)
         if movingCount == 0
             if bRemoving                                    ' the morph-out has finished: free the area (R-8.6)
@@ -466,17 +492,17 @@ PUB nextTimeCycle()
         case groupType
             GRP_CLOCK:
                 if clockMode == CLOCK_ACCELERATED
-                    showValue((currValue + clockUnit()) // (valueCap + ONE_STEP))
+                    showValue((currentValue + clockUnit()) // (valueCap + ONE_STEP))
             GRP_UP_COUNTER:
-                showValue((currValue + ONE_STEP) // (valueCap + ONE_STEP))
+                showValue((currentValue + ONE_STEP) // (valueCap + ONE_STEP))
             GRP_DOWN_COUNTER:
-                showValue(currValue > 0 ? currValue - ONE_STEP : valueCap)
+                showValue(currentValue > 0 ? currentValue - ONE_STEP : valueCap)
 
 PUB digitValueAt(digitIdx) : digitValue
-'' What one digit of the group shows (or is morphing to), counted from the left: 0-9, or digits.DIGIT_HIDDEN for
+'' Return what one digit of the group shows (or is morphing to), counted from the left: 0-9, or digits.DIGIT_HIDDEN for
 '' a blank (a 12-hour clock's leading hour zero). For logs and tests: the pixels are the screen's.
 ''
-'' @param digitIdx - 0 to the layout's digits - 1
+'' @param digitIdx - the digit, counted from the left (0 to the layout's digits - 1)
 '' @returns digitValue - the digit, digits.DIGIT_HIDDEN, or digits.DIGIT_NO_VALUE outside the layout
 
     digitValue := digits.DIGIT_NO_VALUE
@@ -533,7 +559,7 @@ PUB setClockHours(hoursMode) : status
     if hoursMode == HOURS_24 or hoursMode == HOURS_12
         clockHours := hoursMode
         if bPlaced and groupType == GRP_CLOCK
-            showValue(currValue)
+            showValue(currentValue)
         status := morphStatus.SUCCESS
 
 PUB setClockMode(mode) : status
@@ -551,16 +577,24 @@ PUB setClockMode(mode) : status
             setColonsLevel(digits.LEVEL_FULL)
         status := morphStatus.SUCCESS
 
-PRI digitOfValue(value, digitIdx) : digitValue | divisor
-' One decimal digit of a value, counted from the most significant of the group's digits.
+PRI digitOfValue(groupValue, digitIdx) : digitValue | divisor
+' Return one decimal digit of a value, counted from the most significant of the group's digits.
+'
+' @param groupValue - the group's value
+' @param digitIdx - the digit, counted from the left (0 to the layout's digits - 1)
+' @returns digitValue - that digit, 0-9
+
+' Local Variables:
+' @local divisor - the place value of the digit wanted
 
     divisor := maxValueDivisor
     repeat digitIdx
         divisor /= DECIMAL_BASE
-    digitValue := (value / divisor) // DECIMAL_BASE
+    digitValue := (groupValue / divisor) // DECIMAL_BASE
 
 PRI ensureDefaults()
 ' Give the settings their defaults on first use (a group object's variables start at zero).
+'
 
     if bDefaultsSet <> TRUE
         moveDurationMs := timeBase.DEFAULT_MOVE_MS
@@ -575,7 +609,11 @@ PRI ensureDefaults()
         bDefaultsSet := TRUE
 
 PRI isLayoutFor(grpType, layout) : bFits
-' TRUE when this layout belongs to this type: a clock's fields, or a counter's or value's digits.
+' Return TRUE when this layout belongs to this type: a clock's fields, or a counter's or value's digits.
+'
+' @param grpType - GRP_CLOCK, GRP_UP_COUNTER, GRP_DOWN_COUNTER or GRP_DIGITS
+' @param layout - LAYOUT_1_DIGIT .. LAYOUT_6_DIGITS for counters and values; LAYOUT_MM_SS, LAYOUT_HH_MM or LAYOUT_HH_MM_SS for a clock
+' @returns bFits - TRUE when the layout is one this type can show
 
     if grpType == GRP_CLOCK
         bFits := layout == LAYOUT_MM_SS or layout == LAYOUT_HH_MM or layout == LAYOUT_HH_MM_SS
@@ -583,71 +621,112 @@ PRI isLayoutFor(grpType, layout) : bFits
         bFits := layout >= LAYOUT_1_DIGIT and layout <= LAYOUT_6_DIGITS
 
 PRI layoutDigits(layout) : nDigits
-' The digits a layout shows.
+' Return the digits a layout shows.
+'
+' @param layout - LAYOUT_1_DIGIT .. LAYOUT_6_DIGITS for counters and values; LAYOUT_MM_SS, LAYOUT_HH_MM or LAYOUT_HH_MM_SS for a clock
+' @returns nDigits - its digits (0 for a layout that is not one)
 
     case layout
         LAYOUT_1_DIGIT..LAYOUT_6_DIGITS:
-            nDigits := layout - LAYOUT_1_DIGIT + NEXT_PIXEL
+            nDigits := layout - LAYOUT_1_DIGIT + morphMask.LAST_OFFSET
         LAYOUT_MM_SS, LAYOUT_HH_MM:
-            nDigits := FIELD_DIGITS * HALF
+            nDigits := FIELD_DIGITS * TWO_FIELDS
         LAYOUT_HH_MM_SS:
-            nDigits := FIELD_DIGITS * (MAX_COLONS + NEXT_PIXEL)
+            nDigits := FIELD_DIGITS * THREE_FIELDS
         other:
             nDigits := 0
 
 PRI layoutColons(layout) : nColons
-' The colons a layout shows: one between each pair of clock fields.
+' Return the colons a layout shows: one between each pair of clock fields.
+'
+' @param layout - LAYOUT_1_DIGIT .. LAYOUT_6_DIGITS for counters and values; LAYOUT_MM_SS, LAYOUT_HH_MM or LAYOUT_HH_MM_SS for a clock
+' @returns nColons - its colons (0 for a counter or value layout)
 
     case layout
         LAYOUT_MM_SS, LAYOUT_HH_MM:
-            nColons := NEXT_PIXEL
+            nColons := ONE_COLON
         LAYOUT_HH_MM_SS:
             nColons := MAX_COLONS
         other:
             nColons := 0
 
 PRI maxValueFor(grpType, layout) : maxValue
-' The largest value a group of this type and layout shows.
+' Return the largest value a group of this type and layout shows.
+'
+' @param grpType - GRP_CLOCK, GRP_UP_COUNTER, GRP_DOWN_COUNTER or GRP_DIGITS
+' @param layout - LAYOUT_1_DIGIT .. LAYOUT_6_DIGITS for counters and values; LAYOUT_MM_SS, LAYOUT_HH_MM or LAYOUT_HH_MM_SS for a clock
+' @returns maxValue - the largest value
 
     if grpType == GRP_CLOCK
         maxValue := (layout == LAYOUT_MM_SS) ? MAX_HOUR_SECONDS : MAX_DAY_SECONDS
     else
-        maxValue := NEXT_PIXEL
+        maxValue := POWER_START
         repeat layoutDigits(layout)
             maxValue *= DECIMAL_BASE
-        maxValue -= NEXT_PIXEL
+        maxValue -= morphMask.LAST_OFFSET
 
 PRI autoThickness(segLength) : thickness
-' The stroke placement sizes with a segment of this length: about a quarter of it, at least morphMask.MIN_THICKNESS.
+' Return the stroke placement sizes with a segment of this length: about a quarter of it, at least morphMask.MIN_THICKNESS.
+'
+' @param segLength - the segment length, in pixels
+' @returns thickness - the stroke, in pixels
 
     thickness := ((segLength + AUTO_THICKNESS_ROUND) / AUTO_THICKNESS_DIVISOR) #> morphMask.MIN_THICKNESS
 
 PRI gapFor(widthOfDigit) : gap
-' The space between digits: a quarter of a digit's width, at least MIN_GAP.
+' Return the space between digits: a quarter of a digit's width, at least MIN_GAP.
+'
+' @param widthOfDigit - a digit's width, in pixels
+' @returns gap - the space, in pixels
 
     gap := (widthOfDigit / GAP_DIVISOR) #> MIN_GAP
 
 PRI dotFor(thickness) : dot
-' A colon dot's side: the stroke's thickness, at least MIN_DOT.
+' Return a colon dot's side: the stroke's thickness, at least MIN_DOT.
+'
+' @param thickness - the stroke, in pixels
+' @returns dot - the dot's side, in pixels
 
     dot := thickness #> MIN_DOT
 
 PRI groupSize(layout, segLength, thickness) : groupWidth, groupHeight | width, nDigits
-' A layout's size, unturned, with digits of this segment length and stroke: the digits, the gaps between them,
+' Return a layout's size, unturned, with digits of this segment length and stroke: the digits, the gaps between them,
 ' and for each colon one dot and one more gap.
+'
+' @param layout - LAYOUT_1_DIGIT .. LAYOUT_6_DIGITS for counters and values; LAYOUT_MM_SS, LAYOUT_HH_MM or LAYOUT_HH_MM_SS for a clock
+' @param segLength - the segment length, in pixels
+' @param thickness - the stroke, in pixels
+' @returns groupWidth - the group's width, in pixels
+' @returns groupHeight - the group's height, in pixels
+
+' Local Variables:
+' @local width - one digit's width
+' @local nDigits - the layout's digits
 
     width, groupHeight := digits[0].digitSize(segLength, thickness)
     nDigits := layoutDigits(layout)
-    groupWidth := nDigits * width + (nDigits - NEXT_PIXEL) * gapFor(width) + layoutColons(layout) * (dotFor(thickness) + gapFor(width))
+    groupWidth := nDigits * width + (nDigits - morphMask.LAST_OFFSET) * gapFor(width) + layoutColons(layout) * (dotFor(thickness) + gapFor(width))
 
 PRI fitDigits(layout, groupRotation, areaWidth, areaHeight) : segLength, thickness, groupWidth, groupHeight | fitWidth, fitHeight, tryLength, tryThickness, tryWidth, tryHeight
-' The longest segment (and its stroke, and the group's unturned size) that fits the area once turned; zeros when
+' Return the longest segment (and its stroke, and the group's unturned size) that fits the area once turned; zeros when
 ' none fits.
+'
+' @param layout - LAYOUT_1_DIGIT .. LAYOUT_6_DIGITS for counters and values; LAYOUT_MM_SS, LAYOUT_HH_MM or LAYOUT_HH_MM_SS for a clock
+' @param groupRotation - ROT_0, ROT_90 (clockwise), ROT_180 or ROT_270 (counter-clockwise)
+' @param areaWidth - the area's width in pixels (at least 1; the area must lie on the display)
+' @param areaHeight - the area's height in pixels (at least 1; the area must lie on the display)
+' @returns segLength - the segment length that fits, in pixels (0 when none fits)
+' @returns thickness - the stroke, in pixels
+' @returns groupWidth - the group's width, unturned
+' @returns groupHeight - the group's height, unturned
 
 ' Local Variables:
-' @local fitWidth, fitHeight - the area as the unturned group sees it
-' @local tryLength, tryThickness - the size being tried
-' @local tryWidth, tryHeight - its group, unturned
+' @local fitWidth - the area's width as the unturned group sees it
+' @local fitHeight - the area's height as the unturned group sees it
+' @local tryLength - the segment length being tried
+' @local tryThickness - the stroke being tried
+' @local tryWidth - the group's width at that size, unturned
+' @local tryHeight - the group's height at that size, unturned
 
     fitWidth := areaWidth
     fitHeight := areaHeight
@@ -666,6 +745,10 @@ PRI fitDigits(layout, groupRotation, areaWidth, areaHeight) : segLength, thickne
 
 PRI setSizes(layout, segLength, thickness) | digitHeight, halfHeight
 ' Record the placed sizes: digit, gap, colon dots and their places (group coordinates, unturned).
+'
+' @param layout - LAYOUT_1_DIGIT .. LAYOUT_6_DIGITS for counters and values; LAYOUT_MM_SS, LAYOUT_HH_MM or LAYOUT_HH_MM_SS for a clock
+' @param segLength - the segment length, in pixels
+' @param thickness - the stroke, in pixels
 
 ' Local Variables:
 ' @local digitHeight - the digits' height
@@ -681,12 +764,20 @@ PRI setSizes(layout, segLength, thickness) | digitHeight, halfHeight
     dotLowerY := halfHeight + (digitHeight - halfHeight - dotSize) / HALF
 
 PRI digitX(digitIdx) : column
-' A digit's left column in the group (unturned): the digits before it, their gaps, and any colons between.
+' Return a digit's left column in the group (unturned): the digits before it, their gaps, and any colons between.
+'
+' @param digitIdx - the digit, counted from the left (0 to the layout's digits - 1)
+' @returns column - its left column in the group
 
     column := digitIdx * (digitWidth + digitGap) + ((digitIdx / FIELD_DIGITS) <# colonCount) * (dotSize + digitGap)
 
 PRI turnedSize(groupWidth, groupHeight) : width, height
-' The group's size on the display: a quarter turn swaps it.
+' Return the group's size on the display: a quarter turn swaps it.
+'
+' @param groupWidth - the group's width, unturned
+' @param groupHeight - the group's height, unturned
+' @returns width - the width on the display
+' @returns height - the height on the display
 
     width := groupWidth
     height := groupHeight
@@ -698,10 +789,22 @@ PRI claimArea(chain, left, top, right, bottom) : status, slot | idx, pEntry
 ' Find this group a free areaTable entry after checking the area against
 ' every other placed area on the same display: sharing a pixel is refused; touching is allowed (spec R-8.5).
 ' Writes the entry only when the claim succeeds.
+'
+' @param chain - the adapter's chain index
+' @param left - the area's left column, inclusive
+' @param top - the area's top row, inclusive
+' @param right - the area's right column, inclusive
+' @param bottom - the area's bottom row, inclusive
+' @returns status - morphStatus.SUCCESS, or E_AREA_OVERLAP or E_TOO_MANY_GROUPS
+' @returns slot - the areaTable entry claimed (NO_SLOT when refused)
+
+' Local Variables:
+' @local idx - the areaTable entry being compared
+' @local pEntry - hub address of that entry
 
     status := morphStatus.SUCCESS
     slot := NO_SLOT
-    repeat idx from 0 to MAX_GROUPS - NEXT_PIXEL
+    repeat idx from 0 to MAX_GROUPS - morphMask.LAST_OFFSET
         pEntry := @areaTable + idx * AREA_LONGS * digits.BYTES_PER_LONG
         if LONG[pEntry][AREA_IN_USE]
             if LONG[pEntry][AREA_CHAIN] == chain and left <= LONG[pEntry][AREA_RIGHT] and right >= LONG[pEntry][AREA_LEFT] and top <= LONG[pEntry][AREA_BOTTOM] and bottom >= LONG[pEntry][AREA_TOP]
@@ -722,28 +825,46 @@ PRI claimArea(chain, left, top, right, bottom) : status, slot | idx, pEntry
 
 PRI clipToArea(left, top, right, bottom)
 ' The group never draws outside its area (spec R-8.4): the context's clip rectangle is the area.
+'
+' @param left - the area's left column, inclusive
+' @param top - the area's top row, inclusive
+' @param right - the area's right column, inclusive
+' @param bottom - the area's bottom row, inclusive
 
-    drawCtx[digits.CTX_CLIP_LEFT] := left
-    drawCtx[digits.CTX_CLIP_TOP] := top
-    drawCtx[digits.CTX_CLIP_RIGHT] := right
-    drawCtx[digits.CTX_CLIP_BOTTOM] := bottom
+    drawContext[digits.CTX_CLIP_LEFT] := left
+    drawContext[digits.CTX_CLIP_TOP] := top
+    drawContext[digits.CTX_CLIP_RIGHT] := right
+    drawContext[digits.CTX_CLIP_BOTTOM] := bottom
 
 PRI showValue(newValue) | digitIdx
 ' Make newValue the group's value and start each digit's morph to it (a digit already showing its part does nothing).
+'
+' @param newValue - 0 to 10^digits - 1
 
-    currValue := newValue
-    repeat digitIdx from 0 to numberDigits - NEXT_PIXEL
-        digits[digitIdx].setValue(shownDigit(currValue, digitIdx))
+' Local Variables:
+' @local digitIdx - the digit being set
 
-PRI shownDigit(value, digitIdx) : digitValue | fieldIdx, fieldValue
-' The digit (or digits.DIGIT_HIDDEN) a group shows at digitIdx for value: a counter's decimal digits, or a
+    currentValue := newValue
+    repeat digitIdx from 0 to numberDigits - morphMask.LAST_OFFSET
+        digits[digitIdx].setValue(shownDigit(currentValue, digitIdx))
+
+PRI shownDigit(groupValue, digitIdx) : digitValue | fieldIdx, fieldValue
+' Return the digit (or digits.DIGIT_HIDDEN) a group shows at digitIdx for groupValue: a counter's decimal digits, or a
 ' clock's fields, tens then units, with a 12-hour clock's leading hour zero blank (spec R-3.4).
+'
+' @param groupValue - the group's value
+' @param digitIdx - the digit, counted from the left (0 to the layout's digits - 1)
+' @returns digitValue - 0-9, or digits.DIGIT_HIDDEN
+
+' Local Variables:
+' @local fieldIdx - the clock field the digit belongs to
+' @local fieldValue - that field's value
 
     if groupType <> GRP_CLOCK
-        digitValue := digitOfValue(value, digitIdx)
+        digitValue := digitOfValue(groupValue, digitIdx)
     else
         fieldIdx := digitIdx / FIELD_DIGITS
-        fieldValue := clockField(value, fieldIdx)
+        fieldValue := clockField(groupValue, fieldIdx)
         if digitIdx // FIELD_DIGITS == 0
             digitValue := fieldValue / DECIMAL_BASE
             if digitValue == 0 and isHoursField(fieldIdx) and clockHours == HOURS_12
@@ -752,7 +873,14 @@ PRI shownDigit(value, digitIdx) : digitValue | fieldIdx, fieldValue
             digitValue := fieldValue // DECIMAL_BASE
 
 PRI clockField(seconds, fieldIdx) : fieldValue | hours
-' One field of a clock showing seconds: MM_SS shows minutes, seconds; HH_MM hours, minutes; HH_MM_SS all three.
+' Return one field of a clock showing seconds: MM_SS shows minutes, seconds; HH_MM hours, minutes; HH_MM_SS all three.
+'
+' @param seconds - the clock's value, in seconds
+' @param fieldIdx - the field, counted from the left
+' @returns fieldValue - that field's value
+
+' Local Variables:
+' @local hours - the whole hours in seconds
 
     if groupLayout == LAYOUT_MM_SS
         fieldIdx += FIELD_MINUTES                                   ' its first field is the minutes
@@ -761,24 +889,35 @@ PRI clockField(seconds, fieldIdx) : fieldValue | hours
             hours := seconds / SECONDS_PER_HOUR
             fieldValue := hours
             if clockHours == HOURS_12                               ' 0 -> 12, 13 -> 1: never 0 (R-3.4)
-                fieldValue := (hours + HOURS_PER_HALF_DAY - NEXT_PIXEL) // HOURS_PER_HALF_DAY + NEXT_PIXEL
+                fieldValue := (hours + HOURS_PER_HALF_DAY - FIRST_HALF_DAY_HOUR) // HOURS_PER_HALF_DAY + FIRST_HALF_DAY_HOUR
         FIELD_MINUTES:
             fieldValue := (seconds / SECONDS_PER_MINUTE) // MINUTES_PER_HOUR
         other:
             fieldValue := seconds // SECONDS_PER_MINUTE
 
 PRI isHoursField(fieldIdx) : bHours
-' TRUE when this field (counted from the left) shows hours.
+' Return TRUE when this field (counted from the left) shows hours.
+'
+' @param fieldIdx - the field, counted from the left
+' @returns bHours - TRUE when the field shows hours
 
     bHours := fieldIdx == FIELD_HOURS and groupLayout <> LAYOUT_MM_SS
 
 PRI clockUnit() : unitSeconds
-' An accelerated clock's step: its smallest field shown (a minute for HH_MM, a second otherwise).
+' Return an accelerated clock's step: its smallest field shown (a minute for HH_MM, a second otherwise).
+'
+' @returns unitSeconds - the step, in seconds
 
-    unitSeconds := (groupLayout == LAYOUT_HH_MM) ? SECONDS_PER_MINUTE : NEXT_PIXEL
+    unitSeconds := (groupLayout == LAYOUT_HH_MM) ? SECONDS_PER_MINUTE : ONE_SECOND
 
 PRI runClock(nowMs) | elapsedMs, wholeSeconds
 ' A real-time clock: advance by every whole second since it last did, and pulse the colon over each second.
+'
+' @param nowMs - The frame's time in ms, from isp_hub75_morphTime.update(): the same value for every group, digit and segment of a frame
+
+' Local Variables:
+' @local elapsedMs - ms since the clock last advanced a whole second
+' @local wholeSeconds - the whole seconds in elapsedMs
 
     if not bClockRunning
         clockLastSecondMs := nowMs
@@ -788,22 +927,30 @@ PRI runClock(nowMs) | elapsedMs, wholeSeconds
         wholeSeconds := elapsedMs / timeBase.MS_PER_SECOND
         clockLastSecondMs += wholeSeconds * timeBase.MS_PER_SECOND
         elapsedMs -= wholeSeconds * timeBase.MS_PER_SECOND
-        showValue((currValue + wholeSeconds) // (valueCap + ONE_STEP))
+        showValue((currentValue + wholeSeconds) // (valueCap + ONE_STEP))
     setColonsLevel(digits.LEVEL_FULL - (digits.LEVEL_FULL - COLON_DIM_LEVEL) * elapsedMs / timeBase.MS_PER_SECOND)
 
 PRI setColonsLevel(level) | colonIdx
 ' Light every colon of the group at one level (0 darkens them).
 ' A plain REPEAT count: with no colon it runs 0 times. A FROM 0 TO colonCount - 1 loop would count down and run
 ' for -1, and so would REPEAT colonCount WITH colonIdx (seen on pnut-ts v1.55.8): digits[-1] is another object.
+'
+' @param level - 0 (dark) to digits.LEVEL_FULL
+
+' Local Variables:
+' @local colonIdx - the colon being set
 
     colonIdx := 0
     repeat colonCount
         digits[colonDigit(colonIdx++)].setColonLevel(level)
 
 PRI colonDigit(colonIdx) : digitIdx
-' The digit a colon belongs to: each colon follows a clock field's second digit.
+' Return the digit a colon belongs to: each colon follows a clock field's second digit.
+'
+' @param colonIdx - the colon, counted from the left
+' @returns digitIdx - the digit it follows
 
-    digitIdx := FIELD_DIGITS * (colonIdx + NEXT_PIXEL) - NEXT_PIXEL
+    digitIdx := FIELD_DIGITS * (colonIdx + ONE_COLON) - morphMask.LAST_OFFSET
 
 PRI applyMotion() | digitIdx
 ' Hand the group's move duration and easing to every digit (and so to every segment).
@@ -815,8 +962,10 @@ PRI applyMotion() | digitIdx
         digits[digitIdx].setMotion(moveDurationMs, moveEaseStyle)
 
 PRI tailX256() : tailLen
-' The snake tail every digit draws with, in 1/256 pixel: one pixel for PROFILE_EDGE; for PROFILE_TAIL the set
+' Return the snake tail every digit draws with, in 1/256 pixel: one pixel for PROFILE_EDGE; for PROFILE_TAIL the set
 ' length, or a quarter of the segment's length.
+'
+' @returns tailLen - the tail, in 1/256 pixel
 
     if motionProfile == timeBase.PROFILE_EDGE
         tailLen := timeBase.MIN_TAIL_PIXELS
@@ -829,43 +978,56 @@ PRI tailX256() : tailLen
 PRI applyTail() | digitIdx
 ' Give every digit the group's tail.
 
+' Local Variables:
+' @local digitIdx - the digit being set
+
     repeat digitIdx from 0 to LAST_DIGIT
         digits[digitIdx].setTail(tailX256())
 
 PRI setDrawContext(row, column, groupWidth, groupHeight)
 ' Fill the group's drawing transform: from group coordinates (unturned, groupWidth x groupHeight) to the
 ' display, the turned group's top-left at (row, column). clipToArea() sets the clip rectangle.
+'
+' @param row - the turned group's top row on the display
+' @param column - the turned group's left column on the display
+' @param groupWidth - the group's width, unturned
+' @param groupHeight - the group's height, unturned
 
-    longfill(@drawCtx, 0, digits.CTX_LONGS)
+    longfill(@drawContext, 0, digits.CTX_LONGS)
     case rotation
         ROT_0:
-            drawCtx[digits.CTX_XX] := NEXT_PIXEL                    ' x = column + gx, y = row + gy
-            drawCtx[digits.CTX_X0] := column
-            drawCtx[digits.CTX_YY] := NEXT_PIXEL
-            drawCtx[digits.CTX_Y0] := row
+            drawContext[digits.CTX_XX] := UNIT_STEP                     ' x = column + gx, y = row + gy
+            drawContext[digits.CTX_X0] := column
+            drawContext[digits.CTX_YY] := UNIT_STEP
+            drawContext[digits.CTX_Y0] := row
         ROT_90:
-            drawCtx[digits.CTX_XY] := -NEXT_PIXEL                   ' x = column + (height - 1 - gy), y = row + gx
-            drawCtx[digits.CTX_X0] := column + groupHeight - NEXT_PIXEL
-            drawCtx[digits.CTX_YX] := NEXT_PIXEL
-            drawCtx[digits.CTX_Y0] := row
+            drawContext[digits.CTX_XY] := -UNIT_STEP                    ' x = column + (height - 1 - gy), y = row + gx
+            drawContext[digits.CTX_X0] := column + groupHeight - morphMask.LAST_OFFSET
+            drawContext[digits.CTX_YX] := UNIT_STEP
+            drawContext[digits.CTX_Y0] := row
         ROT_180:
-            drawCtx[digits.CTX_XX] := -NEXT_PIXEL                   ' x = column + (width - 1 - gx), y = row + (height - 1 - gy)
-            drawCtx[digits.CTX_X0] := column + groupWidth - NEXT_PIXEL
-            drawCtx[digits.CTX_YY] := -NEXT_PIXEL
-            drawCtx[digits.CTX_Y0] := row + groupHeight - NEXT_PIXEL
+            drawContext[digits.CTX_XX] := -UNIT_STEP                    ' x = column + (width - 1 - gx), y = row + (height - 1 - gy)
+            drawContext[digits.CTX_X0] := column + groupWidth - morphMask.LAST_OFFSET
+            drawContext[digits.CTX_YY] := -UNIT_STEP
+            drawContext[digits.CTX_Y0] := row + groupHeight - morphMask.LAST_OFFSET
         ROT_270:
-            drawCtx[digits.CTX_XY] := NEXT_PIXEL                    ' x = column + gy, y = row + (width - 1 - gx)
-            drawCtx[digits.CTX_X0] := column
-            drawCtx[digits.CTX_YX] := -NEXT_PIXEL
-            drawCtx[digits.CTX_Y0] := row + groupWidth - NEXT_PIXEL
+            drawContext[digits.CTX_XY] := UNIT_STEP                     ' x = column + gy, y = row + (width - 1 - gx)
+            drawContext[digits.CTX_X0] := column
+            drawContext[digits.CTX_YX] := -UNIT_STEP
+            drawContext[digits.CTX_Y0] := row + groupWidth - morphMask.LAST_OFFSET
 
 PRI isQuarterTurn() : bQuarter
-' TRUE when the group is turned 90 degrees either way: its width and height swap on the display.
+' Return TRUE when the group is turned 90 degrees either way: its width and height swap on the display.
+'
+' @returns bQuarter - TRUE for ROT_90 and ROT_270
 
     bQuarter := isQuarterTurnFor(rotation)
 
 PRI isQuarterTurnFor(groupRotation) : bQuarter
-' TRUE when this rotation turns a group 90 degrees either way.
+' Return TRUE when this rotation turns a group 90 degrees either way.
+'
+' @param groupRotation - ROT_0, ROT_90 (clockwise), ROT_180 or ROT_270 (counter-clockwise)
+' @returns bQuarter - TRUE for ROT_90 and ROT_270
 
     bQuarter := groupRotation == ROT_90 or groupRotation == ROT_270
 
