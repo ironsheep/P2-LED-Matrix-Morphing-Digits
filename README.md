@@ -59,7 +59,7 @@ I develop this on four 128 x 64 ICN2037 panels in a 2 x 2 grid (256 x 128 pixels
 
 1. Put the HUB75 driver v4.0.0 (or later) files in a folder.
 1. Configure the driver for your panels in its **isp_hub75_hwPanelConfig.spin2** (the `DISP0_*` settings), following the driver's documentation. This project does not ship that file, so copying our files in never overwrites your configuration.
-1. Download **p2-obex-morphing-digits-v2.0.0.zip** from this project's [Releases page][releases], unzip it, and copy the files from its folder into the same folder. None of them shares a name with a driver file. (From a clone of this repository, copy `Src/isp_hub75_morph*.spin2` and `Src/demo_hub75_morph*.spin2` instead.)
+1. Download **p2-obex-morphing-digits-v2.0.0.zip** from this project's [Releases page][releases], unzip it, and copy the `.spin2` files from its folder into the same folder. None of them shares a name with a driver file (the zip's **ChangeLog.md**, **LICENSE** and **README.md** stay in its own folder; the driver has files of those names). (From a clone of this repository, copy `Src/isp_hub75_morph*.spin2` and `Src/demo_hub75_morph*.spin2` instead.)
 1. Compile and run a demo, e.g. `pnut-ts demo_hub75_morphClock.spin2`, then download it to your P2.
 
 ## The Demos

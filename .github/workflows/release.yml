@@ -1,0 +1,35 @@
+# Publish a release when a version tag (v1.2.3) is pushed: package this project's library and demo sources
+# (never the HUB75 driver, never the test programs) with LICENSE, ChangeLog.md and the package README, and
+# create the GitHub release with this version's ChangeLog.md entry as its page text. The zip is built only
+# here, never committed. The packaging and the version lock (tag = MORPH_VERSION = versionString() = newest
+# ChangeLog.md heading) are in .github/scripts/package-release.sh. Nothing is compiled or certified here:
+# the range and performance gates are run on the board before the tag is pushed.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the tagged source
+        uses: actions/checkout@v4
+
+      - name: Package the release
+        run: bash .github/scripts/package-release.sh "${GITHUB_REF_NAME}" dist
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/*.zip \
+            --title "${GITHUB_REF_NAME}" \
+            --notes-file dist/release-body.md \
+            --verify-tag

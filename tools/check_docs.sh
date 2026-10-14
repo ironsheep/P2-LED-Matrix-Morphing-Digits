@@ -17,7 +17,9 @@
 #                the tracked Src/(isp|demo)_hub75_morph*.spin2 files; "N snake" / "N column" against
 #                the CMD_ enum, "N segments" against the SEG_ enum, both in isp_hub75_morphSegment.spin2
 #   OMITTED      a tracked file missing from a README file table (a table whose first column names
-#                files): checked against the tracked files of the directory the table mostly lists
+#                files): checked against the tracked files of the directory the table mostly lists.
+#                A package README (.github/release/) describes the release zip, which never holds the
+#                test programs (test_hub75_morph*), so they are not expected in its table
 #   UNCLASSIFIED a name that is not in the tree and could not be classified as a driver name
 #                because the driver directory is absent (never passed or failed silently)
 # LIMITS       method names are checked only when camelCase, or written name() in a .md file.
@@ -213,6 +215,7 @@ function flushTable(   k, d, best, bestN, p, c, cnt, found) {
   for (d in cnt) if (cnt[d] > bestN || (cnt[d] == bestN && d < best)) { best = d; bestN = cnt[d] }
   if (bestN > 0) {
     for (k = 1; k <= nTrk; k++) {
+      if (CURDOC ~ /^\.github\/release\// && TL[k] ~ /(^|\/)test_hub75_morph[^\/]*$/) continue   # the package README lists the zip: test programs never ship
       if (dirOf(TL[k]) == best && !(TL[k] in tIn))
         report("OMITTED", tStart, "file table lists " bestN " file(s) of " best "/ but omits tracked file " TL[k])
     }
