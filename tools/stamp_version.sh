@@ -3,8 +3,11 @@
 #
 # Usage:
 #   bash tools/stamp_version.sh [VERSION]           stamp VERSION (x.y.z or vx.y.z); with no VERSION,
-#                                                   the newest '## [x.y.z] <date>' heading of
-#                                                   ChangeLog.md ('## [Unreleased]' is never taken)
+#                                                   the newest release heading of ChangeLog.md:
+#                                                   '## vX.Y.Z (YYYY-MM-DD)' (central changelog-voicing
+#                                                   form) or the older '## [x.y.z] <date>'; both forms
+#                                                   are read, because shipped history keeps its headings
+#                                                   ('## [Unreleased]' is never taken)
 #   bash tools/stamp_version.sh --check [VERSION]   change nothing; report every file:line that
 #                                                   disagrees with VERSION (or the ChangeLog version)
 #                                                   and exit 1; exit 0 when all agree
@@ -38,10 +41,11 @@ for arg in "$@"; do
 done
 
 if [ -z "$VERSION" ]; then
-    # newest (first) release heading; '## [Unreleased]' has no digits so it never matches
-    VERSION=$(awk '/^## \[[0-9]+\.[0-9]+\.[0-9]+\]/ { v = $2; gsub(/[\[\]]/, "", v); print v; exit }' "$ROOT/ChangeLog.md")
+    # newest (first) release heading, in either form: '## vX.Y.Z (date)', '## [vX.Y.Z] (date)' or '## [x.y.z] date'.
+    # The full token must be a version ('## [Unreleased]' has no digits, so it never matches).
+    VERSION=$(awk '/^## \[?v?[0-9]+\.[0-9]+\.[0-9]+\]?( |$)/ { v = $2; gsub(/[\[\]v]/, "", v); print v; exit }' "$ROOT/ChangeLog.md")
     if [ -z "$VERSION" ]; then
-        echo "stamp_version: no '## [x.y.z]' heading found in ChangeLog.md and no version argument" >&2
+        echo "stamp_version: no release heading ('## vX.Y.Z (date)' or '## [x.y.z] date') found in ChangeLog.md and no version argument" >&2
         exit 2
     fi
 fi

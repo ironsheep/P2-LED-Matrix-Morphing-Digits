@@ -8,7 +8,7 @@
 ''   E-mail..... stephen@ironsheep.biz
 ''   Started.... Jan 2021
 ''   Updated.... 14 Oct 2026
-''   Version.... v1.0.0
+''   Version.... v2.0.0
 ''
 '' =================================================================================================
 
@@ -30,7 +30,7 @@
 
 CON ' library version -- values are written by tools/stamp_version.sh, never edit by hand
 
-    MORPH_VERSION = 10000     ' MAJOR * 10000 + MINOR * 100 + PATCH, e.g. v1.2.3 is 10203
+    MORPH_VERSION = 20000     ' MAJOR * 10000 + MINOR * 100 + PATCH, e.g. v1.2.3 is 10203
 
 CON ' motion and cadence settings of a group
 
@@ -212,7 +212,7 @@ PUB versionString() : pVersion
 ''
 '' @returns pVersion - hub address of the version text
 
-    pVersion := @"v1.0.0"     ' MORPH_VERSION_STR -- written by tools/stamp_version.sh
+    pVersion := @"v2.0.0"     ' MORPH_VERSION_STR -- written by tools/stamp_version.sh
 
 PUB placeGroup(adapter, areaLeft, areaTop, areaWidth, areaHeight, grpType, layout, groupRotation, rgbColor, initialValue) : status, usedWidth, usedHeight | chain, rows, columns, segLength, thickness, groupWidth, groupHeight, slot, digitIdx, colonIdx, maxValue, tail
 '' Place this group in an area of an adapter's display: it takes the largest digits that fit the area (turned),
