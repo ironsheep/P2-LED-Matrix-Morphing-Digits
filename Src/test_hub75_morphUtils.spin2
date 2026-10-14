@@ -6,7 +6,7 @@
 ''               -- see below for terms of use
 ''   E-mail..... stephen@ironsheep.biz
 ''   Started.... Oct 2026
-''   Updated.... 12 Oct 2026
+''   Updated.... 14 Oct 2026
 ''
 '' =================================================================================================
 
@@ -88,19 +88,33 @@ PUB timeStart() : startTick
     startTick := getct()
 
 
-PUB timeReport(pTimingName, startTick) : elapsedTicks | elapsedUs
+PUB timeReport(pTimingName, startTick) : elapsedTicks
 '' Print a TIME line for the interval since timeStart(), in clock ticks and in microseconds at clkfreq.
 ''
 '' @param pTimingName - Zero-terminated name of the measurement
 '' @param startTick - The value timeStart() returned
 '' @returns elapsedTicks - Clock ticks since startTick (valid for intervals under 2^32 ticks)
 
-' Local Variables:
-' @local elapsedUs - elapsedTicks converted to microseconds without 32-bit overflow
-
     elapsedTicks := getct() - startTick
+    timeReportTicks(pTimingName, elapsedTicks)
+
+
+PUB timeReportTicks(pTimingName, elapsedTicks)
+'' Print a TIME line for an interval measured earlier (stored ticks), in the same format as timeReport().
+''
+'' @param pTimingName - Zero-terminated name of the measurement
+'' @param elapsedTicks - The interval, in clock ticks
+
+    debug("TIME     ", zstr_(pTimingName), "  ticks=", udec_(elapsedTicks), "  us=", udec_(ticksToUs(elapsedTicks)), "  clkfreq=", udec_(clkfreq))
+
+
+PUB ticksToUs(elapsedTicks) : elapsedUs
+'' Convert clock ticks to microseconds at clkfreq, without 32-bit overflow.
+''
+'' @param elapsedTicks - The interval, in clock ticks
+'' @returns elapsedUs - The interval, in microseconds
+
     elapsedUs := muldiv64(elapsedTicks, MICROS_PER_SECOND, clkfreq)
-    debug("TIME     ", zstr_(pTimingName), "  ticks=", udec_(elapsedTicks), "  us=", udec_(elapsedUs), "  clkfreq=", udec_(clkfreq))
 
 
 PUB holdFor(durationMs) : heldMs | startMs

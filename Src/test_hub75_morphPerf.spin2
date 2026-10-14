@@ -1,7 +1,7 @@
 '' =================================================================================================
 ''
 ''   File....... test_hub75_morphPerf.spin2
-''   Purpose.... Performance baseline: times today's drawing primitives, commit, digit-group step and demo frame rate
+''   Purpose.... Performance gate: the drawing primitives, the commit, and the frame cost of every showcase scene
 ''   Authors.... Stephen M Moraco
 ''               -- see below for terms of use
 ''   E-mail..... stephen@ironsheep.biz
@@ -10,16 +10,22 @@
 ''
 '' =================================================================================================
 
-{ Baseline form (task 162): measures the drawing path as it stands before any rewrite, on the quad
-  (4 x ICN2037 128x64 in a 2x2 grid, 256x128, 8-bit, 335 MHz). Run it on the board, three or more
-  times, and record the figures in Docs/analysis/performance-baseline.md.
+{ The performance gate (spec R-9.1-9.4, plan section 12, task 173), on the quad (4 x ICN2037 128x64 in a 2x2 grid, 256x128,
+  8-bit, 335 MHz). Run it on the board and compare its figures with Docs/analysis/performance-baseline.md: every
+  scene holds 60 fps or more (a check), and no figure is worse than the record beyond its noise. The renderer's own
+  per-profile figures (one segment, profile A and C, and the dense frame) come from test_hub75_morphRender's timing
+  lines; this program measures the rest.
 
-  Every interval is read with getct() on this cog, in system clock ticks; the driver's cogs are
-  not involved in the reading, only in what is read. Reported through test_hub75_morphUtils.
+    1. the primitives: a counter read, an empty loop, packedCorrectedRgb, one pixel, fillRowRun and copyRowRun
+    2. the commit: after a quiet period, back to back, and by loop difference
+    3. every showcase scene's load (the rows of demo_hub75_morphShowcase's scene table, copied here: keep them in
+       step), run for SCENE_MEASURE_MS in the demo's own frame loop. Frames per second alone hides a slowdown: the
+       loop runs at the 71 Hz refresh until a frame's work passes about 14 ms. So each frame's work (from the time
+       read to the commit) is measured too, and its mean and maximum are the regression figures.
 
-  Task 163 moved the group items to the time-based API: each timed animate(nowMs) is given the time of the
-  middle of the next step, so it draws one step like the 2021 animateStep() did, and the frame-rate item runs
-  the new frame loop (one commit per pass). The figures recorded before task 163 stay the 2021 baseline.
+  Every interval is read with getct() on this cog, in system clock ticks. Reported through test_hub75_morphUtils.
+  A falsification build (-D MORPH_BREAK_PERF) adds BREAK_DELAY_US of work to every frame: the scenes must fall
+  below 60 fps and their work figures must rise.
 
   Log lines this program adds to the harness's TIME line (same field style):
     PERCALL  <name>  reps=<n>  total_ticks=<n>  ticks_x100_per_call=<n>  net_ticks_x100=<n>  ns_per_call=<n>  net_ns=<n>  net_us_whole=<n>
@@ -28,8 +34,8 @@
         a set of one-call brackets, each stored and printed afterwards
     DIFF     <name>  cycles=<n>  with_ticks=<n>  without_ticks=<n>  per_commit_ticks=<n>  per_commit_us=<n>
         the commit time as the difference of two whole loops (a bracket placed around the loop, not the call)
-    FPS      <name>  commits=<n>  passes=<n>  window_ticks=<n>  commits_per_second_x100=<n>  passes_per_second_x100=<n>  meter_x100=<n>
-        meter_x100 is isp_hub75_morphTime's frame-rate meter over its last window, printed beside the test's own count
+    SCENE    <name>  frames=<n>  window_ms=<n>  fps_x100=<n>  work_mean_us=<n>  work_max_us=<n>
+        one scene's frames over its window, and each frame's work (time read to commit start)
 }
 
 CON ' ---- Timing ----
@@ -43,20 +49,8 @@ CON ' ---- Units ----
   NANOS_PER_MICRO = 1000                                        ' the three fraction digits of a microsecond
   PER_CALL_SCALE = 100                                          ' ticks per call are printed times this (two decimals)
   RATE_SCALE = 100                                              ' rates are printed times this (two decimals)
-  QUAD_ROWS = 128                                               ' the display this baseline is for: the quad, 256 x 128
+  QUAD_ROWS = 128                                               ' the display this gate is for: the quad, 256 x 128
   QUAD_COLUMNS = 256
-
-CON ' ---- Display (the 2021 demo's groups) ----
-
-  MAX_COUNTERS = 4
-  LAST_COUNTER = MAX_COUNTERS - 1
-
-  ' the demo's four groups, by index into counters[]:
-  '   GRP_CLOCK_LT      - the clock on the left (HH:MM, starts at 00:00)
-  '   GRP_CLOCK_RT      - the clock on the right (HH:MM, starts at noon)
-  '   GRP_COUNTDOWN     - the down counter (3 digits)
-  '   GRP_RANDOM        - the digits group (the demo's 4 random digits)
-  #0, GRP_CLOCK_LT, GRP_CLOCK_RT, GRP_COUNTDOWN, GRP_RANDOM
 
 CON ' ---- Measurement settings ----
 
@@ -68,6 +62,7 @@ CON ' ---- Measurement settings ----
   RUN_MEDIUM = 32
   RUN_LONG = 128
   COLOR_LIST_LONGS = RUN_LONG                                   ' copyRowRun's color list: one LONG per pixel of the longest run
+  LABEL_BYTES = 32                                              ' a run's name, built from its length: "fillRowRun 128 px"
 
   TEST_ROW = 40                                                 ' where the primitives draw (inside the first panel)
   TEST_PIXEL_COLUMN = 100
@@ -80,56 +75,77 @@ CON ' ---- Measurement settings ----
   COMMIT_SAMPLES = 20                                           ' one-call commit brackets per kind
   LAST_COMMIT_SAMPLE = COMMIT_SAMPLES - 1
   DIFF_CYCLES = 20                                              ' commits in the differential method
-
-  ANIM_CYCLES = 40                                              ' value changes per group
-  ANIM_STEPS_TIMED = 4                                          ' animate calls timed after each change, at steps 2 to 5 (all real steps: segments are 6+ long)
-  ANIM_SAMPLE_COUNT = ANIM_CYCLES * ANIM_STEPS_TIMED
-  ANIM_START_MS = 0                                             ' the injected time of each change's first animate (any value works: only differences count)
-  HALF_STEPS_PER_STEP = 2                                       ' times are taken in half steps, so each lands in the middle of a step
-  FIRST_TIMED_HALF_STEP = 3                                     ' the middle of step 2 (step 1 is drawn by the command)
-  LAST_TIMED_HALF_STEP = FIRST_TIMED_HALF_STEP + HALF_STEPS_PER_STEP * (ANIM_STEPS_TIMED - 1)
   NO_MIN_TICKS = $7FFF_FFFF                                     ' start value of a running minimum
   NO_OVERHEAD = 0                                               ' reportPerCall()'s overhead figure when no empty-loop cost is taken off
 
-  FPS_SECONDS = 10                                              ' the demo-loop window
-  FPS_WINDOW_TICKS = CLK_FREQ * FPS_SECONDS
+  SCENE_SETTLE_MS = 2_000                                       ' a scene runs this long before its window: the grow-in is over
+  SCENE_MEASURE_MS = 10_000                                     ' each scene's measured window
+  MIN_FPS_X100 = 60 * RATE_SCALE                                ' the goal: 60 frames per second (spec R-9.1)
+  DIGIT_ZERO = "0"
+  PX_SUFFIX_BYTES = 4                                           ' " px" and its terminator
+  TOTAL_SUFFIX_BYTES = 9                                        ' " (total)" and its terminator
 
-  ' group placement (the demo's, same arguments)
-  RIGHT_HALF_COLUMN = 64                                        ' the right-hand groups sit in the second 64 columns
-  CLOCK_LT_ROW = 10
-  CLOCK_LT_COLUMN = 2
-  CLOCK_LT_START = 0                                            ' the left clock shows 00:00
-  CLOCK_RT_ROW = 8
-  CLOCK_RT_COLUMN = RIGHT_HALF_COLUMN + 2
-  DOWNCTR_ROW = 28
-  DOWNCTR_COLUMN = 3
-  RANDOM_ROW = 32
-  RANDOM_COLUMN = RIGHT_HALF_COLUMN + 4
-  SEG_THICKNESS = 1
-  CLOCK_SEG_LENGTH = 6
-  DOWNCTR_SEG_LENGTH = 15
-  RANDOM_SEG_LENGTH = 9
-  ' the areas that fit those segment lengths at stroke 1 (placeGroup(), task 168): the same digits as 2021
-  CLOCK_AREA_WIDTH = 42
-  CLOCK_AREA_HEIGHT = 15
-  DOWNCTR_AREA_WIDTH = 59
-  DOWNCTR_AREA_HEIGHT = 33
-  RANDOM_AREA_WIDTH = 50
-  RANDOM_AREA_HEIGHT = 21
-  CLOCK_RT_START = counters.HOURS_PER_HALF_DAY * counters.SECONDS_PER_HOUR      ' noon, in seconds
-  DOWNCTR_START = 204
-  RANDOM_START = 5436
-  CLOCK_STEP_INTERVALS = CLOCK_SEG_LENGTH - 1                   ' a snake of N pixels moves in N steps, N - 1 intervals
-  DOWNCTR_STEP_INTERVALS = DOWNCTR_SEG_LENGTH - 1
-  RANDOM_STEP_INTERVALS = RANDOM_SEG_LENGTH - 1
-  CLOCK_MOVE_MS = 111                                           ' the demo's pacing (demo_hub75_morphSeg.spin2, same values)
-  DOWNCTR_MOVE_MS = 311
-  RANDOM_MOVE_MS = 178
-  HOLD_MS = 200
-  FULL_WIDTH_COLUMNS = 64                                       ' wider than this holds a right-hand group
-  FULL_HEIGHT_ROWS = 32                                         ' taller than this holds a lower group
-  TEXT_ROW = 0
-  TEXT_COLUMN = 0
+#IFDEF MORPH_BREAK_PERF
+  BREAK_DELAY_US = 12_000                                       ' falsification: 12 ms more work in every frame
+#ELSE
+  BREAK_DELAY_US = 0
+#ENDIF
+
+CON ' ---- Scenes (demo_hub75_morphShowcase's, in the shipped look: profile C, flat) ----
+
+  NUM_GROUPS = 9                                                ' the showcase's group count (the most it fits in hub)
+  GRID = 16                                                     ' a row's area is in sixteenths of the display
+
+  ' A scene's header, then its rows (one long each):
+  '  SCENE_MS     - how long the scene runs, in milliseconds
+  '  SCENE_GROUPS - how many rows (groups) the scene has
+  '  SCENE_ROWS   - where the first row starts
+  #0, SCENE_MS, SCENE_GROUPS, SCENE_ROWS
+  ' The fields of one row, which describes one group:
+  '  ROW_LEFT, ROW_TOP, ROW_WIDTH, ROW_HEIGHT - the group's area, in GRID sixteenths of the display
+  '  ROW_TYPE      - the group type (group.GRP_ value)
+  '  ROW_LAYOUT    - the digit layout (group.LAYOUT_ value)
+  '  ROW_ROTATION  - the group's rotation (group.ROT_ value)
+  '  ROW_COLOR     - the group's color
+  '  ROW_STROKE    - the stroke thickness in pixels (AUTO: sized with the digits)
+  '  ROW_FEED      - what gives the group its values (a FEED_ value)
+  '  ROW_MOVE_MS   - how long one move takes, in milliseconds
+  '  ROW_HOLD_MS   - how long a value is held after its move, in milliseconds
+  #0, ROW_LEFT, ROW_TOP, ROW_WIDTH, ROW_HEIGHT, ROW_TYPE, ROW_LAYOUT, ROW_ROTATION, ROW_COLOR, ROW_STROKE, ROW_FEED, ROW_MOVE_MS, ROW_HOLD_MS
+  ROW_LONGS = ROW_HOLD_MS + 1
+  BYTES_PER_LONG = 4                                            ' a row's address is its long offset times this
+  COUNT_TO_LAST = 1                                             ' the last of a count is the count minus one
+  ONE_DIGIT_SCALE = 1                                           ' 10^0: a value range starts here and gains a 10 per digit
+  AUTO = 0                                                      ' ROW_STROKE: sized with the digits
+
+  ' what gives a group its values
+  '   FEED_STEP     - nextTimeCycle() after each hold: counters count, accelerated clocks advance
+  '   FEED_RANDOM   - a random value after each hold (a value group)
+  '   FEED_FPS      - the render loop's frames per second after each hold (a value group)
+  '   FEED_CLOCK    - a real-time clock started at the time of day (START_TIME plus the uptime)
+  '   FEED_UPTIME   - a real-time clock started at the uptime
+  '   FEED_VERSION  - the library version, held still on a 12-hour clock: v1.0.0 shows as 1:00:00
+  #0, FEED_STEP, FEED_RANDOM, FEED_FPS, FEED_CLOCK, FEED_UPTIME, FEED_VERSION
+
+  ' The scenes, in the order of the sceneList rows (demo_hub75_morphShowcase's):
+  '  SCENE_VERSION     - the library version morphing on (shown once, at start-up)
+  '  SCENE_HERO        - one real-time HH:MM:SS clock filling the display
+  '  SCENE_MIXED       - a thick clock above a row of thin-stroked counters
+  '  SCENE_SPLATTER    - nine groups of every type, size, color, stroke and rotation
+  '  SCENE_STATUS      - time of day, uptime, a restarting countdown and the frame rate
+  '  SCENE_ORIENTATION - the same counter at all four rotations
+  #0, SCENE_VERSION, SCENE_HERO, SCENE_MIXED, SCENE_SPLATTER, SCENE_STATUS, SCENE_ORIENTATION
+  LAST_SCENE = SCENE_ORIENTATION
+  FIRST_LOOP_SCENE = SCENE_HERO                                 ' the version shows once, at start-up
+
+  START_HOURS = 12                                              ' the time of day at start-up
+  START_TIME = START_HOURS * group.SECONDS_PER_HOUR
+  VERSION_MAJOR = group.MORPH_VERSION / 10_000                  ' MORPH_VERSION is MAJOR * 10000 + MINOR * 100 + PATCH
+  VERSION_MINOR = group.MORPH_VERSION / 100 // 100
+  VERSION_PATCH = group.MORPH_VERSION // 100
+  VERSION_TIME = VERSION_MAJOR * group.SECONDS_PER_HOUR + VERSION_MINOR * group.SECONDS_PER_MINUTE + VERSION_PATCH
+  SHOW_PROFILE = timeBase.PROFILE_TAIL
+  SHOW_SECTION = morphMask.SECTION_FLAT
 
 OBJ
 
@@ -137,10 +153,66 @@ OBJ
     display                 : "isp_hub75_display"
     pixels                  : "isp_hub75_screenUtils"
     colorUtils              : "isp_hub75_colorUtils"
-    counters[MAX_COUNTERS]  : "isp_hub75_morphCounters"
     hub75Bffrs              : "isp_hub75_hwBufferAccess"
     utils                   : "test_hub75_morphUtils"
     timeBase                : "isp_hub75_morphTime"
+    morphMask               : "isp_hub75_morphMask"
+    group[NUM_GROUPS]       : "isp_hub75_morphCounters"
+
+DAT ' the scenes, in SCENE_ order
+
+    sceneList       long    @sceneVersion, @sceneHero, @sceneMixed, @sceneSplatter, @sceneStatus, @sceneOrientation
+    sceneNames      word    @nameVersion, @nameHero, @nameMixed, @nameSplatter, @nameStatus, @nameOrientation
+    nameVersion     byte    "version", 0
+    nameHero        byte    "hero", 0
+    nameMixed       byte    "mixed", 0
+    nameSplatter    byte    "splatter", 0
+    nameStatus      byte    "status", 0
+    nameOrientation byte    "orientation", 0
+
+    '                       left top wide high  type                    layout                  rotation        color           stroke  feed            move   hold
+    sceneVersion    long    6_000, 1
+                    long    1,  2, 14, 12,  group.GRP_CLOCK,        group.LAYOUT_HH_MM_SS,  group.ROT_0,    color.cOrange,  AUTO,   FEED_VERSION,   500,   0
+
+    sceneHero       long    20_000, 1
+                    long    0,  0, 16, 16,  group.GRP_CLOCK,        group.LAYOUT_HH_MM_SS,  group.ROT_0,    color.cOrange,  AUTO,   FEED_CLOCK,     400,   0
+
+    sceneMixed      long    20_000, 4
+                    long    0,  0, 16,  9,  group.GRP_CLOCK,        group.LAYOUT_HH_MM,     group.ROT_0,    color.cCyan,    AUTO,   FEED_CLOCK,     400,   0
+                    long    0, 10,  5,  6,  group.GRP_UP_COUNTER,   group.LAYOUT_3_DIGITS,  group.ROT_0,    color.cGreen,   1,      FEED_STEP,      250,   250
+                    long    5, 10,  5,  6,  group.GRP_DOWN_COUNTER, group.LAYOUT_2_DIGITS,  group.ROT_0,    color.cTeal,    1,      FEED_STEP,      300,   700
+                    long   10, 10,  6,  6,  group.GRP_DIGITS,       group.LAYOUT_4_DIGITS,  group.ROT_0,    color.cRed,     1,      FEED_RANDOM,    250,   500
+
+    sceneSplatter   long    20_000, 9
+                    long    0,  0,  6,  5,  group.GRP_CLOCK,        group.LAYOUT_HH_MM,     group.ROT_0,    color.cOrange,  AUTO,   FEED_CLOCK,     400,   0
+                    long    6,  0,  4,  5,  group.GRP_UP_COUNTER,   group.LAYOUT_2_DIGITS,  group.ROT_0,    color.cGreen,   1,      FEED_STEP,      200,   200
+                    long   10,  0,  6,  5,  group.GRP_DIGITS,       group.LAYOUT_4_DIGITS,  group.ROT_180,  color.cRed,     AUTO,   FEED_RANDOM,    300,   400
+                    long    0,  5,  2, 11,  group.GRP_DOWN_COUNTER, group.LAYOUT_2_DIGITS,  group.ROT_90,   color.cTeal,    AUTO,   FEED_STEP,      300,   300
+                    long    2,  5,  5,  6,  group.GRP_DIGITS,       group.LAYOUT_3_DIGITS,  group.ROT_0,    color.cYellow,  2,      FEED_RANDOM,    250,   350
+                    long    7,  5,  3,  4,  group.GRP_UP_COUNTER,   group.LAYOUT_1_DIGIT,   group.ROT_0,    color.cMagenta, AUTO,   FEED_STEP,      500,   300
+                    long   10,  5,  6,  4,  group.GRP_CLOCK,        group.LAYOUT_MM_SS,     group.ROT_0,    color.cBlue,    AUTO,   FEED_UPTIME,    400,   0
+                    long    2, 11,  6,  5,  group.GRP_DOWN_COUNTER, group.LAYOUT_3_DIGITS,  group.ROT_0,    color.cLime,    1,      FEED_STEP,      150,   150
+                    long    8,  9,  6,  7,  group.GRP_DIGITS,       group.LAYOUT_2_DIGITS,  group.ROT_270,  color.cPurple,  AUTO,   FEED_RANDOM,    400,   600
+
+    sceneStatus     long    20_000, 4
+                    long    0,  0, 16,  5,  group.GRP_CLOCK,        group.LAYOUT_HH_MM_SS,  group.ROT_0,    color.cOrange,  AUTO,   FEED_CLOCK,     400,   0
+                    long    0,  5, 16,  5,  group.GRP_CLOCK,        group.LAYOUT_HH_MM_SS,  group.ROT_0,    color.cGreen,   AUTO,   FEED_UPTIME,    400,   0
+                    long    0, 10,  8,  6,  group.GRP_DOWN_COUNTER, group.LAYOUT_2_DIGITS,  group.ROT_0,    color.cTeal,    AUTO,   FEED_STEP,      300,   700
+                    long    8, 10,  8,  6,  group.GRP_DIGITS,       group.LAYOUT_3_DIGITS,  group.ROT_0,    color.cYellow,  AUTO,   FEED_FPS,       300,   700
+
+    sceneOrientation long   15_000, 4
+                    long    0,  0,  8,  8,  group.GRP_UP_COUNTER,   group.LAYOUT_2_DIGITS,  group.ROT_0,    color.cOrange,  AUTO,   FEED_STEP,      400,   600
+                    long    8,  0,  8,  8,  group.GRP_UP_COUNTER,   group.LAYOUT_2_DIGITS,  group.ROT_90,   color.cGreen,   AUTO,   FEED_STEP,      400,   600
+                    long    0,  8,  8,  8,  group.GRP_UP_COUNTER,   group.LAYOUT_2_DIGITS,  group.ROT_270,  color.cCyan,    AUTO,   FEED_STEP,      400,   600
+                    long    8,  8,  8,  8,  group.GRP_UP_COUNTER,   group.LAYOUT_2_DIGITS,  group.ROT_180,  color.cMagenta, AUTO,   FEED_STEP,      400,   600
+
+    sceneChecks     word    @checkVersion, @checkHero, @checkMixed, @checkSplatter, @checkStatus, @checkOrientation
+    checkVersion    byte    "version scene holds 60 fps or more", 0
+    checkHero       byte    "hero scene holds 60 fps or more", 0
+    checkMixed      byte    "mixed scene holds 60 fps or more", 0
+    checkSplatter   byte    "splatter scene holds 60 fps or more", 0
+    checkStatus     byte    "status scene holds 60 fps or more", 0
+    checkOrientation byte   "orientation scene holds 60 fps or more", 0
 
 VAR
 
@@ -149,26 +221,32 @@ VAR
     long    colorList[COLOR_LIST_LONGS]
     long    quietTicks[COMMIT_SAMPLES]
     long    backToBackTicks[COMMIT_SAMPLES]
-    long    animTicks[ANIM_SAMPLE_COUNT]
+    long    areaWidth                                           ' the area the scenes are laid out in: the whole display
+    long    areaHeight
+    long    lastSceneGroup                                      ' the current scene's last group: groups 0 to this are in use
+    long    feed[NUM_GROUPS]                                    ' each group's FEED_ for the current scene
+    long    valueRange[NUM_GROUPS]                              ' a value group's 10^digits: its values are 0 to this - 1
+    long    workTicks                                           ' the latest frame's work, time read to commit start
+    byte    labelText[LABEL_BYTES]
+    byte    totalText[LABEL_BYTES + TOTAL_SUFFIX_BYTES]
 
-PUB go() | maxRows, maxColumns, packedColor
-'' Run the baseline: start the display, time each item, report, finish.
+PUB go() | packedColor, sceneIdx
+'' Run the gate: start the display, time each item, report, finish.
 ''
 
 ' Local Variables:
-' @local maxRows - display height in pixels
-' @local maxColumns - display width in pixels
 ' @local packedColor - the test color, corrected and packed
+' @local sceneIdx - the scene being measured
 
-    utils.beginSuite(@"morphPerf baseline")
+    utils.beginSuite(@"morphPerf performance gate")
 
     chainIndex := hub75Bffrs.indexForHub75ChainId(hub75Bffrs.HUB75_ADAPTER_1)
     display.start(display.HUB75_ADAPTER_1)
-    maxColumns := hub75Bffrs.maxDisplayColumns(chainIndex)
-    maxRows := hub75Bffrs.maxDisplayRows(chainIndex)
-    debug("DISPLAY  rows=", udec_(maxRows), "  columns=", udec_(maxColumns), "  chain=", udec_(chainIndex))
-    utils.checkEqual(maxRows, @"display is the quad: rows", QUAD_ROWS)
-    utils.checkEqual(maxColumns, @"display is the quad: columns", QUAD_COLUMNS)
+    areaWidth := hub75Bffrs.maxDisplayColumns(chainIndex)
+    areaHeight := hub75Bffrs.maxDisplayRows(chainIndex)
+    debug("DISPLAY  rows=", udec_(areaHeight), "  columns=", udec_(areaWidth), "  chain=", udec_(chainIndex))
+    utils.checkEqual(areaHeight, @"display is the quad: rows", QUAD_ROWS)
+    utils.checkEqual(areaWidth, @"display is the quad: columns", QUAD_COLUMNS)
     display.clearScreen()
     packedColor := pixels.packedCorrectedRgb(chainIndex, TEST_RED, TEST_GREEN, TEST_BLUE)
     longfill(@colorList, packedColor, COLOR_LIST_LONGS)
@@ -178,12 +256,10 @@ PUB go() | maxRows, maxColumns, packedColor
     measureRuns()
     measureCommits()
 
-    ' the groups are placed after the primitives so the digits are drawn on a clean screen
     display.clearScreen()
-    placeGroups(maxRows, maxColumns)
-    display.commitScreenToPanelSet()
-    measureAnimateSteps()
-    measureFrameRate()
+    timeBase.reset()
+    repeat sceneIdx from 0 to LAST_SCENE
+        measureScene(sceneIdx)
 
     utils.finish()
 
@@ -209,31 +285,27 @@ PRI measureOverheads() | startTick, bracketTicks, readTick
     reportPerCall(@"empty repeat loop", bracketTicks, LOOP_REPS, NO_OVERHEAD)
 
 
-PRI measureColorAndPixel() | startTick, totalTicks, packedColor
+PRI measureColorAndPixel() | startTick, packedColor
 ' Measure one packedCorrectedRgb (colorUtils, and the screenUtils wrapper) and one drawPixelAtRCwithRGB.
 
 ' Local Variables:
 ' @local startTick - the system counter when the bracket began
-' @local totalTicks - the ticks the bracket took
 ' @local packedColor - the packed color the call returns (assigned, not used: only the call is timed)
 
     startTick := utils.timeStart()
     repeat PIXEL_REPS
         packedColor := colorUtils.packedCorrectedRgb(chainIndex, TEST_RED, TEST_GREEN, TEST_BLUE)
-    totalTicks := utils.timeReport(@"colorUtils.packedCorrectedRgb (total)", startTick)
-    reportPerCall(@"colorUtils.packedCorrectedRgb", totalTicks, PIXEL_REPS, loopX100)
+    reportBracket(@"colorUtils.packedCorrectedRgb", startTick, PIXEL_REPS)
 
     startTick := utils.timeStart()
     repeat PIXEL_REPS
         packedColor := pixels.packedCorrectedRgb(chainIndex, TEST_RED, TEST_GREEN, TEST_BLUE)
-    totalTicks := utils.timeReport(@"screenUtils.packedCorrectedRgb (total)", startTick)
-    reportPerCall(@"screenUtils.packedCorrectedRgb", totalTicks, PIXEL_REPS, loopX100)
+    reportBracket(@"screenUtils.packedCorrectedRgb", startTick, PIXEL_REPS)
 
     startTick := utils.timeStart()
     repeat PIXEL_REPS
         pixels.drawPixelAtRCwithRGB(chainIndex, TEST_ROW, TEST_PIXEL_COLUMN, TEST_RED, TEST_GREEN, TEST_BLUE)
-    totalTicks := utils.timeReport(@"drawPixelAtRCwithRGB (total)", startTick)
-    reportPerCall(@"drawPixelAtRCwithRGB", totalTicks, PIXEL_REPS, loopX100)
+    reportBracket(@"drawPixelAtRCwithRGB", startTick, PIXEL_REPS)
 
 
 PRI measureRuns() | packedColor
@@ -243,47 +315,41 @@ PRI measureRuns() | packedColor
 ' @local packedColor - the test color, corrected and packed
 
     packedColor := colorList[0]
-    timeFillRun(@"fillRowRun 8 px", RUN_SHORT, packedColor)
-    timeFillRun(@"fillRowRun 32 px", RUN_MEDIUM, packedColor)
-    timeFillRun(@"fillRowRun 128 px", RUN_LONG, packedColor)
-    timeCopyRun(@"copyRowRun 8 px", RUN_SHORT)
-    timeCopyRun(@"copyRowRun 32 px", RUN_MEDIUM)
-    timeCopyRun(@"copyRowRun 128 px", RUN_LONG)
+    timeFillRun(RUN_SHORT, packedColor)
+    timeFillRun(RUN_MEDIUM, packedColor)
+    timeFillRun(RUN_LONG, packedColor)
+    timeCopyRun(RUN_SHORT)
+    timeCopyRun(RUN_MEDIUM)
+    timeCopyRun(RUN_LONG)
 
 
-PRI timeFillRun(pName, nPixels, packedColor) | startTick, totalTicks
-' Time RUN_REPS fillRowRun calls of one run length and report them.
+PRI timeFillRun(nPixels, packedColor) | startTick
+' Time RUN_REPS fillRowRun calls of one run length and report them as "fillRowRun <n> px".
 '
-' @param pName - zero-terminated name of the measurement
 ' @param nPixels - the run length in pixels
 ' @param packedColor - the test color, corrected and packed
 '
 ' Local Variables:
 ' @local startTick - the system counter when the bracket began
-' @local totalTicks - the ticks the bracket took
 
     startTick := utils.timeStart()
     repeat RUN_REPS
         pixels.fillRowRun(chainIndex, TEST_ROW, TEST_RUN_COLUMN, nPixels, packedColor)
-    totalTicks := utils.timeReport(pName, startTick)
-    reportPerCall(pName, totalTicks, RUN_REPS, loopX100)
+    reportBracket(runLabel(@"fillRowRun ", nPixels), startTick, RUN_REPS)
 
 
-PRI timeCopyRun(pName, nPixels) | startTick, totalTicks
-' Time RUN_REPS copyRowRun calls of one run length and report them.
+PRI timeCopyRun(nPixels) | startTick
+' Time RUN_REPS copyRowRun calls of one run length and report them as "copyRowRun <n> px".
 '
-' @param pName - zero-terminated name of the measurement
 ' @param nPixels - the run length in pixels
 '
 ' Local Variables:
 ' @local startTick - the system counter when the bracket began
-' @local totalTicks - the ticks the bracket took
 
     startTick := utils.timeStart()
     repeat RUN_REPS
         pixels.copyRowRun(chainIndex, TEST_ROW, TEST_RUN_COLUMN, nPixels, @colorList)
-    totalTicks := utils.timeReport(pName, startTick)
-    reportPerCall(pName, totalTicks, RUN_REPS, loopX100)
+    reportBracket(runLabel(@"copyRowRun ", nPixels), startTick, RUN_REPS)
 
 
 PRI measureCommits() | sampleIdx, startTick, endTick, withTicks, withoutTicks
@@ -325,104 +391,211 @@ PRI measureCommits() | sampleIdx, startTick, endTick, withTicks, withoutTicks
     reportDifference(@"commit by loop difference", withTicks, withoutTicks, DIFF_CYCLES)
 
 
-PRI placeGroups(maxRows, maxColumns) | ctrIdx
-' Place the demo's four groups where the 2021 demo did, with the same digits.
+PRI measureScene(sceneIdx) | pScene, rowIdx, startMs, nowMs, frames, workSumUs, workMax, windowMs, fpsX100
+
+' Place one scene's groups, let it settle, then run its frames for SCENE_MEASURE_MS and report the frame rate and
+' each frame's work; check the frame rate against the goal. Then every group morphs out.
 '
-' @param maxRows - the display's height in pixels
-' @param maxColumns - the display's width in pixels
-'
+' @param sceneIdx - the scene (a SCENE_ value)
+
 ' Local Variables:
-' @local ctrIdx - the counter group being set up
+' @local pScene - hub address of the scene's data
+' @local rowIdx - the row (and group) being placed or removed
+' @local startMs - when the window started
+' @local nowMs - the frame's time
+' @local frames - frames run in the window
+' @local workSumUs - the window's work, summed over its frames, in microseconds (ticks would overflow a long)
+' @local workMax - the longest frame's work in the window, in ticks
+' @local windowMs - the window's length, in milliseconds
+' @local fpsX100 - the window's frames per second, times RATE_SCALE
 
-    repeat ctrIdx from 0 to LAST_COUNTER
-        counters[ctrIdx].setThickness(SEG_THICKNESS)
-        counters[ctrIdx].setClockMode(counters.CLOCK_ACCELERATED)
+    pScene := @@sceneList[sceneIdx]
+    display.clearScreen()
+    lastSceneGroup := LONG[pScene][SCENE_GROUPS] - COUNT_TO_LAST
+    repeat rowIdx from 0 to lastSceneGroup
+        placeRow(rowIdx, pScene + (SCENE_ROWS + rowIdx * ROW_LONGS) * BYTES_PER_LONG)
 
-    display.setTextFont(display.TEXT_FONT_5X7)
-    display.setCursor(TEXT_ROW, TEXT_COLUMN)
-    display.setColoredTextAtLnCol(TEXT_ROW, TEXT_COLUMN, string("Iron Sheep"), color.cMaroon)
+    startMs := nowMs := runFrame()
+    repeat while nowMs - startMs < SCENE_SETTLE_MS
+        nowMs := runFrame()
+
+    frames := workSumUs := workMax := 0
+    startMs := nowMs
+    repeat while nowMs - startMs < SCENE_MEASURE_MS
+        nowMs := runFrame()
+        frames++
+        workSumUs += utils.ticksToUs(workTicks)
+        workMax #>= workTicks
+    windowMs := nowMs - startMs
+    fpsX100 := muldiv64(frames, RATE_SCALE * timeBase.MS_PER_SECOND, windowMs)
+    debug("SCENE    ", zstr_(@@sceneNames[sceneIdx]), "  frames=", udec_(frames), "  window_ms=", udec_(windowMs), "  fps_x100=", udec_(fpsX100), "  work_mean_us=", udec_(workSumUs / frames), "  work_max_us=", udec_(utils.ticksToUs(workMax)))
+    utils.checkEqual(fpsX100 >= MIN_FPS_X100, @@sceneChecks[sceneIdx], TRUE)
+
+    repeat rowIdx from 0 to lastSceneGroup                      ' every group morphs out
+        group[rowIdx].removeGroup()
+    repeat while anyPlaced()
+        runFrame()
+
+
+PRI placeRow(grpIdx, pRow) | left, top, right, bottom, grpType, layout, groupValue, status, usedWidth, usedHeight
+' Set up one group from its row and place it in its share of the area; log what happened. A refused group is
+' skipped and the scene runs on without it.
+'
+' @param grpIdx - the group (and row) being placed
+' @param pRow - hub address of the group's row in its scene
+
+' Local Variables:
+' @local left - the group's left edge, from its sixteenths of the area
+' @local top - the group's top edge
+' @local right - the group's right edge (exclusive)
+' @local bottom - the group's bottom edge (exclusive)
+' @local grpType - the row's group type
+' @local layout - the row's digit layout
+' @local groupValue - the group's first value
+' @local status - placeGroup()'s result
+' @local usedWidth - the width the placed group uses
+' @local usedHeight - the height the placed group uses
+
+    left := LONG[pRow][ROW_LEFT] * areaWidth / GRID
+    top := LONG[pRow][ROW_TOP] * areaHeight / GRID
+    right := (LONG[pRow][ROW_LEFT] + LONG[pRow][ROW_WIDTH]) * areaWidth / GRID
+    bottom := (LONG[pRow][ROW_TOP] + LONG[pRow][ROW_HEIGHT]) * areaHeight / GRID
+    grpType := LONG[pRow][ROW_TYPE]
+    layout := LONG[pRow][ROW_LAYOUT]
+    feed[grpIdx] := LONG[pRow][ROW_FEED]
+
+    if LONG[pRow][ROW_STROKE] == AUTO
+        group[grpIdx].useAutoThickness()
+    else
+        group[grpIdx].setThickness(LONG[pRow][ROW_STROKE])
+    group[grpIdx].setProfile(SHOW_PROFILE)
+    group[grpIdx].setCrossSection(SHOW_SECTION)
+    group[grpIdx].setMoveDuration(LONG[pRow][ROW_MOVE_MS])
+    group[grpIdx].setHoldDuration(LONG[pRow][ROW_HOLD_MS])
+
+    groupValue := 0
+    case feed[grpIdx]
+        FEED_CLOCK:
+            groupValue := (START_TIME + timeBase.elapsedMs() / timeBase.MS_PER_SECOND) // group.SECONDS_PER_DAY
+        FEED_UPTIME:
+            groupValue := (timeBase.elapsedMs() / timeBase.MS_PER_SECOND) // group.SECONDS_PER_DAY
+        FEED_VERSION:
+            groupValue := VERSION_TIME
+    if grpType == group.GRP_CLOCK
+        if feed[grpIdx] == FEED_VERSION                         ' held still, with no leading hour zero
+            group[grpIdx].setClockMode(group.CLOCK_ACCELERATED)
+            group[grpIdx].setClockHours(group.HOURS_12)
+        else
+            group[grpIdx].setClockMode(group.CLOCK_REAL_TIME)
+            group[grpIdx].setClockHours(group.HOURS_24)
+        if layout == group.LAYOUT_MM_SS
+            groupValue //= group.SECONDS_PER_HOUR
+    else
+        valueRange[grpIdx] := ONE_DIGIT_SCALE
+        repeat layout                                           ' LAYOUT_n_DIGITS is n
+            valueRange[grpIdx] *= group.DECIMAL_BASE
+
+    status, usedWidth, usedHeight := group[grpIdx].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, left, top, right - left, bottom - top, grpType, layout, LONG[pRow][ROW_ROTATION], LONG[pRow][ROW_COLOR], groupValue)
+    debug("SCENE    group ", udec_(grpIdx), " in (", udec_(left), ",", udec_(top), ") ", udec_(right - left), "x", udec_(bottom - top), ": status=", sdec_(status), " uses ", udec_(usedWidth), "x", udec_(usedHeight))
+
+PRI runFrame() : nowMs | grpIdx, startTick
+
+' Run one frame as the showcase does: each placed group whose hold has passed takes its next value from its feed,
+' every group draws its moves for this frame's time, and the frame is committed. The work (from the time read to
+' the commit) is left in workTicks.
+'
+' @returns nowMs - the frame's time
+
+' Local Variables:
+' @local grpIdx - the group being fed or drawn
+' @local startTick - the system counter at the start of the frame's work
+
+    startTick := getct()
+    nowMs := timeBase.update()
+    repeat grpIdx from 0 to lastSceneGroup
+        if group[grpIdx].isPlaced() and group[grpIdx].isHoldComplete(nowMs)
+            case feed[grpIdx]
+                FEED_STEP:
+                    group[grpIdx].nextTimeCycle()
+                FEED_RANDOM:
+                    group[grpIdx].setValue(getrnd() +// valueRange[grpIdx])
+                FEED_FPS:
+                    group[grpIdx].setValue(timeBase.framesPerSecondX100() / timeBase.FPS_SCALE <# valueRange[grpIdx] - COUNT_TO_LAST)
+        group[grpIdx].animate(nowMs)
+    if BREAK_DELAY_US
+        waitus(BREAK_DELAY_US)
+    workTicks := getct() - startTick
     display.commitScreenToPanelSet()
 
-    counters[GRP_CLOCK_LT].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, CLOCK_LT_COLUMN, CLOCK_LT_ROW, CLOCK_AREA_WIDTH, CLOCK_AREA_HEIGHT, counters.GRP_CLOCK, counters.LAYOUT_HH_MM, counters.ROT_0, color.cOrange, CLOCK_LT_START)
-    if maxColumns > FULL_WIDTH_COLUMNS
-        counters[GRP_CLOCK_RT].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, CLOCK_RT_COLUMN, CLOCK_RT_ROW, CLOCK_AREA_WIDTH, CLOCK_AREA_HEIGHT, counters.GRP_CLOCK, counters.LAYOUT_HH_MM, counters.ROT_0, color.cGreen, CLOCK_RT_START)
-    if maxRows > FULL_HEIGHT_ROWS
-        counters[GRP_COUNTDOWN].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, DOWNCTR_COLUMN, DOWNCTR_ROW, DOWNCTR_AREA_WIDTH, DOWNCTR_AREA_HEIGHT, counters.GRP_DOWN_COUNTER, counters.LAYOUT_3_DIGITS, counters.ROT_0, color.cTeal, DOWNCTR_START)
-    if maxColumns > FULL_WIDTH_COLUMNS && maxRows > FULL_HEIGHT_ROWS
-        counters[GRP_RANDOM].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, RANDOM_COLUMN, RANDOM_ROW, RANDOM_AREA_WIDTH, RANDOM_AREA_HEIGHT, counters.GRP_DIGITS, counters.LAYOUT_4_DIGITS, counters.ROT_0, color.cRed, RANDOM_START)
 
-    ' the demo's pacing, so the frame-rate item runs the demo's loop as the demo runs it
-    counters[GRP_CLOCK_LT].setMoveDuration(CLOCK_MOVE_MS)
-    counters[GRP_CLOCK_RT].setMoveDuration(CLOCK_MOVE_MS)
-    counters[GRP_COUNTDOWN].setMoveDuration(DOWNCTR_MOVE_MS)
-    counters[GRP_RANDOM].setMoveDuration(RANDOM_MOVE_MS)
-    repeat ctrIdx from 0 to LAST_COUNTER
-        counters[ctrIdx].setHoldDuration(HOLD_MS)
+PRI anyPlaced() : bAny | grpIdx
 
+' Ask whether any group of the scene still holds an area (is placed, or is still morphing out).
+'
+' @returns bAny - TRUE while any group still holds an area
 
-PRI measureAnimateSteps()
-' Measure one step of each group's animate (4 digits: both clocks and the random group; 3 digits: the down counter).
+' Local Variables:
+' @local grpIdx - the group being asked
 
-    timeGroupSteps(@"animate clock left (4 digits, seg 6)", GRP_CLOCK_LT, CLOCK_STEP_INTERVALS, CLOCK_MOVE_MS)
-    timeGroupSteps(@"animate clock right (4 digits, seg 6)", GRP_CLOCK_RT, CLOCK_STEP_INTERVALS, CLOCK_MOVE_MS)
-    timeGroupSteps(@"animate down counter (3 digits, seg 15)", GRP_COUNTDOWN, DOWNCTR_STEP_INTERVALS, DOWNCTR_MOVE_MS)
-    timeGroupSteps(@"animate random (4 digits, seg 9)", GRP_RANDOM, RANDOM_STEP_INTERVALS, RANDOM_MOVE_MS)
+    bAny := FALSE
+    repeat grpIdx from 0 to lastSceneGroup
+        if group[grpIdx].isPlaced()
+            bAny := TRUE
+            quit
 
 
-PRI timeGroupSteps(pName, ctrIdx, stepIntervals, moveMs) | sampleIdx, startTick, halfStep, stepTimeMs
-' Change the group's value, then time the animate calls given the middle of steps 2 to 5 (each draws one more
-' step of every moving snake, as each 2021 animateStep did); nothing is committed.
+PRI runLabel(pPrefix, nPixels) : pLabel | digitIdx, divisor
+
+' Build a run's name from its length, "<prefix><n> px", in labelText, so the name cannot disagree with the run.
+'
+' @param pPrefix - zero-terminated start of the name, e.g. "fillRowRun "
+' @param nPixels - the run length in pixels
+' @returns pLabel - hub address of the name
+
+' Local Variables:
+' @local digitIdx - the next free byte of labelText
+' @local divisor - the place value of the digit being written
+
+    bytemove(@labelText, pPrefix, strsize(pPrefix))
+    digitIdx := strsize(pPrefix)
+    divisor := group.DECIMAL_BASE
+    repeat while divisor <= nPixels
+        divisor *= group.DECIMAL_BASE
+    repeat while divisor > ONE_DIGIT_SCALE
+        divisor /= group.DECIMAL_BASE
+        labelText[digitIdx++] := DIGIT_ZERO + nPixels / divisor // group.DECIMAL_BASE
+    bytemove(@labelText[digitIdx], @" px", PX_SUFFIX_BYTES)
+    pLabel := @labelText
+
+
+PRI reportBracket(pName, startTick, nReps) | totalTicks
+' Close a bracket of nReps calls: print its TIME line as "<name> (total)", then its PERCALL line net of the empty loop.
 '
 ' @param pName - zero-terminated name of the measurement
-' @param ctrIdx - the counter group's index (a GRP_ value)
-' @param stepIntervals - the intervals between a snake's steps: its length minus one
-' @param moveMs - the group's move duration in milliseconds
+' @param startTick - the system counter when the bracket began
+' @param nReps - how many calls the bracket held
 '
 ' Local Variables:
-' @local sampleIdx - the animate call being stored
-' @local startTick - the system counter when the call began
-' @local halfStep - the time of the call, in half steps of the move
-' @local stepTimeMs - the injected time of the call, in milliseconds
+' @local totalTicks - the ticks the bracket took
 
-    sampleIdx := 0
-    repeat ANIM_CYCLES
-        counters[ctrIdx].nextTimeCycle()
-        counters[ctrIdx].animate(ANIM_START_MS)                 ' stamps the moves' start; step 1 was drawn by the command
-        repeat halfStep from FIRST_TIMED_HALF_STEP to LAST_TIMED_HALF_STEP step HALF_STEPS_PER_STEP
-            stepTimeMs := ANIM_START_MS + muldiv64(moveMs, halfStep, HALF_STEPS_PER_STEP * stepIntervals)
-            startTick := getct()
-            counters[ctrIdx].animate(stepTimeMs)
-            animTicks[sampleIdx] := getct() - startTick
-            sampleIdx++
-        counters[ctrIdx].animate(ANIM_START_MS + moveMs)        ' the moves' end: every segment completes
-    reportStats(pName, @animTicks, ANIM_SAMPLE_COUNT)
+    totalTicks := getct() - startTick
+    utils.timeReportTicks(totalLabel(pName), totalTicks)
+    reportPerCall(pName, totalTicks, nReps, loopX100)
 
 
-PRI measureFrameRate() | startTick, windowTicks, frameCount, nowMs, ctrIdx
-' Run the demo's frame loop, as it is in demo_hub75_morphSeg.spin2, for FPS_SECONDS: one commit per pass, so
-' commits = passes; the time base's meter is printed beside the test's own count, never instead of it.
-
+PRI totalLabel(pName) : pLabel | nameBytes
+' Build "<name> (total)" in totalText, the TIME line's name for a whole bracket.
+'
+' @param pName - zero-terminated name of the measurement
+' @returns pLabel - hub address of the name
+'
 ' Local Variables:
-' @local startTick - the system counter when the window began
-' @local windowTicks - the ticks the window took
-' @local frameCount - how many passes (and commits) the window held
-' @local nowMs - the time base's time at the latest pass
-' @local ctrIdx - the counter group being stepped or animated
+' @local nameBytes - the name's length
 
-    frameCount := 0
-    timeBase.reset()
-    startTick := utils.timeStart()
-    repeat while (getct() - startTick) +< FPS_WINDOW_TICKS
-        nowMs := timeBase.update()
-        repeat ctrIdx from 0 to LAST_COUNTER
-            if counters[ctrIdx].isPlaced() && counters[ctrIdx].isHoldComplete(nowMs)
-                counters[ctrIdx].nextTimeCycle()
-        repeat ctrIdx from 0 to LAST_COUNTER
-            counters[ctrIdx].animate(nowMs)
-        display.commitScreenToPanelSet()
-        frameCount++
-    windowTicks := utils.timeReport(@"demo loop window (total)", startTick)
-    debug("FPS       demo loop  commits=", udec_(frameCount), "  passes=", udec_(frameCount), "  window_ticks=", udec_(windowTicks), "  commits_per_second_x100=", udec_(muldiv64(frameCount * RATE_SCALE, clkfreq, windowTicks)), "  passes_per_second_x100=", udec_(muldiv64(frameCount * RATE_SCALE, clkfreq, windowTicks)), "  meter_x100=", udec_(timeBase.framesPerSecondX100()))
+    nameBytes := strsize(pName)
+    bytemove(@totalText, pName, nameBytes)
+    bytemove(@totalText[nameBytes], @" (total)", TOTAL_SUFFIX_BYTES)
+    pLabel := @totalText
 
 
 PRI reportPerCall(pName, totalTicks, nReps, overheadX100) | ticksX100, netX100, nanos, netNanos
@@ -458,18 +631,9 @@ PRI reportSamples(pName, pTicks, nSamples) | sampleIdx
 
     sampleIdx := 0
     repeat nSamples
-        reportTicks(pName, LONG[pTicks][sampleIdx])
+        utils.timeReportTicks(pName, LONG[pTicks][sampleIdx])
         sampleIdx++
     reportStats(pName, pTicks, nSamples)
-
-
-PRI reportTicks(pName, elapsedTicks)
-' Print a TIME line (the harness's format) for an interval that was measured and stored earlier.
-'
-' @param pName - zero-terminated name of the measurement
-' @param elapsedTicks - the interval, in system clock ticks
-
-    debug("TIME     ", zstr_(pName), "  ticks=", udec_(elapsedTicks), "  us=", udec_(muldiv64(elapsedTicks, utils.MICROS_PER_SECOND, clkfreq)), "  clkfreq=", udec_(clkfreq))
 
 
 PRI reportStats(pName, pTicks, nSamples) | sampleIdx, minTicks, maxTicks, sumTicks, meanTicks
@@ -496,7 +660,7 @@ PRI reportStats(pName, pTicks, nSamples) | sampleIdx, minTicks, maxTicks, sumTic
         maxTicks := maxTicks #> LONG[pTicks][sampleIdx]
         sampleIdx++
     meanTicks := sumTicks / nSamples
-    debug("STATS    ", zstr_(pName), "  n=", udec_(nSamples), "  min_ticks=", udec_(minTicks), "  mean_ticks=", udec_(meanTicks), "  max_ticks=", udec_(maxTicks), "  min_us=", udec_(muldiv64(minTicks, utils.MICROS_PER_SECOND, clkfreq)), "  mean_us=", udec_(muldiv64(meanTicks, utils.MICROS_PER_SECOND, clkfreq)), "  max_us=", udec_(muldiv64(maxTicks, utils.MICROS_PER_SECOND, clkfreq)))
+    debug("STATS    ", zstr_(pName), "  n=", udec_(nSamples), "  min_ticks=", udec_(minTicks), "  mean_ticks=", udec_(meanTicks), "  max_ticks=", udec_(maxTicks), "  min_us=", udec_(utils.ticksToUs(minTicks)), "  mean_us=", udec_(utils.ticksToUs(meanTicks)), "  max_us=", udec_(utils.ticksToUs(maxTicks)))
 
 
 PRI reportDifference(pName, withTicks, withoutTicks, nCycles) | perCommitTicks
@@ -511,7 +675,7 @@ PRI reportDifference(pName, withTicks, withoutTicks, nCycles) | perCommitTicks
 ' @local perCommitTicks - the commit's ticks: the difference over the cycles
 
     perCommitTicks := (withTicks - withoutTicks) / nCycles
-    debug("DIFF     ", zstr_(pName), "  cycles=", udec_(nCycles), "  with_ticks=", udec_(withTicks), "  without_ticks=", udec_(withoutTicks), "  per_commit_ticks=", sdec_(perCommitTicks), "  per_commit_us=", sdec_(muldiv64(perCommitTicks, utils.MICROS_PER_SECOND, clkfreq)))
+    debug("DIFF     ", zstr_(pName), "  cycles=", udec_(nCycles), "  with_ticks=", udec_(withTicks), "  without_ticks=", udec_(withoutTicks), "  per_commit_ticks=", sdec_(perCommitTicks), "  per_commit_us=", sdec_(utils.ticksToUs(perCommitTicks)))
 
 
 CON ' ---- License ----
