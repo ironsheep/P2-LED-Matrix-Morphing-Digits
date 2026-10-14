@@ -1,0 +1,110 @@
+'' =================================================================================================
+''
+''   File....... demo_hub75_morphClock.spin2
+''   Purpose.... The minimal example: one morphing-digit clock filling the display
+''   Authors.... Stephen M Moraco
+''               -- see below for terms of use
+''   E-mail..... stephen@ironsheep.biz
+''   Started.... Oct 2026
+''   Updated.... 14 Oct 2026
+''
+'' =================================================================================================
+
+{ Copy this file to start your own program. It starts the HUB75 driver, places one real-time HH:MM clock over the
+  whole display and runs the frame loop. The clock starts at START_HOURS:START_MINUTES; call setTime() to set it from
+  your own time source.
+
+  Bench check of the sizing (spec R-12.3): compile with pnut-ts -D BENCH_64X32 (or BENCH_64X64, BENCH_128X64) and the
+  clock fills that size at the display's top-left corner instead of the whole display.
+}
+
+CON ' timing
+
+  CLK_FREQ = 335_000_000                                        ' system freq as a constant
+  _clkfreq = CLK_FREQ                                           ' set system clock
+
+CON ' the clock
+
+  START_HOURS = 12
+  START_MINUTES = 0
+  START_TIME = START_HOURS * clock.SECONDS_PER_HOUR + START_MINUTES * clock.SECONDS_PER_MINUTE  ' a clock's value is seconds since midnight
+
+CON ' the area the clock fills: the whole display, or a panel-sized corner of it on the bench
+
+#IFDEF BENCH_64X32
+  BENCH_WIDTH = 64
+  BENCH_HEIGHT = 32
+#ELSEIFDEF BENCH_64X64
+  BENCH_WIDTH = 64
+  BENCH_HEIGHT = 64
+#ELSEIFDEF BENCH_128X64
+  BENCH_WIDTH = 128
+  BENCH_HEIGHT = 64
+#ELSE
+  BENCH_WIDTH = 0                                               ' 0: the whole display
+  BENCH_HEIGHT = 0
+#ENDIF
+
+OBJ
+
+    color       : "isp_hub75_color"
+    display     : "isp_hub75_display"
+    hub75Bffrs  : "isp_hub75_hwBufferAccess"
+    timeBase    : "isp_hub75_morphTime"
+    clock       : "isp_hub75_morphCounters"
+
+PUB start() | chainIndex, areaWidth, areaHeight, status, nowMs
+'' Start the driver, place the clock and run it
+
+' Local Variables:
+' @local chainIndex - the adapter's chain index, for the display's size
+' @local areaWidth, areaHeight - the area the clock fills: the display, or a bench size
+' @local status - placeGroup()'s result
+' @local nowMs - the frame's time
+
+    display.start(display.HUB75_ADAPTER_1)                     ' configures the adapter and starts the driver (aborts on failure)
+    display.clearScreen()
+    chainIndex := hub75Bffrs.indexForHub75ChainId(hub75Bffrs.HUB75_ADAPTER_1)
+    areaWidth := hub75Bffrs.maxDisplayColumns(chainIndex)
+    areaHeight := hub75Bffrs.maxDisplayRows(chainIndex)
+    if BENCH_WIDTH <> 0                                         ' a bench build: fill that size instead
+        areaWidth, areaHeight := BENCH_WIDTH, BENCH_HEIGHT
+
+    status, _, _ := clock.placeGroup(hub75Bffrs.HUB75_ADAPTER_1, 0, 0, areaWidth, areaHeight, clock.GRP_CLOCK, clock.LAYOUT_HH_MM, clock.ROT_0, color.cOrange, START_TIME)
+    debug("CLOCK    area ", udec_(areaWidth), "x", udec_(areaHeight), ": status=", sdec_(status))
+
+    timeBase.reset()
+    repeat                                                      ' one pass is one frame
+        nowMs := timeBase.update()                              ' the frame's time, shared by everything drawn in it
+        clock.animate(nowMs)                                    ' a real-time clock advances itself and draws its moves
+        display.commitScreenToPanelSet()                        ' show the frame; this waits for the driver, so it paces the loop
+
+CON ' license
+
+{{
+
+
+ -------------------------------------------------------------------------------------------------
+  MIT License
+
+  Copyright (c) 2021 Iron Sheep Productions, LLC
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+ =================================================================================================
+}}

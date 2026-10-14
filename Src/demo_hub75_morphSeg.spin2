@@ -1,141 +1,162 @@
 '' =================================================================================================
 ''
-''   File....... isp_hub75_demoMorphSeg.spin2
-''   Purpose.... Top-level Demonstration - showing off our HUB75 matrix w/Morphing 7 segment displays
+''   File....... demo_hub75_morphSeg.spin2
+''   Purpose.... The simple demo: the 2021 morphing-digit display, two clocks and two counters
 ''   Authors.... Stephen M Moraco
 ''               -- Copyright (c) 2021 Iron Sheep Productions, LLC
 ''               -- see below for terms of use
 ''   E-mail..... stephen@ironsheep.biz
 ''   Started.... Jan 2021
-''   Updated.... 12 Oct 2026
+''   Updated.... 14 Oct 2026
 ''
 '' =================================================================================================
 
+{ The 2021 demo on the v1 library: a small "Iron Sheep" title, two fast HH:MM clocks, a three-digit countdown and a
+  four-digit group showing random values, in thin strokes and the 2021 colors.
 
-CON { timing }
+  The layout is the 2021 one, drawn for a 128 x 64 panel (DAT groupPlaces). The demo scales it by the largest whole
+  number that fits the display (the quad, 256 x 128, shows it twice the size) and shows each group whose place fits:
+  a 64 x 32 panel shows the left clock, a 64 x 64 panel adds the countdown, a 128 x 64 panel or larger shows all four.
+
+  Bench check of that sizing (spec R-12.3): compile with pnut-ts -D BENCH_64X32 (or BENCH_64X64, BENCH_128X64) and the
+  demo lays itself out in that size at the display's top-left corner instead of the whole display.
+}
+
+CON ' timing
 
   CLK_FREQ = 335_000_000                                        ' system freq as a constant
   _clkfreq = CLK_FREQ                                           ' set system clock
 
-CON { DEBUG PINs }
+CON ' the area the demo lays itself out in: the whole display, or a panel-sized corner of it on the bench
 
-'DEBUG_PIN = 0
+#IFDEF BENCH_64X32
+  BENCH_WIDTH = 64
+  BENCH_HEIGHT = 32
+#ELSEIFDEF BENCH_64X64
+  BENCH_WIDTH = 64
+  BENCH_HEIGHT = 64
+#ELSEIFDEF BENCH_128X64
+  BENCH_WIDTH = 128
+  BENCH_HEIGHT = 64
+#ELSE
+  BENCH_WIDTH = 0                                               ' 0: the whole display
+  BENCH_HEIGHT = 0
+#ENDIF
 
-CON { Display constants }
+CON ' the groups
 
-MAX_COUNTERS = 4
-LAST_COUNTER = MAX_COUNTERS - 1
+  #0, GRP_CLOCK_LT, GRP_CLOCK_RT, GRP_COUNTDOWN, GRP_RANDOM
+  NUM_GROUPS = GRP_RANDOM + 1
+  LAST_GROUP = NUM_GROUPS - 1
 
-#0, GRP_CLOCK_LT, GRP_CLOCK_RT, GRP_DOWNCTR_2DIG, GRP_CTR_6DIG_RAND
-THIN_STROKE = 1             ' the 2021 look: 1-pixel strokes
-RANDOM_MAX = 9999           ' the random group's four digits
+  #0, PLACE_LEFT, PLACE_TOP, PLACE_WIDTH, PLACE_HEIGHT, PLACE_TYPE, PLACE_LAYOUT, PLACE_COLOR, PLACE_VALUE, PLACE_MOVE_MS
+  PLACE_LONGS = PLACE_MOVE_MS + 1
 
-CON ' the 2021 pacing, in real time
+  DESIGN_WIDTH = 128                                            ' the 2021 layout's panel
+  DESIGN_HEIGHT = 64
+  MIN_SCALE = 1
+  THIN_STROKE = 1                                               ' the 2021 look: 1-pixel strokes at 2021 size
+  RANDOM_RANGE = 10_000                                         ' the random group's four digits: 0 to 9999
 
-  ' In 2021 every pixel took one loop pass (22.2 ms at 45.06 passes/s), so a transition took longer on bigger digits,
-  ' and a group held each value for 8 to 10 passes. These reproduce that look (Docs/analysis/morph-time-design.md section d):
-  CLOCK_MOVE_MS = 111       ' clocks, 6 px segments: 5 passes
-  RANDOM_MOVE_MS = 178      ' random group, 9 px segments: 8 passes
-  DOWNCTR_MOVE_MS = 311     ' down counter, 15 px segments: 14 passes
-  HOLD_MS = 200             ' hold after each transition: the middle of 178 to 222 ms
+  ' The 2021 pacing, in real time. In 2021 every pixel took one loop pass (22.2 ms at 45.06 passes/s), so a transition
+  ' took longer on bigger digits, and a group held each value for 8 to 10 passes. These reproduce that look
+  ' (Docs/analysis/morph-time-design.md section d):
+  CLOCK_MOVE_MS = 111                                           ' clocks, 6 px segments: 5 passes
+  RANDOM_MOVE_MS = 178                                          ' random group, 9 px segments: 8 passes
+  DOWN_MOVE_MS = 311                                            ' down counter, 15 px segments: 14 passes
+  HOLD_MS = 200                                                 ' hold after each transition: the middle of 178 to 222 ms
 
-VAR
-
-    long    cog
-    long    digitVal
-    long    digitIndex
-    long    hours
-    long    hours24
-    long    minutes
-    long    digitHeight
-    long    digitWidth
-    long    segmentThickness   ' FIXME UNDONE, not plumbed thru yet
-    ' 1st clock group
-    long    clkLtWidth
-    long    clkLtHeight
-    long    clkRtWidth
-    long    clkRtHeight
-    long    grpDnWidth
-    long    grpDnHeight
-    long    grpRndWidth
-    long    grpRndHeight
+  NOON = 12 * counters.SECONDS_PER_HOUR                                      ' the right clock starts 12 hours ahead of the left one
 
 OBJ
 
     color                   : "isp_hub75_color"
     display                 : "isp_hub75_display"
-    counters[MAX_COUNTERS]  : "isp_hub75_morphCounters"
     hub75Bffrs              : "isp_hub75_hwBufferAccess"
     timeBase                : "isp_hub75_morphTime"
+    counters[NUM_GROUPS]    : "isp_hub75_morphCounters"
 
-PUB start() : ok | ctrIdx, chainIndex, maxPhysicalCols, maxPhysicalRows, nowMs
-    '' Start underlying drivers and run demo
+DAT ' the 2021 places on a 128 x 64 panel, one row of PLACE_ fields per group, in GRP_ order
 
-    'debug("`term temp size 82 50 textsize 10")
+    groupPlaces     long    2, 10, 42, 15, counters.GRP_CLOCK, counters.LAYOUT_HH_MM, color.cOrange, 0, CLOCK_MOVE_MS
+                    long    66, 8, 42, 15, counters.GRP_CLOCK, counters.LAYOUT_HH_MM, color.cGreen, NOON, CLOCK_MOVE_MS
+                    long    3, 28, 59, 33, counters.GRP_DOWN_COUNTER, counters.LAYOUT_3_DIGITS, color.cTeal, 204, DOWN_MOVE_MS
+                    long    68, 32, 50, 21, counters.GRP_DIGITS, counters.LAYOUT_4_DIGITS, color.cRed, 5436, RANDOM_MOVE_MS
+
+    groupNames      word    @nameClockLt, @nameClockRt, @nameDown, @nameRandom
+    nameClockLt     byte    "left clock", 0
+    nameClockRt     byte    "right clock", 0
+    nameDown        byte    "countdown", 0
+    nameRandom      byte    "random digits", 0
+
+PUB start() | chainIndex, areaWidth, areaHeight, scale, grpIdx, nowMs
+'' Start the driver, lay the demo out on the display and run it
+
+' Local Variables:
+' @local chainIndex - the adapter's chain index, for the display's size
+' @local areaWidth, areaHeight - the area the demo lays itself out in: the display, or a bench size
+' @local scale - how many times the 2021 size the layout is drawn
+' @local grpIdx - the group being placed or run
+' @local nowMs - the frame's time
+
+    display.start(display.HUB75_ADAPTER_1)                     ' configures the adapter and starts the driver (aborts on failure)
     chainIndex := hub75Bffrs.indexForHub75ChainId(hub75Bffrs.HUB75_ADAPTER_1)
-    ' configures the adapter from isp_hub75_hwPanelConfig and starts the driver (aborts on failure)
-    ok := cog := display.start(display.HUB75_ADAPTER_1)
-    maxPhysicalCols := hub75Bffrs.maxDisplayColumns(chainIndex)
-    maxPhysicalRows := hub75Bffrs.maxDisplayRows(chainIndex)
-
-    '  multiple SEVEN SEGMENT Morphing Digits DEMO: the 2021 thin strokes
-    repeat ctrIdx from 0 to MAX_COUNTERS -1
-        counters[ctrIdx].setThickness(THIN_STROKE)
-        counters[ctrIdx].setClockMode(counters.CLOCK_ACCELERATED)  ' the 2021 look: a fast clock, one minute per step
+    areaWidth := hub75Bffrs.maxDisplayColumns(chainIndex)
+    areaHeight := hub75Bffrs.maxDisplayRows(chainIndex)
+    if BENCH_WIDTH <> 0                                         ' a bench build: lay out as if the display were that size
+        areaWidth, areaHeight := BENCH_WIDTH, BENCH_HEIGHT
+    scale := MIN_SCALE #> (areaWidth / DESIGN_WIDTH <# areaHeight / DESIGN_HEIGHT)
 
     display.clearScreen()
-
-        ' draw some text!
-    display.setTextFont(display.TEXT_FONT_5x7)    ' font size
-    display.setCursor(0, 0)   ' start at top left, with one pixel of spacing
-    display.setColoredTextAtLnCol(0,0, string("Iron Sheep"), color.cMaroon)
+    display.setTextFont(display.TEXT_FONT_5X7)
+    display.setColoredTextAtLnCol(0, 0, string("Iron Sheep"), color.cMaroon)
     display.commitScreenToPanelSet()
 
-    ' the 2021 places, as areas (task 170 sizes them from the display); each area fits the 2021 segment length at stroke 1
-    _, clkLtWidth, clkLtHeight := counters[GRP_CLOCK_LT].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, 2, 10, 42, 15, counters.GRP_CLOCK, counters.LAYOUT_HH_MM, counters.ROT_0, color.cOrange, 0)
-
-    if maxPhysicalCols > 64
-        _, clkRtWidth, clkRtHeight := counters[GRP_CLOCK_RT].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, 66, 8, 42, 15, counters.GRP_CLOCK, counters.LAYOUT_HH_MM, counters.ROT_0, color.cGreen, 12 * 60 * 60)
-
-    if maxPhysicalRows > 32
-        _, grpDnWidth, grpDnHeight := counters[GRP_DOWNCTR_2DIG].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, 3, 28, 59, 33, counters.GRP_DOWN_COUNTER, counters.LAYOUT_3_DIGITS, counters.ROT_0, color.cTeal, 204)
-
-    if maxPhysicalCols > 64 && maxPhysicalRows > 32
-        _, grpRndWidth, grpRndHeight := counters[GRP_CTR_6DIG_RAND].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, 68, 32, 50, 21, counters.GRP_DIGITS, counters.LAYOUT_4_DIGITS, counters.ROT_0, color.cRed, 5436)
-
-    display.commitScreenToPanelSet()
-    'repeat
-
-    counters[GRP_CLOCK_LT].setMoveDuration(CLOCK_MOVE_MS)
-    counters[GRP_CLOCK_RT].setMoveDuration(CLOCK_MOVE_MS)
-    counters[GRP_DOWNCTR_2DIG].setMoveDuration(DOWNCTR_MOVE_MS)
-    counters[GRP_CTR_6DIG_RAND].setMoveDuration(RANDOM_MOVE_MS)
-    repeat ctrIdx from 0 to LAST_COUNTER
-        counters[ctrIdx].setHoldDuration(HOLD_MS)
+    debug("DEMO     area ", udec_(areaWidth), "x", udec_(areaHeight), ", scale ", udec_(scale))
+    repeat grpIdx from 0 to LAST_GROUP
+        placeScaled(grpIdx, areaWidth, areaHeight, scale)
 
     timeBase.reset()
     repeat                                                      ' one pass is one frame
         nowMs := timeBase.update()                              ' 1. the frame's time: one counter read, and the frame is counted
-        repeat ctrIdx from 0 to LAST_COUNTER                    ' 2. a group whose hold has passed takes its next value
-            if counters[ctrIdx].isPlaced() && counters[ctrIdx].isHoldComplete(nowMs)
-                if ctrIdx == GRP_CTR_6DIG_RAND                  ' the value group shows random values (the caller's choice)
-                    counters[ctrIdx].setValue(getrnd() +// (RANDOM_MAX + 1))
+        repeat grpIdx from 0 to LAST_GROUP                      ' 2. a group whose hold has passed takes its next value
+            if counters[grpIdx].isPlaced() and counters[grpIdx].isHoldComplete(nowMs)
+                if grpIdx == GRP_RANDOM                         ' the value group shows random values (the caller's choice)
+                    counters[grpIdx].setValue(getrnd() +// RANDOM_RANGE)
                 else
-                    counters[ctrIdx].nextTimeCycle()
-        repeat ctrIdx from 0 to LAST_COUNTER                    ' 3. every group draws its moves for this frame's time
-            counters[ctrIdx].animate(nowMs)
-        display.commitScreenToPanelSet()                        ' 4. the one commit: it waits for the driver, so it paces the loop (R-9.2)
+                    counters[grpIdx].nextTimeCycle()
+        repeat grpIdx from 0 to LAST_GROUP                      ' 3. every group draws its moves for this frame's time
+            counters[grpIdx].animate(nowMs)
+        display.commitScreenToPanelSet()                        ' 4. the one commit: it waits for the driver, so it paces the loop
 
-    debug("DEMO: done")
-    stop()
+PRI placeScaled(grpIdx, areaWidth, areaHeight, scale) | pPlace, left, top, width, height, status, usedWidth, usedHeight
 
-PRI stop()
-    ' Stop the driver
-    if cog
-        display.stop()
-        cog := 0
+' Place one group at its 2021 place times scale, if that place lies inside the area; log what happened. A group that
+' does not fit is left out, and a refused placement logs its code; either way the demo runs on.
 
-CON { license }
+' Local Variables:
+' @local pPlace - the group's row of groupPlaces
+' @local left, top, width, height - the group's place, scaled
+' @local status - placeGroup()'s result
+' @local usedWidth, usedHeight - the size the placed group uses
+
+    pPlace := @groupPlaces[grpIdx * PLACE_LONGS]
+    left := LONG[pPlace][PLACE_LEFT] * scale
+    top := LONG[pPlace][PLACE_TOP] * scale
+    width := LONG[pPlace][PLACE_WIDTH] * scale
+    height := LONG[pPlace][PLACE_HEIGHT] * scale
+    if left + width > areaWidth or top + height > areaHeight
+        debug("DEMO     ", zstr_(@@groupNames[grpIdx]), ": left out, its place does not fit ", udec_(areaWidth), "x", udec_(areaHeight))
+    else
+        counters[grpIdx].setThickness(THIN_STROKE * scale)
+        if LONG[pPlace][PLACE_TYPE] == counters.GRP_CLOCK
+            counters[grpIdx].setClockMode(counters.CLOCK_ACCELERATED)  ' the 2021 look: a fast clock, one minute per step
+        counters[grpIdx].setMoveDuration(LONG[pPlace][PLACE_MOVE_MS])
+        counters[grpIdx].setHoldDuration(HOLD_MS)
+        status, usedWidth, usedHeight := counters[grpIdx].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, left, top, width, height, LONG[pPlace][PLACE_TYPE], LONG[pPlace][PLACE_LAYOUT], counters.ROT_0, LONG[pPlace][PLACE_COLOR], LONG[pPlace][PLACE_VALUE])
+        debug("DEMO     ", zstr_(@@groupNames[grpIdx]), " in (", udec_(left), ",", udec_(top), ") ", udec_(width), "x", udec_(height), ": status=", sdec_(status), " uses ", udec_(usedWidth), "x", udec_(usedHeight))
+
+CON ' license
 
 {{
 
