@@ -1,0 +1,332 @@
+'' =================================================================================================
+''
+''   File....... demo_hub75_morphShowcase.spin2
+''   Purpose.... The showcase: thick, colored morphing digits in a loop of scenes
+''   Authors.... Stephen M Moraco
+''               -- see below for terms of use
+''   E-mail..... stephen@ironsheep.biz
+''   Started.... Oct 2026
+''   Updated.... 14 Oct 2026
+''
+'' =================================================================================================
+
+{ Shows the library's range, one scene at a time. At start-up the library version morphs on; then the scenes loop:
+
+    hero         one real-time HH:MM:SS clock filling the display
+    mixed        a thick clock above a row of thin-stroked counters
+    splatter     nine groups of every type, size, color, stroke and rotation at once (the heaviest frame)
+    status       the time of day, the uptime, a restarting countdown and the live frame rate
+    orientation  the same counter at all four rotations
+
+  Each scene is a row of DAT data: its length, then one row per group giving the group's area in sixteenths of the
+  display (GRID), its type, layout, rotation, color, stroke (0: sized with the digits) and what feeds it values.
+  Adding a scene is a data change. Between scenes every group morphs out, then the next scene's groups morph in.
+  A group whose area is too small for it (on a small panel) is skipped, with its status code in the log.
+
+  Look settings, chosen at compile time:
+    -D SHOW_PROFILE_EDGE    one anti-aliased edge pixel (profile A) instead of a gradient tail (profile C)
+    -D SHOW_SECTION_TUBE    the tube cross-section instead of the flat one
+
+  Bench check of the sizing (spec R-12.3): compile with -D BENCH_64X32 (or BENCH_64X64, BENCH_128X64) and the
+  scenes are laid out in that size at the display's top-left corner instead of the whole display.
+}
+
+CON ' timing
+
+  CLK_FREQ = 335_000_000                                        ' system freq as a constant
+  _clkfreq = CLK_FREQ                                           ' set system clock
+
+CON ' the area the scenes are laid out in: the whole display, or a panel-sized corner of it on the bench
+
+#IFDEF BENCH_64X32
+  BENCH_WIDTH = 64
+  BENCH_HEIGHT = 32
+#ELSEIFDEF BENCH_64X64
+  BENCH_WIDTH = 64
+  BENCH_HEIGHT = 64
+#ELSEIFDEF BENCH_128X64
+  BENCH_WIDTH = 128
+  BENCH_HEIGHT = 64
+#ELSE
+  BENCH_WIDTH = 0                                               ' 0: the whole display
+  BENCH_HEIGHT = 0
+#ENDIF
+
+CON ' the look every group uses
+
+#IFDEF SHOW_PROFILE_EDGE
+  SHOW_PROFILE = timeBase.PROFILE_EDGE
+#ELSE
+  SHOW_PROFILE = timeBase.PROFILE_TAIL
+#ENDIF
+#IFDEF SHOW_SECTION_TUBE
+  SHOW_SECTION = morphMask.SECTION_TUBE
+#ELSE
+  SHOW_SECTION = morphMask.SECTION_FLAT
+#ENDIF
+
+CON ' scenes
+
+  NUM_GROUPS = 9                                                ' the most this program fits in hub RAM (morphCounters' MAX_GROUPS, 10, is 3_864 bytes over)
+  GRID = 16                                                     ' a row's area is in sixteenths of the display
+
+  ' a scene: its length, its group count, then that many rows
+  #0, SCENE_MS, SCENE_GROUPS, SCENE_ROWS
+  ' a row: one group
+  #0, ROW_LEFT, ROW_TOP, ROW_WIDTH, ROW_HEIGHT, ROW_TYPE, ROW_LAYOUT, ROW_ROTATION, ROW_COLOR, ROW_STROKE, ROW_FEED, ROW_MOVE_MS, ROW_HOLD_MS
+  ROW_LONGS = ROW_HOLD_MS + 1
+  NEXT_ONE = 1                                                  ' the last of a count is the count minus one
+  ONE_DIGIT_SCALE = 1                                           ' 10^0: a value range starts here and gains a 10 per digit
+  AUTO = 0                                                      ' ROW_STROKE: sized with the digits
+
+  ' what gives a group its values
+  '   FEED_STEP     - nextTimeCycle() after each hold: counters count, accelerated clocks advance
+  '   FEED_RANDOM   - a random value after each hold (a value group)
+  '   FEED_FPS      - the render loop's frames per second after each hold (a value group)
+  '   FEED_CLOCK    - a real-time clock started at the time of day (START_TIME plus the uptime)
+  '   FEED_UPTIME   - a real-time clock started at the uptime
+  '   FEED_VERSION  - the library version, held still on a 12-hour clock: v1.0.0 shows as 1:00:00
+  #0, FEED_STEP, FEED_RANDOM, FEED_FPS, FEED_CLOCK, FEED_UPTIME, FEED_VERSION
+
+  #0, SCENE_VERSION, SCENE_HERO, SCENE_MIXED, SCENE_SPLATTER, SCENE_STATUS, SCENE_ORIENTATION
+  LAST_SCENE = SCENE_ORIENTATION
+  FIRST_LOOP_SCENE = SCENE_HERO                                 ' the version shows once, at start-up
+
+  START_HOURS = 12                                              ' the time of day at start-up
+  START_TIME = START_HOURS * group.SECONDS_PER_HOUR
+  VERSION_MAJOR = group.MORPH_VERSION / 10_000                  ' MORPH_VERSION is MAJOR * 10000 + MINOR * 100 + PATCH
+  VERSION_MINOR = group.MORPH_VERSION / 100 // 100
+  VERSION_PATCH = group.MORPH_VERSION // 100
+  VERSION_TIME = VERSION_MAJOR * group.SECONDS_PER_HOUR + VERSION_MINOR * group.SECONDS_PER_MINUTE + VERSION_PATCH
+
+OBJ
+
+    color                       : "isp_hub75_color"
+    display                     : "isp_hub75_display"
+    hub75Bffrs                  : "isp_hub75_hwBufferAccess"
+    timeBase                    : "isp_hub75_morphTime"
+    morphMask                   : "isp_hub75_morphMask"
+    group[NUM_GROUPS]     : "isp_hub75_morphCounters"
+
+DAT ' the scenes, in SCENE_ order
+
+    sceneList       long    @sceneVersion, @sceneHero, @sceneMixed, @sceneSplatter, @sceneStatus, @sceneOrientation
+    sceneNames      word    @nameVersion, @nameHero, @nameMixed, @nameSplatter, @nameStatus, @nameOrientation
+    nameVersion     byte    "version", 0
+    nameHero        byte    "hero", 0
+    nameMixed       byte    "mixed", 0
+    nameSplatter    byte    "splatter", 0
+    nameStatus      byte    "status", 0
+    nameOrientation byte    "orientation", 0
+
+    '                       left top wide high  type                    layout                  rotation        color           stroke  feed            move   hold
+    sceneVersion    long    6_000, 1
+                    long    1,  2, 14, 12,  group.GRP_CLOCK,        group.LAYOUT_HH_MM_SS,  group.ROT_0,    color.cOrange,  AUTO,   FEED_VERSION,   500,   0
+
+    sceneHero       long    20_000, 1
+                    long    0,  0, 16, 16,  group.GRP_CLOCK,        group.LAYOUT_HH_MM_SS,  group.ROT_0,    color.cOrange,  AUTO,   FEED_CLOCK,     400,   0
+
+    sceneMixed      long    20_000, 4
+                    long    0,  0, 16,  9,  group.GRP_CLOCK,        group.LAYOUT_HH_MM,     group.ROT_0,    color.cCyan,    AUTO,   FEED_CLOCK,     400,   0
+                    long    0, 10,  5,  6,  group.GRP_UP_COUNTER,   group.LAYOUT_3_DIGITS,  group.ROT_0,    color.cGreen,   1,      FEED_STEP,      250,   250
+                    long    5, 10,  5,  6,  group.GRP_DOWN_COUNTER, group.LAYOUT_2_DIGITS,  group.ROT_0,    color.cTeal,    1,      FEED_STEP,      300,   700
+                    long   10, 10,  6,  6,  group.GRP_DIGITS,       group.LAYOUT_4_DIGITS,  group.ROT_0,    color.cRed,     1,      FEED_RANDOM,    250,   500
+
+    sceneSplatter   long    20_000, 9
+                    long    0,  0,  6,  5,  group.GRP_CLOCK,        group.LAYOUT_HH_MM,     group.ROT_0,    color.cOrange,  AUTO,   FEED_CLOCK,     400,   0
+                    long    6,  0,  4,  5,  group.GRP_UP_COUNTER,   group.LAYOUT_2_DIGITS,  group.ROT_0,    color.cGreen,   1,      FEED_STEP,      200,   200
+                    long   10,  0,  6,  5,  group.GRP_DIGITS,       group.LAYOUT_4_DIGITS,  group.ROT_180,  color.cRed,     AUTO,   FEED_RANDOM,    300,   400
+                    long    0,  5,  2, 11,  group.GRP_DOWN_COUNTER, group.LAYOUT_2_DIGITS,  group.ROT_90,   color.cTeal,    AUTO,   FEED_STEP,      300,   300
+                    long    2,  5,  5,  6,  group.GRP_DIGITS,       group.LAYOUT_3_DIGITS,  group.ROT_0,    color.cYellow,  2,      FEED_RANDOM,    250,   350
+                    long    7,  5,  3,  4,  group.GRP_UP_COUNTER,   group.LAYOUT_1_DIGIT,   group.ROT_0,    color.cMagenta, AUTO,   FEED_STEP,      500,   300
+                    long   10,  5,  6,  4,  group.GRP_CLOCK,        group.LAYOUT_MM_SS,     group.ROT_0,    color.cBlue,    AUTO,   FEED_UPTIME,    400,   0
+                    long    2, 11,  6,  5,  group.GRP_DOWN_COUNTER, group.LAYOUT_3_DIGITS,  group.ROT_0,    color.cLime,    1,      FEED_STEP,      150,   150
+                    long    8,  9,  6,  7,  group.GRP_DIGITS,       group.LAYOUT_2_DIGITS,  group.ROT_270,  color.cPurple,  AUTO,   FEED_RANDOM,    400,   600
+
+    sceneStatus     long    20_000, 4
+                    long    0,  0, 16,  5,  group.GRP_CLOCK,        group.LAYOUT_HH_MM_SS,  group.ROT_0,    color.cOrange,  AUTO,   FEED_CLOCK,     400,   0
+                    long    0,  5, 16,  5,  group.GRP_CLOCK,        group.LAYOUT_HH_MM_SS,  group.ROT_0,    color.cGreen,   AUTO,   FEED_UPTIME,    400,   0
+                    long    0, 10,  8,  6,  group.GRP_DOWN_COUNTER, group.LAYOUT_2_DIGITS,  group.ROT_0,    color.cTeal,    AUTO,   FEED_STEP,      300,   700
+                    long    8, 10,  8,  6,  group.GRP_DIGITS,       group.LAYOUT_3_DIGITS,  group.ROT_0,    color.cYellow,  AUTO,   FEED_FPS,       300,   700
+
+    sceneOrientation long   15_000, 4
+                    long    0,  0,  8,  8,  group.GRP_UP_COUNTER,   group.LAYOUT_2_DIGITS,  group.ROT_0,    color.cOrange,  AUTO,   FEED_STEP,      400,   600
+                    long    8,  0,  8,  8,  group.GRP_UP_COUNTER,   group.LAYOUT_2_DIGITS,  group.ROT_90,   color.cGreen,   AUTO,   FEED_STEP,      400,   600
+                    long    0,  8,  8,  8,  group.GRP_UP_COUNTER,   group.LAYOUT_2_DIGITS,  group.ROT_270,  color.cCyan,    AUTO,   FEED_STEP,      400,   600
+                    long    8,  8,  8,  8,  group.GRP_UP_COUNTER,   group.LAYOUT_2_DIGITS,  group.ROT_180,  color.cMagenta, AUTO,   FEED_STEP,      400,   600
+
+VAR
+
+    long    areaWidth                                           ' the area the scenes are laid out in
+    long    areaHeight
+    long    lastSceneGroup                                      ' the current scene's last group: groups 0 to this are in use
+    long    feed[NUM_GROUPS]                              ' each group's FEED_ for the current scene
+    long    valueRange[NUM_GROUPS]                        ' a value group's 10^digits: its values are 0 to this - 1
+
+PUB start() | chainIndex, sceneIdx
+'' Start the driver, then run the scenes: the version once, then the rest in a loop
+
+' Local Variables:
+' @local chainIndex - the adapter's chain index, for the display's size
+' @local sceneIdx - the scene being shown
+
+    display.start(display.HUB75_ADAPTER_1)                     ' configures the adapter and starts the driver (aborts on failure)
+    chainIndex := hub75Bffrs.indexForHub75ChainId(hub75Bffrs.HUB75_ADAPTER_1)
+    areaWidth := hub75Bffrs.maxDisplayColumns(chainIndex)
+    areaHeight := hub75Bffrs.maxDisplayRows(chainIndex)
+    if BENCH_WIDTH <> 0                                         ' a bench build: lay out as if the display were that size
+        areaWidth, areaHeight := BENCH_WIDTH, BENCH_HEIGHT
+    debug("SHOW     area ", udec_(areaWidth), "x", udec_(areaHeight), ", library ", zstr_(group[0].versionString()))
+
+    timeBase.reset()
+    showScene(SCENE_VERSION)
+    repeat
+        repeat sceneIdx from FIRST_LOOP_SCENE to LAST_SCENE
+            showScene(sceneIdx)
+
+PRI showScene(sceneIdx) | pScene, rowIdx, startMs, nowMs, frames
+
+' Place a scene's groups, run it for its length, then morph every group out. Logs the scene's frame rate.
+
+' Local Variables:
+' @local pScene - the scene's DAT data
+' @local rowIdx - the row (and group) being placed or removed
+' @local startMs, nowMs - when the scene started, and the frame's time
+' @local frames - frames drawn while the scene ran
+
+    pScene := @@sceneList[sceneIdx]
+    display.clearScreen()
+    debug("SHOW     scene ", zstr_(@@sceneNames[sceneIdx]))
+    lastSceneGroup := LONG[pScene][SCENE_GROUPS] - NEXT_ONE
+    repeat rowIdx from 0 to lastSceneGroup
+        placeRow(rowIdx, pScene + (SCENE_ROWS + rowIdx * ROW_LONGS) * 4)
+
+    startMs := nowMs := runFrame()
+    frames := 0
+    repeat while nowMs - startMs < LONG[pScene][SCENE_MS]
+        nowMs := runFrame()
+        frames++
+    debug("SHOW     scene ", zstr_(@@sceneNames[sceneIdx]), ": ", udec_(frames), " frames in ", udec_(nowMs - startMs), " ms, fps x100 ", udec_(muldiv64(frames, timeBase.FPS_SCALE * timeBase.MS_PER_SECOND, nowMs - startMs)))
+
+    repeat rowIdx from 0 to lastSceneGroup            ' every group morphs out; the next scene starts when all are gone
+        group[rowIdx].removeGroup()
+    repeat while anyPlaced()
+        runFrame()
+
+PRI placeRow(grpIdx, pRow) | left, top, right, bottom, grpType, layout, value, status, usedWidth, usedHeight
+
+' Set up one group from its row and place it in its share of the area; log what happened. A refused group is
+' skipped and the scene runs on without it.
+
+' Local Variables:
+' @local left, top, right, bottom - the group's area, from its sixteenths of the area (right and bottom exclusive)
+' @local grpType, layout - the row's group type and layout
+' @local value - the group's first value
+' @local status - placeGroup()'s result
+' @local usedWidth, usedHeight - the size the placed group uses
+
+    left := LONG[pRow][ROW_LEFT] * areaWidth / GRID
+    top := LONG[pRow][ROW_TOP] * areaHeight / GRID
+    right := (LONG[pRow][ROW_LEFT] + LONG[pRow][ROW_WIDTH]) * areaWidth / GRID
+    bottom := (LONG[pRow][ROW_TOP] + LONG[pRow][ROW_HEIGHT]) * areaHeight / GRID
+    grpType := LONG[pRow][ROW_TYPE]
+    layout := LONG[pRow][ROW_LAYOUT]
+    feed[grpIdx] := LONG[pRow][ROW_FEED]
+
+    if LONG[pRow][ROW_STROKE] == AUTO
+        group[grpIdx].useAutoThickness()
+    else
+        group[grpIdx].setThickness(LONG[pRow][ROW_STROKE])
+    group[grpIdx].setProfile(SHOW_PROFILE)
+    group[grpIdx].setCrossSection(SHOW_SECTION)
+    group[grpIdx].setMoveDuration(LONG[pRow][ROW_MOVE_MS])
+    group[grpIdx].setHoldDuration(LONG[pRow][ROW_HOLD_MS])
+
+    value := 0
+    case feed[grpIdx]
+        FEED_CLOCK:
+            value := (START_TIME + timeBase.elapsedMs() / timeBase.MS_PER_SECOND) // group.SECONDS_PER_DAY
+        FEED_UPTIME:
+            value := (timeBase.elapsedMs() / timeBase.MS_PER_SECOND) // group.SECONDS_PER_DAY
+        FEED_VERSION:
+            value := VERSION_TIME
+    if grpType == group.GRP_CLOCK
+        if feed[grpIdx] == FEED_VERSION                         ' held still, with no leading hour zero
+            group[grpIdx].setClockMode(group.CLOCK_ACCELERATED)
+            group[grpIdx].setClockHours(group.HOURS_12)
+        else
+            group[grpIdx].setClockMode(group.CLOCK_REAL_TIME)
+            group[grpIdx].setClockHours(group.HOURS_24)
+        if layout == group.LAYOUT_MM_SS
+            value //= group.SECONDS_PER_HOUR
+    else
+        valueRange[grpIdx] := ONE_DIGIT_SCALE
+        repeat layout                                           ' LAYOUT_n_DIGITS is n
+            valueRange[grpIdx] *= group.DECIMAL_BASE
+
+    status, usedWidth, usedHeight := group[grpIdx].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, left, top, right - left, bottom - top, grpType, layout, LONG[pRow][ROW_ROTATION], LONG[pRow][ROW_COLOR], value)
+    debug("SHOW     group ", udec_(grpIdx), " in (", udec_(left), ",", udec_(top), ") ", udec_(right - left), "x", udec_(bottom - top), ": status=", sdec_(status), " uses ", udec_(usedWidth), "x", udec_(usedHeight))
+
+PRI runFrame() : nowMs | grpIdx
+
+' One frame: each placed group whose hold has passed takes its next value from its feed, every group draws its
+' moves for this frame's time, and the frame is committed (the commit waits for the driver, so it paces the loop).
+
+' Local Variables:
+' @local grpIdx - the group being fed or drawn
+
+    nowMs := timeBase.update()
+    repeat grpIdx from 0 to lastSceneGroup
+        if group[grpIdx].isPlaced() and group[grpIdx].isHoldComplete(nowMs)
+            case feed[grpIdx]
+                FEED_STEP:
+                    group[grpIdx].nextTimeCycle()
+                FEED_RANDOM:
+                    group[grpIdx].setValue(getrnd() +// valueRange[grpIdx])
+                FEED_FPS:
+                    group[grpIdx].setValue(timeBase.framesPerSecondX100() / timeBase.FPS_SCALE <# valueRange[grpIdx] - NEXT_ONE)
+        group[grpIdx].animate(nowMs)
+    display.commitScreenToPanelSet()
+
+PRI anyPlaced() : bAny | grpIdx
+
+' TRUE while any group still holds an area (is placed, or is still morphing out).
+
+' Local Variables:
+' @local grpIdx - the group being asked
+
+    bAny := FALSE
+    repeat grpIdx from 0 to lastSceneGroup
+        if group[grpIdx].isPlaced()
+            bAny := TRUE
+            quit
+
+CON ' license
+
+{{
+
+
+ -------------------------------------------------------------------------------------------------
+  MIT License
+
+  Copyright (c) 2021 Iron Sheep Productions, LLC
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+ =================================================================================================
+}}

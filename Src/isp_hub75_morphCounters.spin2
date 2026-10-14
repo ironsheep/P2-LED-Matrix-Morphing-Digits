@@ -104,9 +104,9 @@ CON ' sizing a group to its area (spec R-8.1)
 
 CON ' the placed-area table: one entry per placed group, shared by every group object (spec R-8.5)
 
-    MAX_GROUPS = 10                 ' groups placed at once. Measured (task 168, 2026-10-12, pnut-ts -m on the simple demo): one
-                                    '   group's VAR is 9_224 bytes; the quad's 8-bit driver and a program around it leave room
-                                    '   for 10 with 8 KB of hub to spare. Spec R-9.5: the README states this maximum.
+    MAX_GROUPS = 10                 ' entries in the placed-area table. Hub memory is the real limit (spec R-9.5): one group's
+                                    '   VAR is 9_224 bytes, and with the quad's 8-bit driver the showcase demo fits 9 groups
+                                    '   (measured 2026-10-14; 10 is 3_864 bytes over). The compiler refuses a build that does not fit.
     #0, AREA_IN_USE, AREA_CHAIN, AREA_LEFT, AREA_TOP, AREA_RIGHT, AREA_BOTTOM
     AREA_LONGS = AREA_BOTTOM + 1
     NO_SLOT = -1                    ' claimArea(): no entry found yet
