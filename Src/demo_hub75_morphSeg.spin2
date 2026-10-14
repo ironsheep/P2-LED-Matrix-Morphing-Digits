@@ -28,6 +28,7 @@ LAST_COUNTER = MAX_COUNTERS - 1
 
 #0, GRP_CLOCK_LT, GRP_CLOCK_RT, GRP_DOWNCTR_2DIG, GRP_CTR_6DIG_RAND
 THIN_STROKE = 1             ' the 2021 look: 1-pixel strokes
+RANDOM_MAX = 9999           ' the random group's four digits
 
 CON ' the 2021 pacing, in real time
 
@@ -80,6 +81,7 @@ PUB start() : ok | ctrIdx, chainIndex, maxPhysicalCols, maxPhysicalRows, nowMs
     '  multiple SEVEN SEGMENT Morphing Digits DEMO: the 2021 thin strokes
     repeat ctrIdx from 0 to MAX_COUNTERS -1
         counters[ctrIdx].setThickness(THIN_STROKE)
+        counters[ctrIdx].setClockMode(counters.CLOCK_ACCELERATED)  ' the 2021 look: a fast clock, one minute per step
 
     display.clearScreen()
 
@@ -93,13 +95,13 @@ PUB start() : ok | ctrIdx, chainIndex, maxPhysicalCols, maxPhysicalRows, nowMs
     _, clkLtWidth, clkLtHeight := counters[GRP_CLOCK_LT].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, 2, 10, 42, 15, counters.GRP_CLOCK, counters.LAYOUT_HH_MM, counters.ROT_0, color.cOrange, 0)
 
     if maxPhysicalCols > 64
-        _, clkRtWidth, clkRtHeight := counters[GRP_CLOCK_RT].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, 66, 8, 42, 15, counters.GRP_CLOCK, counters.LAYOUT_HH_MM, counters.ROT_0, color.cGreen, 12 * 60)
+        _, clkRtWidth, clkRtHeight := counters[GRP_CLOCK_RT].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, 66, 8, 42, 15, counters.GRP_CLOCK, counters.LAYOUT_HH_MM, counters.ROT_0, color.cGreen, 12 * 60 * 60)
 
     if maxPhysicalRows > 32
         _, grpDnWidth, grpDnHeight := counters[GRP_DOWNCTR_2DIG].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, 3, 28, 59, 33, counters.GRP_DOWN_COUNTER, counters.LAYOUT_3_DIGITS, counters.ROT_0, color.cTeal, 204)
 
     if maxPhysicalCols > 64 && maxPhysicalRows > 32
-        _, grpRndWidth, grpRndHeight := counters[GRP_CTR_6DIG_RAND].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, 68, 32, 50, 21, counters.GRP_DIGITS_RANDOM, counters.LAYOUT_4_DIGITS, counters.ROT_0, color.cRed, 5436)
+        _, grpRndWidth, grpRndHeight := counters[GRP_CTR_6DIG_RAND].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, 68, 32, 50, 21, counters.GRP_DIGITS, counters.LAYOUT_4_DIGITS, counters.ROT_0, color.cRed, 5436)
 
     display.commitScreenToPanelSet()
     'repeat
@@ -116,7 +118,10 @@ PUB start() : ok | ctrIdx, chainIndex, maxPhysicalCols, maxPhysicalRows, nowMs
         nowMs := timeBase.update()                              ' 1. the frame's time: one counter read, and the frame is counted
         repeat ctrIdx from 0 to LAST_COUNTER                    ' 2. a group whose hold has passed takes its next value
             if counters[ctrIdx].isPlaced() && counters[ctrIdx].isHoldComplete(nowMs)
-                counters[ctrIdx].nextTimeCycle()
+                if ctrIdx == GRP_CTR_6DIG_RAND                  ' the value group shows random values (the caller's choice)
+                    counters[ctrIdx].setValue(getrnd() +// (RANDOM_MAX + 1))
+                else
+                    counters[ctrIdx].nextTimeCycle()
         repeat ctrIdx from 0 to LAST_COUNTER                    ' 3. every group draws its moves for this frame's time
             counters[ctrIdx].animate(nowMs)
         display.commitScreenToPanelSet()                        ' 4. the one commit: it waits for the driver, so it paces the loop (R-9.2)

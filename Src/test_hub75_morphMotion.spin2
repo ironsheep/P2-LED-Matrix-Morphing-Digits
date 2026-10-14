@@ -296,7 +296,8 @@ PRI checkGroupSetters() | injectMs, bAllComplete
     group.setProfile(timeBase.PROFILE_EDGE)
     group.setThickness(SEG_THICKNESS)
     group.placeGroup(hub75Bffrs.HUB75_ADAPTER_1, GROUP_COLUMN, GROUP_ROW, GROUP_AREA_WIDTH, GROUP_AREA_HEIGHT, group.GRP_UP_COUNTER, group.LAYOUT_1_DIGIT, group.ROT_0, color.cGreen, GROUP_START_VALUE)
-    group.animate(INJECT_BASE_MS)                               ' draws the placed digit
+    group.animate(INJECT_BASE_MS)                               ' the placed digit grows in ...
+    group.animate(INJECT_BASE_MS + timeBase.DEFAULT_MOVE_MS)     ' ... and rests
     utils.checkEqual(groupALit(), @"probe: digit 0 shows segment A fully lit", GROUP_SEG_LENGTH)
 
     utils.checkEqual(group.setMoveDuration(MOVE_MS), @"setMoveDuration accepts 300 ms", morphStatus.SUCCESS)

@@ -52,7 +52,20 @@ CON ' group rotation (spec R-7.1): the names and meanings match the driver's con
 
 CON ' group types: how the value changes (spec R-3.1)
 
-    #0, GRP_UNKNOWN, GRP_CLOCK, GRP_UP_COUNTER, GRP_DOWN_COUNTER, GRP_DIGITS, GRP_DIGITS_RANDOM
+    '   GRP_CLOCK        - a time of day or an elapsed time (CLOCK_ and HOURS_ settings below)
+    '   GRP_UP_COUNTER   - counts up one per nextTimeCycle(), 9..9 wraps to 0
+    '   GRP_DOWN_COUNTER - counts down one per nextTimeCycle(), 0 wraps to 9..9
+    '   GRP_DIGITS       - a value: shows whatever setValue() gives it (random values are the caller's)
+    #0, GRP_UNKNOWN, GRP_CLOCK, GRP_UP_COUNTER, GRP_DOWN_COUNTER, GRP_DIGITS
+
+CON ' clock settings (spec R-3.3-3.6): set with setClockHours() and setClockMode(), before or after placement
+
+    '   HOURS_24 - hours 00-23 (used when never set)
+    '   HOURS_12 - hours 1-12, never 0; the tens digit is blank below 10
+    #0, HOURS_24, HOURS_12
+    '   CLOCK_REAL_TIME   - one second per second, from the time placement or setTime() gives (used when never set)
+    '   CLOCK_ACCELERATED - one unit (the smallest field shown) per nextTimeCycle(), for demonstrations
+    #0, CLOCK_REAL_TIME, CLOCK_ACCELERATED
 
 CON ' layouts: how the group looks (digits, and colons between clock fields)
 
@@ -63,9 +76,15 @@ CON ' layouts: how the group looks (digits, and colons between clock fields)
     LAST_DIGIT = MAX_DIGITS - 1     ' index of the last digit slot (digits[] runs from 0)
     MAX_COLONS = 2
     FIELD_DIGITS = 2                ' a clock field (hours, minutes, seconds) is two digits
+    SECONDS_PER_MINUTE = 60         ' a clock's value is seconds: since midnight (HH_MM, HH_MM_SS) or within the hour (MM_SS)
     MINUTES_PER_HOUR = 60
+    SECONDS_PER_HOUR = SECONDS_PER_MINUTE * MINUTES_PER_HOUR
     HOURS_PER_DAY = 24
-    MAX_CLOCK_MINUTES = HOURS_PER_DAY * MINUTES_PER_HOUR - 1    ' a clock's value: minutes since midnight
+    HOURS_PER_HALF_DAY = 12
+    SECONDS_PER_DAY = SECONDS_PER_HOUR * HOURS_PER_DAY
+    MAX_DAY_SECONDS = SECONDS_PER_DAY - 1       ' the largest HH_MM / HH_MM_SS value: 23:59:59
+    MAX_HOUR_SECONDS = SECONDS_PER_HOUR - 1     ' the largest MM_SS value: 59:59
+    #0, FIELD_HOURS, FIELD_MINUTES, FIELD_SECONDS   ' a clock's fields, left to right (MM_SS starts at FIELD_MINUTES)
     DECIMAL_BASE = 10
 
 CON ' sizing a group to its area (spec R-8.1)
@@ -76,7 +95,8 @@ CON ' sizing a group to its area (spec R-8.1)
     GAP_DIVISOR = 4                 ' space between digits: a quarter of a digit's width, at least MIN_GAP
     MIN_GAP = 1
     MIN_DOT = 2                     ' a colon dot is the stroke's thickness square, at least MIN_DOT
-    DIM_PERCENT = 25                ' the colon's dim phase: this percent of the group's color
+    COLON_DIM_LEVEL = 64            ' the colon's level: digits.LEVEL_FULL at each real second, fading to this by its
+                                    '   end (an accelerated clock's colon stays full)
     NEXT_PIXEL = 1                  ' one pixel further on
     ONE_STEP = 1                    ' a counter's step
     HALF = 2
@@ -100,7 +120,6 @@ OBJ
     morphStatus         : "isp_hub75_morphStatus"   ' the status codes the setters return (a refused call changes nothing, spec R-10.2)
     morphColor          : "isp_hub75_morphColor"    ' the group's intensity ramp
     morphMask           : "isp_hub75_morphMask"     ' the group's segment coverage mask
-    colorUtils          : "isp_hub75_colorUtils"    ' the colon's dim color
 
 DAT ' placed areas, one table for every group object of the program (AREA_ fields, inclusive display coordinates)
 
@@ -127,7 +146,7 @@ VAR ' per group
     long    digitGap
     long    dotSize
     long    colonCount
-    long    colonX[MAX_COLONS]  ' each colon's dots: left column, and the two dots' top rows (group coordinates)
+    ' each colon's dots: the two dots' top rows (group coordinates; their column follows the digit before them)
     long    dotUpperY
     long    dotLowerY
 
@@ -152,9 +171,10 @@ VAR ' per group
     long    drawCtx[digits.CTX_LONGS]   ' this group's drawing context, shared by its digits (morph7seg CTX_ fields)
 
     ' clock
-    long    hours
-    long    minutes
-    long    initValue[MAX_DIGITS]
+    long    clockHours          ' HOURS_24 or HOURS_12
+    long    clockMode           ' CLOCK_REAL_TIME or CLOCK_ACCELERATED
+    long    clockLastSecondMs   ' real time: nowMs when the clock last advanced a whole second
+    long    bClockRunning       ' real time: TRUE once animate() has stamped clockLastSecondMs
 
     ' time-based motion and cadence
     long    moveDurationMs      ' every segment move of the group takes this long, in ms
@@ -176,7 +196,7 @@ PUB versionString() : pVersion
 
     pVersion := @"v1.0.0"     ' MORPH_VERSION_STR -- written by tools/stamp_version.sh
 
-PUB placeGroup(adapter, areaLeft, areaTop, areaWidth, areaHeight, grpType, layout, groupRotation, rgbColor, initialValue) : status, usedWidth, usedHeight | chain, rows, columns, segLength, thickness, groupWidth, groupHeight, slot, digitIdx, maxValue, tail
+PUB placeGroup(adapter, areaLeft, areaTop, areaWidth, areaHeight, grpType, layout, groupRotation, rgbColor, initialValue) : status, usedWidth, usedHeight | chain, rows, columns, segLength, thickness, groupWidth, groupHeight, slot, digitIdx, colonIdx, maxValue, tail
 '' Place this group in an area of an adapter's display: it takes the largest digits that fit the area (turned),
 '' centres itself in it and starts showing initialValue. Placing a group that is already placed moves it (its
 '' old pixels are not erased: removeGroup() morphs them out). A refused call changes nothing.
@@ -184,11 +204,11 @@ PUB placeGroup(adapter, areaLeft, areaTop, areaWidth, areaHeight, grpType, layou
 '' @param adapter - the display: hub75Bffrs.HUB75_ADAPTER_1, _2 or _3 (one started with display.start())
 '' @param areaLeft, areaTop - the area's top-left pixel on that display, as mounted
 '' @param areaWidth, areaHeight - the area's size in pixels (both at least 1; the area must lie on the display)
-'' @param grpType - GRP_CLOCK, GRP_UP_COUNTER, GRP_DOWN_COUNTER, GRP_DIGITS or GRP_DIGITS_RANDOM
-'' @param layout - LAYOUT_1_DIGIT .. LAYOUT_6_DIGITS for counters and values; LAYOUT_HH_MM for a clock
+'' @param grpType - GRP_CLOCK, GRP_UP_COUNTER, GRP_DOWN_COUNTER or GRP_DIGITS
+'' @param layout - LAYOUT_1_DIGIT .. LAYOUT_6_DIGITS for counters and values; LAYOUT_MM_SS, LAYOUT_HH_MM or LAYOUT_HH_MM_SS for a clock
 '' @param groupRotation - ROT_0, ROT_90 (clockwise), ROT_180 or ROT_270 (counter-clockwise)
 '' @param rgbColor - the group's color, $RRGGBB
-'' @param initialValue - counters and values: 0 to 10^digits - 1; a clock: minutes since midnight, 0 to MAX_CLOCK_MINUTES
+'' @param initialValue - counters and values: 0 to 10^digits - 1; a clock: seconds, 0 to MAX_DAY_SECONDS (MAX_HOUR_SECONDS for MM_SS)
 '' @returns status - morphStatus.SUCCESS, or E_UNKNOWN_ADAPTER, E_BAD_AREA, E_UNKNOWN_TYPE, E_UNKNOWN_LAYOUT,
 ''   E_UNKNOWN_ROTATION, E_VALUE_OUT_OF_RANGE, E_AREA_TOO_SMALL, E_AREA_OVERLAP or E_TOO_MANY_GROUPS
 '' @returns usedWidth, usedHeight - the size the group uses on the display (0, 0 when refused)
@@ -200,6 +220,7 @@ PUB placeGroup(adapter, areaLeft, areaTop, areaWidth, areaHeight, grpType, layou
 ' @local groupWidth, groupHeight - the group's size, unturned
 ' @local slot - the areaTable entry the group will hold
 ' @local digitIdx - the digit being placed
+' @local colonIdx - the colon being set up
 ' @local maxValue - the largest value the type and layout show
 ' @local tail - the snake tail every digit draws with
 
@@ -214,7 +235,7 @@ PUB placeGroup(adapter, areaLeft, areaTop, areaWidth, areaHeight, grpType, layou
         columns := hub75Bffrs.maxDisplayColumns(chain)
         if areaWidth < NEXT_PIXEL or areaHeight < NEXT_PIXEL or areaLeft < 0 or areaTop < 0 or areaLeft + areaWidth > columns or areaTop + areaHeight > rows
             status := morphStatus.E_BAD_AREA
-        elseif grpType < GRP_CLOCK or grpType > GRP_DIGITS_RANDOM
+        elseif grpType < GRP_CLOCK or grpType > GRP_DIGITS
             status := morphStatus.E_UNKNOWN_TYPE
         elseif not isLayoutFor(grpType, layout)
             status := morphStatus.E_UNKNOWN_LAYOUT
@@ -257,21 +278,16 @@ PUB placeGroup(adapter, areaLeft, areaTop, areaWidth, areaHeight, grpType, layou
         usedWidth, usedHeight := turnedSize(groupWidth, groupHeight)
         setDrawContext(areaTop + (areaHeight - usedHeight) / HALF, areaLeft + (areaWidth - usedWidth) / HALF, groupWidth, groupHeight)
         clipToArea(areaLeft, areaTop, areaLeft + areaWidth - NEXT_PIXEL, areaTop + areaHeight - NEXT_PIXEL)
-        if groupType == GRP_CLOCK
-            hours := currValue / MINUTES_PER_HOUR
-            minutes := currValue // MINUTES_PER_HOUR
-            repeat digitIdx from 0 to numberDigits - NEXT_PIXEL
-                initValue[digitIdx] := clockDigit(digitIdx)
-        else
-            updateInitsFromValue(currValue)
+        bClockRunning := FALSE
         tail := tailX256()
         repeat digitIdx from 0 to numberDigits - NEXT_PIXEL
             digits[digitIdx].initialize(chainIndex, rows, columns)
             digits[digitIdx].setMotion(moveDurationMs, moveEaseStyle)
             digits[digitIdx].setContext(@drawCtx)
-            digits[digitIdx].placeDigit(0, digitX(digitIdx), segLength, thickness, initValue[digitIdx], @mask, @ramp, tail)
-        if groupType == GRP_CLOCK
-            showSecondsDots(0)
+            digits[digitIdx].placeDigit(0, digitX(digitIdx), segLength, thickness, shownDigit(currValue, digitIdx), @mask, @ramp, tail)
+        colonIdx := 0
+        repeat colonCount                                           ' a plain count: 0 skips (see setColonsLevel())
+            digits[colonDigit(colonIdx++)].setColon(digitWidth + digitGap, dotSize, dotUpperY, dotLowerY)
         debug("mG: placed type ", udec_(groupType), " layout ", udec_(groupLayout), " in (", sdec_(areaLeft), ",", sdec_(areaTop), ") ", udec_(areaWidth), "x", udec_(areaHeight), ": segment ", udec_(segLength), " stroke ", udec_(thickness), ", uses ", udec_(usedWidth), "x", udec_(usedHeight))
 
 PUB removeGroup() : status | digitIdx
@@ -284,8 +300,7 @@ PUB removeGroup() : status | digitIdx
     if bPlaced and not bRemoving
         repeat digitIdx from 0 to numberDigits - NEXT_PIXEL
             digits[digitIdx].morphOut()
-        if groupType == GRP_CLOCK
-            drawColons(0)                                           ' the colon goes dark at once
+        setColonsLevel(0)                                           ' the colon goes dark at once
         bRemoving := TRUE
         status := morphStatus.SUCCESS
 
@@ -424,6 +439,8 @@ PUB animate(nowMs) : movingCount | digitIdx
 
     movingCount := 0
     if bPlaced
+        if groupType == GRP_CLOCK and clockMode == CLOCK_REAL_TIME and not bRemoving
+            runClock(nowMs)
         repeat digitIdx from 0 to numberDigits - NEXT_PIXEL
             movingCount += digits[digitIdx].animate(nowMs)
         if movingCount == 0
@@ -444,46 +461,100 @@ PUB isHoldComplete(nowMs) : bHoldDone
     if bHoldRunning == TRUE
         bHoldDone := (nowMs - holdStartMs) >= holdDurationMs          ' times compared by subtraction: wrap-safe
 
-PUB nextTimeCycle() | bShowCurrValue
-'' Start the group's next value: a clock's next minute, a counter's next count, a random value's next draw.
+PUB nextTimeCycle()
+'' Start the group's next value: an up or down counter's next count, an accelerated clock's next unit. A value
+'' group and a real-time clock are not stepped here (setValue(); animate() runs the clock).
 ''
+
     bHoldRunning := FALSE       ' a new transition: animate() starts the next hold when it completes
-    bShowCurrValue := bPlaced and not bRemoving
-    case (bShowCurrValue ? groupType : GRP_UNKNOWN)
-        GRP_CLOCK:
-            currValue += ONE_STEP
-            if currValue > MAX_CLOCK_MINUTES
-                currValue := 0
-            hours := currValue / MINUTES_PER_HOUR
-            minutes := currValue // MINUTES_PER_HOUR
-            bShowCurrValue := FALSE ' nope, were doing that next
-            updateDigitsFromTime(hours, minutes)
-        GRP_UP_COUNTER:
-            currValue += ONE_STEP
-            if currValue > valueCap
-                currValue := 0
-        GRP_DOWN_COUNTER:
-            currValue -= ONE_STEP
-            if currValue < 0
-                currValue := valueCap
-        GRP_DIGITS:
-            ' nothing here value is set from outside
-        GRP_DIGITS_RANDOM:
-            currValue := getrnd()
-            if currValue < 0
-                currValue := 0 - currValue
-            if currValue > valueCap
-                currValue //= (valueCap + ONE_STEP)
-        other:                      ' not placed: nothing to step
+    if bPlaced and not bRemoving
+        case groupType
+            GRP_CLOCK:
+                if clockMode == CLOCK_ACCELERATED
+                    showValue((currValue + clockUnit()) // (valueCap + ONE_STEP))
+            GRP_UP_COUNTER:
+                showValue((currValue + ONE_STEP) // (valueCap + ONE_STEP))
+            GRP_DOWN_COUNTER:
+                showValue(currValue > 0 ? currValue - ONE_STEP : valueCap)
 
-    if bShowCurrValue
-        updateDigitsFromValue(currValue)
+PUB digitValueAt(digitIdx) : digitValue
+'' What one digit of the group shows (or is morphing to), counted from the left: 0-9, or digits.DIGIT_HIDDEN for
+'' a blank (a 12-hour clock's leading hour zero). For logs and tests: the pixels are the screen's.
+''
+'' @param digitIdx - 0 to the layout's digits - 1
+'' @returns digitValue - the digit, digits.DIGIT_HIDDEN, or digits.DIGIT_NO_VALUE outside the layout
 
-PRI updateInitsFromValue(desiredValue) | digitIdx
-' A value's decimal digits, most significant first, into initValue[].
+    digitValue := digits.DIGIT_NO_VALUE
+    if digitIdx >= 0 and digitIdx < numberDigits
+        digitValue := digits[digitIdx].value()
 
-    repeat digitIdx from 0 to numberDigits - NEXT_PIXEL
-        initValue[digitIdx] := digitOfValue(desiredValue, digitIdx)
+PUB setValue(newValue) : status
+'' Show a counter's or value group's value now (spec R-3.7): the digits morph to it.
+''
+'' @param newValue - 0 to 10^digits - 1
+'' @returns status - morphStatus.SUCCESS, or E_NOT_PLACED, E_WRONG_TYPE (a clock: use setTime()) or
+''   E_VALUE_OUT_OF_RANGE, with nothing changed
+
+    if not bPlaced or bRemoving
+        status := morphStatus.E_NOT_PLACED
+    elseif groupType == GRP_CLOCK
+        status := morphStatus.E_WRONG_TYPE
+    elseif newValue < 0 or newValue > valueCap
+        status := morphStatus.E_VALUE_OUT_OF_RANGE
+    else
+        bHoldRunning := FALSE
+        showValue(newValue)
+        status := morphStatus.SUCCESS
+
+PUB setTime(timeHours, timeMinutes, timeSeconds) : status
+'' Set a clock's time now (spec R-3.7): hours 0-23 (always 24-hour here; HOURS_12 changes only what is shown),
+'' minutes and seconds 0-59. An MM_SS clock shows the minutes and seconds.
+''
+'' @param timeHours - 0 to 23
+'' @param timeMinutes - 0 to 59
+'' @param timeSeconds - 0 to 59
+'' @returns status - morphStatus.SUCCESS, or E_NOT_PLACED, E_WRONG_TYPE (not a clock: use setValue()) or
+''   E_VALUE_OUT_OF_RANGE, with nothing changed
+
+    if not bPlaced or bRemoving
+        status := morphStatus.E_NOT_PLACED
+    elseif groupType <> GRP_CLOCK
+        status := morphStatus.E_WRONG_TYPE
+    elseif timeHours < 0 or timeHours >= HOURS_PER_DAY or timeMinutes < 0 or timeMinutes >= MINUTES_PER_HOUR or timeSeconds < 0 or timeSeconds >= SECONDS_PER_MINUTE
+        status := morphStatus.E_VALUE_OUT_OF_RANGE
+    else
+        bHoldRunning := FALSE
+        showValue((timeHours * SECONDS_PER_HOUR + timeMinutes * SECONDS_PER_MINUTE + timeSeconds) // (valueCap + ONE_STEP))
+        status := morphStatus.SUCCESS
+
+PUB setClockHours(hoursMode) : status
+'' Show a clock's hours 00-23 (HOURS_24) or 1-12 (HOURS_12, spec R-3.4); applies at once to a placed clock.
+''
+'' @param hoursMode - HOURS_24 (used when never set) or HOURS_12
+'' @returns status - morphStatus.SUCCESS, or morphStatus.E_UNKNOWN_CLOCK_SETTING with nothing changed
+
+    ensureDefaults()
+    status := morphStatus.E_UNKNOWN_CLOCK_SETTING
+    if hoursMode == HOURS_24 or hoursMode == HOURS_12
+        clockHours := hoursMode
+        if bPlaced and groupType == GRP_CLOCK
+            showValue(currValue)
+        status := morphStatus.SUCCESS
+
+PUB setClockMode(mode) : status
+'' Run a clock in real time (one second per second, R-3.6) or accelerated (one unit per nextTimeCycle()).
+''
+'' @param mode - CLOCK_REAL_TIME (used when never set) or CLOCK_ACCELERATED
+'' @returns status - morphStatus.SUCCESS, or morphStatus.E_UNKNOWN_CLOCK_SETTING with nothing changed
+
+    ensureDefaults()
+    status := morphStatus.E_UNKNOWN_CLOCK_SETTING
+    if mode == CLOCK_REAL_TIME or mode == CLOCK_ACCELERATED
+        clockMode := mode
+        bClockRunning := FALSE
+        if mode == CLOCK_ACCELERATED
+            setColonsLevel(digits.LEVEL_FULL)
+        status := morphStatus.SUCCESS
 
 PRI digitOfValue(value, digitIdx) : digitValue | divisor
 ' One decimal digit of a value, counted from the most significant of the group's digits.
@@ -505,13 +576,15 @@ PRI ensureDefaults()
         motionProfile := timeBase.DEFAULT_PROFILE
         bTailSet := FALSE
         bThicknessSet := FALSE
+        clockHours := HOURS_24
+        clockMode := CLOCK_REAL_TIME
         bDefaultsSet := TRUE
 
 PRI isLayoutFor(grpType, layout) : bFits
 ' TRUE when this layout belongs to this type: a clock's fields, or a counter's or value's digits.
 
     if grpType == GRP_CLOCK
-        bFits := layout == LAYOUT_HH_MM
+        bFits := layout == LAYOUT_MM_SS or layout == LAYOUT_HH_MM or layout == LAYOUT_HH_MM_SS
     else
         bFits := layout >= LAYOUT_1_DIGIT and layout <= LAYOUT_6_DIGITS
 
@@ -543,7 +616,7 @@ PRI maxValueFor(grpType, layout) : maxValue
 ' The largest value a group of this type and layout shows.
 
     if grpType == GRP_CLOCK
-        maxValue := MAX_CLOCK_MINUTES
+        maxValue := (layout == LAYOUT_MM_SS) ? MAX_HOUR_SECONDS : MAX_DAY_SECONDS
     else
         maxValue := NEXT_PIXEL
         repeat layoutDigits(layout)
@@ -612,8 +685,6 @@ PRI setSizes(layout, segLength, thickness) | digitHeight, halfHeight
     halfHeight := digitHeight / HALF
     dotUpperY := (halfHeight - dotSize) / HALF
     dotLowerY := halfHeight + (digitHeight - halfHeight - dotSize) / HALF
-    colonX[0] := digitX(FIELD_DIGITS - NEXT_PIXEL) + digitWidth + digitGap
-    colonX[NEXT_PIXEL] := digitX(FIELD_DIGITS * HALF - NEXT_PIXEL) + digitWidth + digitGap
 
 PRI digitX(digitIdx) : column
 ' A digit's left column in the group (unturned): the digits before it, their gaps, and any colons between.
@@ -663,45 +734,82 @@ PRI clipToArea(left, top, right, bottom)
     drawCtx[digits.CTX_CLIP_RIGHT] := right
     drawCtx[digits.CTX_CLIP_BOTTOM] := bottom
 
-PRI showSecondsDots(lightDark)
-' Draw the clock's colon dots, bright or dim (task 169 draws them through the segment pipeline).
+PRI showValue(newValue) | digitIdx
+' Make newValue the group's value and start each digit's morph to it (a digit already showing its part does nothing).
 
-    drawColons(lightDark & NEXT_PIXEL ? groupColor : colorUtils.reducedBrightnessOfCValue(groupColor, DIM_PERCENT))
-
-PRI drawColons(rgbColor) | colonIdx, dotX, dotY
-' Fill every colon dot with one color (black clears them), in group coordinates through the group's turn.
-
-    repeat colonIdx from 0 to colonCount - NEXT_PIXEL
-        repeat dotY from 0 to dotSize - NEXT_PIXEL
-            repeat dotX from 0 to dotSize - NEXT_PIXEL
-                drawGroupPixel(colonX[colonIdx] + dotX, dotUpperY + dotY, rgbColor)
-                drawGroupPixel(colonX[colonIdx] + dotX, dotLowerY + dotY, rgbColor)
-
-PRI drawGroupPixel(groupX, groupY, rgbColor) | screenX, screenY
-
-    screenX, screenY := groupToScreen(groupX, groupY)
-    pixels.drawPixelAtRC(chainIndex, screenY, screenX, rgbColor)
-
-PRI updateDigitsFromTime(timeHours, timeMinutes) | digitIdx
-' Show a clock's hours and minutes.
-
-    hours := timeHours
-    minutes := timeMinutes
+    currValue := newValue
     repeat digitIdx from 0 to numberDigits - NEXT_PIXEL
-        digits[digitIdx].setValue(clockDigit(digitIdx))
-    showSecondsDots(timeMinutes & NEXT_PIXEL)
+        digits[digitIdx].setValue(shownDigit(currValue, digitIdx))
 
-PRI clockDigit(digitIdx) : digitValue | fieldValue
-' One digit of the clock's time, HH:MM from the left: each field's tens, then its units.
+PRI shownDigit(value, digitIdx) : digitValue | fieldIdx, fieldValue
+' The digit (or digits.DIGIT_HIDDEN) a group shows at digitIdx for value: a counter's decimal digits, or a
+' clock's fields, tens then units, with a 12-hour clock's leading hour zero blank (spec R-3.4).
 
-    fieldValue := (digitIdx < FIELD_DIGITS) ? hours : minutes
-    digitValue := (digitIdx // FIELD_DIGITS == 0) ? fieldValue / DECIMAL_BASE : fieldValue // DECIMAL_BASE
+    if groupType <> GRP_CLOCK
+        digitValue := digitOfValue(value, digitIdx)
+    else
+        fieldIdx := digitIdx / FIELD_DIGITS
+        fieldValue := clockField(value, fieldIdx)
+        if digitIdx // FIELD_DIGITS == 0
+            digitValue := fieldValue / DECIMAL_BASE
+            if digitValue == 0 and isHoursField(fieldIdx) and clockHours == HOURS_12
+                digitValue := digits.DIGIT_HIDDEN
+        else
+            digitValue := fieldValue // DECIMAL_BASE
 
-PRI updateDigitsFromValue(desiredValue) | digitIdx
-' Show a value: its decimal digits, most significant first.
+PRI clockField(seconds, fieldIdx) : fieldValue | hours
+' One field of a clock showing seconds: MM_SS shows minutes, seconds; HH_MM hours, minutes; HH_MM_SS all three.
 
-    repeat digitIdx from 0 to numberDigits - NEXT_PIXEL
-        digits[digitIdx].setValue(digitOfValue(desiredValue, digitIdx))
+    if groupLayout == LAYOUT_MM_SS
+        fieldIdx += FIELD_MINUTES                                   ' its first field is the minutes
+    case fieldIdx
+        FIELD_HOURS:
+            hours := seconds / SECONDS_PER_HOUR
+            fieldValue := hours
+            if clockHours == HOURS_12                               ' 0 -> 12, 13 -> 1: never 0 (R-3.4)
+                fieldValue := (hours + HOURS_PER_HALF_DAY - NEXT_PIXEL) // HOURS_PER_HALF_DAY + NEXT_PIXEL
+        FIELD_MINUTES:
+            fieldValue := (seconds / SECONDS_PER_MINUTE) // MINUTES_PER_HOUR
+        other:
+            fieldValue := seconds // SECONDS_PER_MINUTE
+
+PRI isHoursField(fieldIdx) : bHours
+' TRUE when this field (counted from the left) shows hours.
+
+    bHours := fieldIdx == FIELD_HOURS and groupLayout <> LAYOUT_MM_SS
+
+PRI clockUnit() : unitSeconds
+' An accelerated clock's step: its smallest field shown (a minute for HH_MM, a second otherwise).
+
+    unitSeconds := (groupLayout == LAYOUT_HH_MM) ? SECONDS_PER_MINUTE : NEXT_PIXEL
+
+PRI runClock(nowMs) | elapsedMs, wholeSeconds
+' A real-time clock: advance by every whole second since it last did, and pulse the colon over each second.
+
+    if not bClockRunning
+        clockLastSecondMs := nowMs
+        bClockRunning := TRUE
+    elapsedMs := nowMs - clockLastSecondMs                          ' times compared by subtraction: wrap-safe
+    if elapsedMs >= timeBase.MS_PER_SECOND
+        wholeSeconds := elapsedMs / timeBase.MS_PER_SECOND
+        clockLastSecondMs += wholeSeconds * timeBase.MS_PER_SECOND
+        elapsedMs -= wholeSeconds * timeBase.MS_PER_SECOND
+        showValue((currValue + wholeSeconds) // (valueCap + ONE_STEP))
+    setColonsLevel(digits.LEVEL_FULL - (digits.LEVEL_FULL - COLON_DIM_LEVEL) * elapsedMs / timeBase.MS_PER_SECOND)
+
+PRI setColonsLevel(level) | colonIdx
+' Light every colon of the group at one level (0 darkens them).
+' A plain REPEAT count: with no colon it runs 0 times. A FROM 0 TO colonCount - 1 loop would count down and run
+' for -1, and so would REPEAT colonCount WITH colonIdx (seen on pnut-ts v1.55.8): digits[-1] is another object.
+
+    colonIdx := 0
+    repeat colonCount
+        digits[colonDigit(colonIdx++)].setColonLevel(level)
+
+PRI colonDigit(colonIdx) : digitIdx
+' The digit a colon belongs to: each colon follows a clock field's second digit.
+
+    digitIdx := FIELD_DIGITS * (colonIdx + NEXT_PIXEL) - NEXT_PIXEL
 
 PRI applyMotion() | digitIdx
 ' Hand the group's move duration and easing to every digit (and so to every segment).
@@ -766,13 +874,6 @@ PRI isQuarterTurnFor(groupRotation) : bQuarter
 ' TRUE when this rotation turns a group 90 degrees either way.
 
     bQuarter := groupRotation == ROT_90 or groupRotation == ROT_270
-
-PRI groupToScreen(groupX, groupY) : screenX, screenY
-' A group pixel's place on the display, through the group's turn.
-
-    screenX := drawCtx[digits.CTX_XX] * groupX + drawCtx[digits.CTX_XY] * groupY + drawCtx[digits.CTX_X0]
-    screenY := drawCtx[digits.CTX_YX] * groupX + drawCtx[digits.CTX_YY] * groupY + drawCtx[digits.CTX_Y0]
-
 
 CON ' license
 

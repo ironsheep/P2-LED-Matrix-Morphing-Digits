@@ -73,6 +73,8 @@ CON ' ---- By-eye section ----
   BYEYE_MOVE_MS = 1_000
   BYEYE_HOLD_MS = 1_000
   BYEYE_THICKNESS = 4
+  BYEYE_FRAME_MS = 20                                           ' the morph-outs before the by-eye placements: one frame
+  BYEYE_SETTLE_FRAMES = 200                                     ' ... and at most 4 s of them
   BYEYE_FROM = 1
   BYEYE_SPACING = 64                                            ' one group per quarter of the display's width
 
@@ -186,7 +188,9 @@ PRI placeAndRest(grpIdx, rot, row, column, value) : width, height | status, area
     if status <> morphStatus.SUCCESS
         debug("PLACE    refused  status=", sdec_(status))
     nowMs += GAP_MS
-    group[grpIdx].animate(nowMs)
+    group[grpIdx].animate(nowMs)                                ' the digit grows in ...
+    nowMs += MOVE_MS
+    group[grpIdx].animate(nowMs)                                ' ... and rests
 
 PRI stepToMid(grpIdx)
 ' Start the group's next value and draw it half way through its move.
@@ -263,17 +267,24 @@ PRI rotationName(rot, pWhat) : pName
     bytemove(@nameBuffer + strsize(@nameBuffer), pWhat, strsize(pWhat) <# (NAME_BYTES - ONE - strsize(@nameBuffer)))
 
 #IFDEF MORPH_BYEYE
-PRI showByEye() | rot, column, startMs
+PRI showByEye() | rot, column, startMs, status, width, height, frames
 ' Four groups, one per rotation, counting up from 1 with slow moves, for Stephen to judge each turn's direction.
 
-    display.clearScreen()
-    column := OPEN_COLUMN
-    repeat rot from group.ROT_0 to group.ROT_270
+    repeat rot from group.ROT_0 to group.ROT_270                ' free every area the checks left placed
         group[rot].removeGroup()
+    frames := 0
+    repeat while anyPlaced() and frames++ < BYEYE_SETTLE_FRAMES
+        nowMs += BYEYE_FRAME_MS
+        repeat rot from group.ROT_0 to group.ROT_270
+            group[rot].animate(nowMs)
+    display.clearScreen()
+    column := 0                                                 ' four areas of a quarter of the width each, touching
+    repeat rot from group.ROT_0 to group.ROT_270
         group[rot].setThickness(BYEYE_THICKNESS)
         group[rot].setMoveDuration(BYEYE_MOVE_MS)
         group[rot].setHoldDuration(BYEYE_HOLD_MS)
-        group[rot].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, column, OPEN_ROW, BYEYE_SPACING, maxRows - OPEN_ROW, group.GRP_UP_COUNTER, group.LAYOUT_1_DIGIT, rot, color.cOrange, BYEYE_FROM)
+        status, width, height := group[rot].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, column, OPEN_ROW, BYEYE_SPACING, maxRows - OPEN_ROW, group.GRP_UP_COUNTER, group.LAYOUT_1_DIGIT, rot, color.cOrange, BYEYE_FROM)
+        debug("BYEYE    ", zstr_(@@rotNames[rot]), " at column ", udec_(column), ": status=", sdec_(status), " uses ", udec_(width), "x", udec_(height))
         column += BYEYE_SPACING
     debug("BYEYE    four groups (ROT_0, ROT_90, ROT_180, ROT_270, left to right) counting up for ", udec_(BYEYE_MS), " ms")
     timeBase.reset()
@@ -286,6 +297,13 @@ PRI showByEye() | rot, column, startMs
             group[rot].animate(nowMs)
         display.commitScreenToPanelSet()
         nowMs := timeBase.update()
+
+PRI anyPlaced() : bAny | rot
+' TRUE while any of the four groups still holds its area.
+
+    bAny := FALSE
+    repeat rot from group.ROT_0 to group.ROT_270
+        bAny |= group[rot].isPlaced()
 #ENDIF
 
 CON ' ---- Check names ----

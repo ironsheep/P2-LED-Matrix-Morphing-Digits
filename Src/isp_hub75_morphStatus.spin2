@@ -46,6 +46,8 @@ CON ' status codes (a new code takes the next unused negative value; a value is 
   E_UNKNOWN_ADAPTER = -18                                       ' an adapter that is not HUB75_ADAPTER_1, _2 or _3
   E_VALUE_OUT_OF_RANGE = -19                                    ' a value outside what the group can show
   E_NOT_PLACED = -20                                            ' a call that needs a placed group, on one that is not placed
+  E_UNKNOWN_CLOCK_SETTING = -21                                 ' a clock setting that is not one of isp_hub75_morphCounters' HOURS_ or CLOCK_ values
+  E_WRONG_TYPE = -22                                            ' a call that does not apply to the group's type (setTime() on a counter, setValue() on a clock)
 
 PUB null()
 '' This is not a top level object

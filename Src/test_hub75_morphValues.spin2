@@ -1,0 +1,452 @@
+'' =================================================================================================
+''
+''   File....... test_hub75_morphValues.spin2
+''   Purpose.... Board test of group values: clock formats and modes, counters, setTime/setValue, rollovers, grow-in
+''   Authors.... Stephen M Moraco
+''               -- see below for terms of use
+''   E-mail..... stephen@ironsheep.biz
+''   Started.... Oct 2026
+''   Updated.... 13 Oct 2026
+''
+'' =================================================================================================
+
+{ Task 169: proves the group types and values (spec R-3.1-3.8, R-5.6, R-10.2) on the quad.
+
+  Two independent checks per case:
+    - the digits: digitValueAt() against the digits worked out here from the spec's rules (expectDigits():
+      fields, 12-hour 1-12 with the leading zero blank, rollovers), never from the library's own code
+    - the pixels: the group under test (T, left half of the display) must show exactly what a reference group
+      (R, right half, same size) shows when placed fresh at the expected value: T got there by counting or by a
+      setter, R by placement, so equal pixels prove the transitions ended where they should (R-5.7)
+
+  Sections:
+    1. counting: each clock format (24h, and 12h for the hour formats) and each counter steps 3 units
+    2. rollovers: 12:59 -> 1:00 (12h), 11:59 -> 12:00 (12h), 23:59 -> 12:00 (12h midnight), 23:59 -> 00:00,
+       59:59 -> 00:00 (MM:SS), 23:59:59 -> 00:00:00, 9999 -> 0000, 0 -> 9999
+    3. setTime() and setValue() to each boundary
+    4. refusals change nothing: out-of-range times and values, the wrong setter for the type, unknown clock
+       settings, a setter on a removed group
+    5. real time: three injected seconds advance an MM:SS clock by three; the colon dims within a second
+    6. grow-in: half way through a placement the digits are partly lit (neither blank nor at rest)
+
+  Falsification: compile with -D MORPH_BREAK_VALUES and every expected digit list is one unit late; the digit
+  checks must then FAIL.
+}
+
+CON ' ---- Timing ----
+
+  CLK_FREQ = 335_000_000                                        ' system freq as a constant
+  _clkfreq = CLK_FREQ                                           ' set system clock
+
+CON ' ---- Areas, motion ----
+
+  BAND_TOP = 4
+  AREA_WIDTH = 128                                              ' T on the left half, R on the right: the same size
+  AREA_HEIGHT = 48
+  T_LEFT = 0
+  R_LEFT = 128
+  MOVE_MS = 200
+  FRAME_MS = 50
+  START_MS = 10_000
+  MAX_SETTLE_FRAMES = 40                                        ' a 200 ms move ends in 4 frames of 50 ms
+  STEPS = 3                                                     ' units counted in section 1
+  ONE = 1
+  MAX_FIELDS = 3
+  MAX_TEST_DIGITS = 6
+
+CON ' ---- Case tables (DAT below) ----
+
+  #0, C_LAYOUT, C_HOURS, C_START, C_UNIT                        ' a counting or rollover case
+  CASE_LONGS = C_UNIT + 1
+  #0, S_LAYOUT, S_HOURS, S_H, S_M, S_S                          ' a setTime() case
+  SET_LONGS = S_S + 1
+  NUM_COUNT_CASES = 5
+  NUM_STEP_CASES = 6
+  NUM_SET_CASES = 5
+  UP_START = 128
+  DOWN_START = 1002
+  SET_VALUE_START = 1234
+  KEEP_VALUE = 4321
+  KEEP_HOURS = 10
+  GROW_VALUE = 8888
+  BAD_HOURS = 24
+  BAD_MINUTES = 60
+  BAD_SECONDS = 60
+  BAD_SETTING = 7
+  ANY_VALUE = 5
+  ANY_H = 1
+  ANY_M = 2
+  ANY_S = 3
+  REAL_SECONDS = 3                                              ' section 5: three injected seconds
+  MS_PER_SECOND = 1000
+  HALF_SECOND_MS = MS_PER_SECOND / 2
+  TWO_FIELDS = 2
+  THREE_FIELDS = 3
+  COUNTER_DIGITS = 4
+
+CON ' ---- Time ----
+
+  SEC_PER_MIN = 60
+  SEC_PER_HOUR = 3600
+  HOURS_HALF_DAY = 12
+  TENS = 10
+  FOUR_NINES = 9999
+  NO_HOURS = -1                                                 ' expectDigits(): an MM:SS clock has no hours field
+
+OBJ
+
+    color       : "isp_hub75_color"
+    display     : "isp_hub75_display"
+    hub75Bffrs  : "isp_hub75_hwBufferAccess"
+    utils       : "test_hub75_morphUtils"
+    probe       : "test_hub75_morphProbe"
+    morphStatus : "isp_hub75_morphStatus"
+    dig         : "isp_hub75_morph7seg"                         ' DIGIT_HIDDEN only
+    groupT      : "isp_hub75_morphCounters"
+    groupR      : "isp_hub75_morphCounters"
+
+DAT ' cases: counting three units (layout, hours mode, start in seconds, unit in seconds)
+
+  countCases      long    0 + groupT.LAYOUT_MM_SS, 0 + groupT.HOURS_24, 12 * 60 + 58, 1
+                  long    0 + groupT.LAYOUT_HH_MM, 0 + groupT.HOURS_24, 9 * 3600 + 58 * 60, 60
+                  long    0 + groupT.LAYOUT_HH_MM, 0 + groupT.HOURS_12, 21 * 3600 + 58 * 60, 60
+                  long    0 + groupT.LAYOUT_HH_MM_SS, 0 + groupT.HOURS_24, 7 * 3600 + 59 * 60 + 58, 1
+                  long    0 + groupT.LAYOUT_HH_MM_SS, 0 + groupT.HOURS_12, 15 * 3600 + 9 * 60 + 58, 1
+  countNames      word    @cn0, @cn1, @cn2, @cn3, @cn4
+  cn0             byte    "MM:SS 24h counts", 0
+  cn1             byte    "HH:MM 24h counts", 0
+  cn2             byte    "HH:MM 12h counts", 0
+  cn3             byte    "HH:MM:SS 24h counts", 0
+  cn4             byte    "HH:MM:SS 12h counts", 0
+
+DAT ' cases: rollovers, one unit each
+
+  stepCases       long    0 + groupT.LAYOUT_HH_MM, 0 + groupT.HOURS_12, 12 * 3600 + 59 * 60, 60
+                  long    0 + groupT.LAYOUT_HH_MM, 0 + groupT.HOURS_12, 11 * 3600 + 59 * 60, 60
+                  long    0 + groupT.LAYOUT_HH_MM, 0 + groupT.HOURS_12, 23 * 3600 + 59 * 60, 60
+                  long    0 + groupT.LAYOUT_HH_MM, 0 + groupT.HOURS_24, 23 * 3600 + 59 * 60, 60
+                  long    0 + groupT.LAYOUT_MM_SS, 0 + groupT.HOURS_24, 59 * 60 + 59, 1
+                  long    0 + groupT.LAYOUT_HH_MM_SS, 0 + groupT.HOURS_24, 23 * 3600 + 59 * 60 + 59, 1
+  stepNames       word    @sn0, @sn1, @sn2, @sn3, @sn4, @sn5
+  sn0             byte    "12h 12:59 -> 1:00", 0
+  sn1             byte    "12h 11:59 -> 12:00", 0
+  sn2             byte    "12h 23:59 -> 12:00 (midnight)", 0
+  sn3             byte    "24h 23:59 -> 00:00", 0
+  sn4             byte    "MM:SS 59:59 -> 00:00", 0
+  sn5             byte    "24h 23:59:59 -> 00:00:00", 0
+
+DAT ' cases: setTime() to each boundary (layout, hours mode, h, m, s)
+
+  setCases        long    0 + groupT.LAYOUT_HH_MM_SS, 0 + groupT.HOURS_24, 23, 59, 59
+                  long    0 + groupT.LAYOUT_HH_MM_SS, 0 + groupT.HOURS_24, 0, 0, 0
+                  long    0 + groupT.LAYOUT_HH_MM, 0 + groupT.HOURS_12, 0, 0, 0
+                  long    0 + groupT.LAYOUT_HH_MM, 0 + groupT.HOURS_12, 12, 0, 0
+                  long    0 + groupT.LAYOUT_MM_SS, 0 + groupT.HOURS_24, 0, 59, 59
+  setNames        word    @tn0, @tn1, @tn2, @tn3, @tn4
+  tn0             byte    "setTime 23:59:59 (24h)", 0
+  tn1             byte    "setTime 00:00:00 (24h)", 0
+  tn2             byte    "setTime 00:00 (12h shows 12:00)", 0
+  tn3             byte    "setTime 12:00 (12h)", 0
+  tn4             byte    "setTime 59:59 (MM:SS)", 0
+
+VAR
+
+    long    chainIndex
+    long    nowMs
+    long    expected[MAX_TEST_DIGITS]
+    long    nExpected
+
+PUB go() | caseIdx, pCase
+'' Run the values test.
+''
+
+    utils.beginSuite(@"morphValues clocks, counters, setters")
+    chainIndex := hub75Bffrs.indexForHub75ChainId(hub75Bffrs.HUB75_ADAPTER_1)
+    display.start(display.HUB75_ADAPTER_1)
+    nowMs := START_MS
+    groupT.setMoveDuration(MOVE_MS)
+    groupR.setMoveDuration(MOVE_MS)
+    groupT.setClockMode(groupT.CLOCK_ACCELERATED)
+    groupR.setClockMode(groupR.CLOCK_ACCELERATED)
+
+    repeat caseIdx from 0 to NUM_COUNT_CASES - ONE                  ' 1. counting three units
+        pCase := @countCases + caseIdx * CASE_LONGS * dig.BYTES_PER_LONG
+        countClock(@@countNames[caseIdx], LONG[pCase][C_LAYOUT], LONG[pCase][C_HOURS], LONG[pCase][C_START], LONG[pCase][C_UNIT], STEPS)
+    countCounter(@"up counter counts", groupT.GRP_UP_COUNTER, UP_START, ONE, STEPS)
+    countCounter(@"down counter counts", groupT.GRP_DOWN_COUNTER, DOWN_START, -ONE, STEPS)
+    repeat caseIdx from 0 to NUM_STEP_CASES - ONE                   ' 2. rollovers, one unit each
+        pCase := @stepCases + caseIdx * CASE_LONGS * dig.BYTES_PER_LONG
+        countClock(@@stepNames[caseIdx], LONG[pCase][C_LAYOUT], LONG[pCase][C_HOURS], LONG[pCase][C_START], LONG[pCase][C_UNIT], ONE)
+    countCounter(@"up 9999 -> 0000", groupT.GRP_UP_COUNTER, FOUR_NINES, ONE, ONE)
+    countCounter(@"down 0 -> 9999", groupT.GRP_DOWN_COUNTER, 0, -ONE, ONE)
+    repeat caseIdx from 0 to NUM_SET_CASES - ONE                    ' 3. setters to each boundary
+        pCase := @setCases + caseIdx * SET_LONGS * dig.BYTES_PER_LONG
+        checkSetTime(@@setNames[caseIdx], LONG[pCase][S_LAYOUT], LONG[pCase][S_HOURS], LONG[pCase][S_H], LONG[pCase][S_M], LONG[pCase][S_S])
+    checkSetValue(@"setValue 9999", FOUR_NINES)
+    checkSetValue(@"setValue 0", 0)
+
+    checkRefusals()
+    checkRealTime()
+    checkGrowIn()
+    display.commitScreenToPanelSet()
+    utils.finish()
+
+PRI countClock(pName, layout, hoursMode, startSeconds, unitSeconds, nSteps) | stepIdx, bAllOk
+' Place clock T at startSeconds, step it nSteps units, and check each step's digits and pixels.
+
+    placeClock(layout, hoursMode, startSeconds)
+    bAllOk := TRUE
+    repeat stepIdx from ONE to nSteps
+        groupT.nextTimeCycle()
+        settle()
+        bAllOk &= clockMatches(layout, hoursMode, (startSeconds + stepIdx * unitSeconds) // daySpan(layout))
+    utils.checkEqual(bAllOk, pName, TRUE)
+
+PRI countCounter(pName, grpType, startValue, delta, nSteps) | stepIdx, bAllOk
+' Place counter T at startValue, step it nSteps times, and check each step's digits and pixels.
+
+    placeCounter(grpType, startValue)
+    bAllOk := TRUE
+    repeat stepIdx from ONE to nSteps
+        groupT.nextTimeCycle()
+        settle()
+        bAllOk &= counterMatches((startValue + stepIdx * delta + FOUR_NINES + ONE) // (FOUR_NINES + ONE))
+    utils.checkEqual(bAllOk, pName, TRUE)
+
+PRI checkSetTime(pName, layout, hoursMode, hours, minutes, seconds) | status
+
+    placeClock(layout, hoursMode, (SEC_PER_HOUR + SEC_PER_MIN + ONE) // daySpan(layout))   ' 01:01:01 (01:01 on MM:SS): away from every boundary
+    status := groupT.setTime(hours, minutes, seconds)
+    settle()
+    utils.checkEqual(status == morphStatus.SUCCESS and clockMatches(layout, hoursMode, (hours * SEC_PER_HOUR + minutes * SEC_PER_MIN + seconds) // daySpan(layout)), pName, TRUE)
+
+PRI checkSetValue(pName, newValue) | status
+
+    placeCounter(groupT.GRP_DIGITS, SET_VALUE_START)
+    status := groupT.setValue(newValue)
+    settle()
+    utils.checkEqual(status == morphStatus.SUCCESS and counterMatches(newValue), pName, TRUE)
+
+PRI checkRefusals() | beforeSum
+
+    placeClock(groupT.LAYOUT_HH_MM_SS, groupT.HOURS_24, KEEP_HOURS * SEC_PER_HOUR)
+    beforeSum := tSum()
+    utils.checkEqual(groupT.setTime(BAD_HOURS, 0, 0), @"refuse setTime 24:00:00", morphStatus.E_VALUE_OUT_OF_RANGE)
+    utils.checkEqual(groupT.setTime(0, BAD_MINUTES, 0), @"refuse setTime 00:60:00", morphStatus.E_VALUE_OUT_OF_RANGE)
+    utils.checkEqual(groupT.setTime(0, 0, BAD_SECONDS), @"refuse setTime 00:00:60", morphStatus.E_VALUE_OUT_OF_RANGE)
+    utils.checkEqual(groupT.setTime(-ONE, 0, 0), @"refuse setTime -1:00:00", morphStatus.E_VALUE_OUT_OF_RANGE)
+    utils.checkEqual(groupT.setValue(ANY_VALUE), @"refuse setValue on a clock", morphStatus.E_WRONG_TYPE)
+    utils.checkEqual(groupT.setClockHours(BAD_SETTING), @"refuse an unknown hours setting", morphStatus.E_UNKNOWN_CLOCK_SETTING)
+    utils.checkEqual(groupT.setClockMode(BAD_SETTING), @"refuse an unknown clock mode", morphStatus.E_UNKNOWN_CLOCK_SETTING)
+    settle()
+    utils.checkEqual(tSum(), @"  ... and the clock shows what it showed", beforeSum)
+    placeCounter(groupT.GRP_DIGITS, KEEP_VALUE)
+    beforeSum := tSum()
+    utils.checkEqual(groupT.setValue(FOUR_NINES + ONE), @"refuse setValue 10000 on four digits", morphStatus.E_VALUE_OUT_OF_RANGE)
+    utils.checkEqual(groupT.setValue(-ONE), @"refuse setValue -1", morphStatus.E_VALUE_OUT_OF_RANGE)
+    utils.checkEqual(groupT.setTime(ANY_H, ANY_M, ANY_S), @"refuse setTime on a value group", morphStatus.E_WRONG_TYPE)
+    settle()
+    utils.checkEqual(tSum(), @"  ... and the value shows what it showed", beforeSum)
+    groupT.removeGroup()
+    settle()
+    utils.checkEqual(groupT.setValue(ONE), @"refuse setValue on a removed group", morphStatus.E_NOT_PLACED)
+
+PRI checkRealTime() | stampMs, tickMs, frames, settledSum
+' A real-time clock (MM:SS): three injected seconds advance it by three, and its colon dims over a second.
+' R runs in real time too, stamped at T's tick and animated on the same frame times, so both colons are at
+' the same point of their second when the pixels are compared.
+
+    groupT.setClockMode(groupT.CLOCK_REAL_TIME)
+    stampMs := nowMs + FRAME_MS                                 ' the clock stamps its seconds at its first animate: the first frame of placeClock()'s settle
+    placeClock(groupT.LAYOUT_MM_SS, groupT.HOURS_24, 0)
+    tickMs := stampMs + REAL_SECONDS * MS_PER_SECOND
+    clearR()
+    groupR.setClockMode(groupR.CLOCK_REAL_TIME)
+    groupR.placeGroup(hub75Bffrs.HUB75_ADAPTER_1, R_LEFT, BAND_TOP, AREA_WIDTH, AREA_HEIGHT, groupR.GRP_CLOCK, groupR.LAYOUT_MM_SS, groupR.ROT_0, color.cOrange, REAL_SECONDS)
+    nowMs := tickMs                                             ' T ticks three seconds as R stamps its first
+    groupT.animate(nowMs)
+    groupR.animate(nowMs)
+    frames := 0
+    repeat
+        nowMs += FRAME_MS
+        groupT.animate(nowMs)
+        groupR.animate(nowMs)
+    until (groupT.isAnimationComplete() and groupR.isAnimationComplete()) or ++frames > MAX_SETTLE_FRAMES
+    expectClockDigits(groupT.LAYOUT_MM_SS, groupT.HOURS_24, REAL_SECONDS)
+    utils.checkEqual(digitsMatch() and pixelsMatch(), @"real time: three seconds later the clock shows 00:03", TRUE)
+    settledSum := tSum()
+    animateAt(tickMs + HALF_SECOND_MS)
+    utils.checkEqual(tSum() <> settledSum, @"real time: half a second on, the colon has dimmed", TRUE)
+    groupT.setClockMode(groupT.CLOCK_ACCELERATED)
+    groupR.setClockMode(groupR.CLOCK_ACCELERATED)
+
+PRI checkGrowIn() | blankSum, midSum
+
+    display.clearScreen()
+    blankSum := tSum()
+    groupT.setClockMode(groupT.CLOCK_ACCELERATED)
+    groupT.placeGroup(hub75Bffrs.HUB75_ADAPTER_1, T_LEFT, BAND_TOP, AREA_WIDTH, AREA_HEIGHT, groupT.GRP_UP_COUNTER, groupT.LAYOUT_4_DIGITS, groupT.ROT_0, color.cOrange, GROW_VALUE)
+    animateAt(nowMs + FRAME_MS)
+    animateAt(nowMs + MOVE_MS / groupT.HALF)
+    midSum := tSum()
+    settle()
+    utils.checkEqual(midSum <> blankSum and midSum <> tSum(), @"grow-in: half way through placement the digits are partly lit", TRUE)
+
+' ---- placing and comparing ----
+
+PRI placeClock(layout, hoursMode, seconds)
+' Place clock T at seconds (accelerated unless set otherwise), and let it grow in and rest.
+
+    display.clearScreen()
+    groupT.setClockHours(hoursMode)
+    groupT.placeGroup(hub75Bffrs.HUB75_ADAPTER_1, T_LEFT, BAND_TOP, AREA_WIDTH, AREA_HEIGHT, groupT.GRP_CLOCK, layout, groupT.ROT_0, color.cOrange, seconds)
+    settle()
+
+PRI placeCounter(grpType, value)
+
+    display.clearScreen()
+    groupT.placeGroup(hub75Bffrs.HUB75_ADAPTER_1, T_LEFT, BAND_TOP, AREA_WIDTH, AREA_HEIGHT, grpType, groupT.LAYOUT_4_DIGITS, groupT.ROT_0, color.cOrange, value)
+    settle()
+
+PRI clockMatches(layout, hoursMode, seconds) : bMatch
+' T shows seconds: its digits as worked out here, and its pixels as a fresh reference placement.
+
+    expectClockDigits(layout, hoursMode, seconds)
+    bMatch := digitsMatch()
+    clearR()
+    groupR.setClockHours(hoursMode)
+    groupR.placeGroup(hub75Bffrs.HUB75_ADAPTER_1, R_LEFT, BAND_TOP, AREA_WIDTH, AREA_HEIGHT, groupR.GRP_CLOCK, layout, groupR.ROT_0, color.cOrange, seconds)
+    settleR()
+    bMatch &= pixelsMatch()
+
+PRI counterMatches(value) : bMatch
+
+    expectCounterDigits(value)
+    bMatch := digitsMatch()
+    clearR()
+    groupR.placeGroup(hub75Bffrs.HUB75_ADAPTER_1, R_LEFT, BAND_TOP, AREA_WIDTH, AREA_HEIGHT, groupR.GRP_DIGITS, groupR.LAYOUT_4_DIGITS, groupR.ROT_0, color.cOrange, value)
+    settleR()
+    bMatch &= pixelsMatch()
+
+PRI digitsMatch() : bMatch | idx
+
+    bMatch := TRUE
+    repeat idx from 0 to nExpected - ONE
+        if groupT.digitValueAt(idx) <> expected[idx]
+            bMatch := FALSE
+            debug("DIGITS   digit ", udec_(idx), " shows ", sdec_(groupT.digitValueAt(idx)), " expected ", sdec_(expected[idx]))
+
+PRI pixelsMatch() : bMatch
+
+    bMatch := tSum() == rSum()
+    if not bMatch
+        debug("PIXELS   T and R differ")
+
+PRI expectClockDigits(layout, hoursMode, seconds) | hours, minutes, secs, fieldIdx, fields[MAX_FIELDS], nFields
+' The digits the spec says a clock shows (R-3.3, R-3.4), worked out independently of the library.
+
+#IFDEF MORPH_BREAK_VALUES
+    seconds += (layout == groupT.LAYOUT_HH_MM) ? SEC_PER_MIN : ONE  ' one unit of the smallest field shown
+#ENDIF
+    hours := seconds / SEC_PER_HOUR
+    minutes := (seconds / SEC_PER_MIN) // SEC_PER_MIN
+    secs := seconds // SEC_PER_MIN
+    if hoursMode == groupT.HOURS_12
+        hours := hours // HOURS_HALF_DAY
+        if hours == 0
+            hours := HOURS_HALF_DAY
+    case layout
+        groupT.LAYOUT_MM_SS:
+            fields[0], fields[ONE], nFields := minutes, secs, TWO_FIELDS
+            hours := NO_HOURS
+        groupT.LAYOUT_HH_MM:
+            fields[0], fields[ONE], nFields := hours, minutes, TWO_FIELDS
+        groupT.LAYOUT_HH_MM_SS:
+            fields[0], fields[ONE], fields[TWO_FIELDS], nFields := hours, minutes, secs, THREE_FIELDS
+    nExpected := 0
+    repeat fieldIdx from 0 to nFields - ONE
+        expected[nExpected++] := fields[fieldIdx] / TENS
+        expected[nExpected++] := fields[fieldIdx] // TENS
+    if hours <> NO_HOURS and hoursMode == groupT.HOURS_12 and expected[0] == 0
+        expected[0] := dig.DIGIT_HIDDEN                         ' 12-hour: 1:00, not 01:00
+
+PRI expectCounterDigits(value) | idx
+
+#IFDEF MORPH_BREAK_VALUES
+    value += ONE
+#ENDIF
+    nExpected := COUNTER_DIGITS
+    repeat idx from nExpected - ONE to 0
+        expected[idx] := value // TENS
+        value /= TENS
+
+PRI daySpan(layout) : span
+
+    span := (layout == groupT.LAYOUT_MM_SS) ? SEC_PER_HOUR : groupT.HOURS_PER_DAY * SEC_PER_HOUR
+
+PRI settle() | frames
+' Animate T until its moves end.
+
+    frames := 0
+    repeat
+        animateAt(nowMs + FRAME_MS)
+    until groupT.isAnimationComplete() or ++frames > MAX_SETTLE_FRAMES
+
+PRI clearR() | frames
+' Remove reference R and let it morph out, so a fresh R starts on a dark area (no pixels left from the last R).
+
+    if groupR.removeGroup() == morphStatus.SUCCESS
+        frames := 0
+        repeat while groupR.isPlaced() and frames++ < MAX_SETTLE_FRAMES
+            nowMs += FRAME_MS
+            groupR.animate(nowMs)
+
+PRI settleR() | frames
+
+    frames := 0
+    repeat
+        nowMs += FRAME_MS
+        groupR.animate(nowMs)
+    until groupR.isAnimationComplete() or ++frames > MAX_SETTLE_FRAMES
+
+PRI animateAt(atMs)
+
+    nowMs := atMs
+    groupT.animate(nowMs)
+
+PRI tSum() : sum
+
+    sum := probe.areaChecksum(chainIndex, T_LEFT, BAND_TOP, AREA_WIDTH, AREA_HEIGHT)
+
+PRI rSum() : sum
+
+    sum := probe.areaChecksum(chainIndex, R_LEFT, BAND_TOP, AREA_WIDTH, AREA_HEIGHT)
+
+CON ' ---- License ----
+
+{{
+
+ -------------------------------------------------------------------------------------------------
+  MIT License
+
+  Copyright (c) 2021 Iron Sheep Productions, LLC
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+ =================================================================================================
+}}

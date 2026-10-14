@@ -43,6 +43,10 @@ CON ' public control values
     WITHOUT_WRAP = FALSE
     MAX_SEGMENTS = 7
     LAST_SEGMENT = MAX_SEGMENTS - 1     ' index of the last segment slot (segments[] runs from 0)
+    SLOT_COLON_UPPER = MAX_SEGMENTS     ' a clock digit also draws the colon after it: two square dots (setColon())
+    SLOT_COLON_LOWER = MAX_SEGMENTS + 1
+    MAX_SLOTS = MAX_SEGMENTS + 2        ' every slot drawBlock() composites
+    LAST_SLOT = MAX_SLOTS - 1
 
 CON ' drawing
 
@@ -59,9 +63,9 @@ CON ' drawing
     XFORM_LONGS = XF_V_PER_Y + 1
 
     ' one slot's entry in slotTable (longs): what drawBlock() reads for it
-    #0, F_MODE, F_BOX_U0, F_BOX_U1, F_BOX_V0, F_BOX_V1, F_U0, F_V0, F_VERTICAL, F_OFFSET, F_LIT
-    SLOT_LONGS = F_LIT + 1
-    SLOT_TABLE_LONGS = SLOT_LONGS * MAX_SEGMENTS
+    #0, F_MODE, F_BOX_U0, F_BOX_U1, F_BOX_V0, F_BOX_V1, F_U0, F_V0, F_VERTICAL, F_OFFSET, F_LIT, F_LEVEL
+    SLOT_LONGS = F_LEVEL + 1
+    SLOT_TABLE_LONGS = SLOT_LONGS * MAX_SLOTS
     MAX_SEGMENT_LENGTH = 128            ' the longest segment (mask columns) a digit can draw
     SUBPIXEL_SHIFT = 8                  ' positions are in 1/256 pixel (morphSegment.SUBPIXELS)
     SUBPIXEL_MASK = segments.SUBPIXELS - 1
@@ -86,7 +90,7 @@ DAT ' shared drawing tables: one cog draws, one digit at a time, so one copy ser
 
     slotTable       long    0[SLOT_TABLE_LONGS]                 ' this frame's state of every slot, for drawBlock() (F_ fields) ...
     xformTable      long    0[XFORM_LONGS]                      ' ... then the digit's steps (XF_ fields): read with it in one block
-    litTable        byte    0[MAX_SEGMENTS * MAX_SEGMENT_LENGTH]    ' this frame's snake lit shares, per slot and mask column
+    litTable        byte    0[MAX_SEGMENTS * MAX_SEGMENT_LENGTH]    ' this frame's snake lit shares, per segment slot and mask column
 
 VAR ' per digit
     long    chainIndex
@@ -100,6 +104,13 @@ VAR ' per digit
     long    pMask               ' the group's coverage mask: segRows x segCols bytes
     long    pRamp               ' the group's intensity ramp: 256 packed colors
     long    bNeedsRender        ' TRUE from a command until the moves it started have been drawn to their end
+    long    bColon              ' TRUE when this digit draws a colon after it (setColon())
+    long    colonLeftU          ' the colon's dots: left column, side, and the two dots' top rows (digit-local)
+    long    colonDotSize
+    long    colonUpperV
+    long    colonLowerV
+    long    colonLevel          ' the dots' level now (0-255, through the ramp), and the level drawn last
+    long    drawnColonLevel
     long    cellRows            ' one cell's (panel's) size as mounted: blocks never cross a cell
     long    cellColumns
 
@@ -219,6 +230,8 @@ PUB placeDigit(row, column, segLength, thickness, digitValue, pSegMask, pColorRa
         drawnMode[segmentIndex] := segments.MODE_NONE
     currValue := DIGIT_NO_VALUE
     bNeedsRender := FALSE
+    bColon := FALSE
+    colonLevel := drawnColonLevel := 0
     if digitValue <> DIGIT_HIDDEN
         reconfigureForDigit(digitValue)
 
@@ -316,6 +329,39 @@ PUB morphOut() | segmentIndex
     currValue := DIGIT_HIDDEN
     bNeedsRender := TRUE
 
+PUB value() : digitValue
+'' The digit this digit shows, or is morphing to: 0-9, DIGIT_HIDDEN, or DIGIT_NO_VALUE before its first value.
+''
+'' @returns digitValue - the digit's value
+
+    digitValue := currValue
+
+PUB setColon(leftU, dotSide, upperV, lowerV)
+'' Draw a colon after this digit: two square dots (digit-local), lit fully until setColonLevel() changes it.
+''
+'' @param leftU - the dots' left column, digit-local (past the digit's right edge)
+'' @param dotSide - each dot's side, in pixels
+'' @param upperV - the upper dot's top row, digit-local
+'' @param lowerV - the lower dot's top row, digit-local
+
+    bColon := TRUE
+    colonLeftU := leftU
+    colonDotSize := dotSide
+    colonUpperV := upperV
+    colonLowerV := lowerV
+    colonLevel := LEVEL_FULL
+    drawnColonLevel := 0
+    bNeedsRender := TRUE
+
+PUB setColonLevel(level)
+'' Light the colon at a level: 0 (dark) to LEVEL_FULL (the group's color), through the group's ramp.
+''
+'' @param level - 0 to LEVEL_FULL
+
+    if bColon and level <> colonLevel
+        colonLevel := level
+        bNeedsRender := TRUE
+
 PUB setContext(pGroupContext)
 '' Draw through a group's context: its transform and its clip rectangle (CTX_ fields), taken at the next
 '' placeDigit(). The group owns the block and fills it before placing its digits.
@@ -345,6 +391,8 @@ PRI drawChanges() | slot, mode, head, tail, bFromEnd, bOn, offset, colLo, colHi,
     ' and this digit's steps for drawBlock(): the inverse of a rotation is its transpose
     repeat slot from 0 to LAST_SEGMENT
         segStateLoad(slot)
+    colonStateLoad(SLOT_COLON_UPPER, colonUpperV)
+    colonStateLoad(SLOT_COLON_LOWER, colonLowerV)
     xformTable[XF_U_PER_X] := coefXX
     xformTable[XF_V_PER_X] := coefXY
     xformTable[XF_U_PER_Y] := coefYX
@@ -373,6 +421,10 @@ PRI drawChanges() | slot, mode, head, tail, bFromEnd, bOn, offset, colLo, colHi,
         drawnFromEnd[slot] := bFromEnd
         drawnOn[slot] := bOn
         drawnOffset[slot] := offset
+    if bColon and colonLevel <> drawnColonLevel                         ' the colon's level changed: redraw its dots
+        drawLocalRect(colonBox(colonUpperV))
+        drawLocalRect(colonBox(colonLowerV))
+        drawnColonLevel := colonLevel
 
 DAT ' this frame's state per slot, for the pixel loop (the digits draw one at a time, so one copy serves all)
 
@@ -382,6 +434,26 @@ DAT ' this frame's state per slot, for the pixel loop (the digits draw one at a 
     frameFromEnd    long    0[MAX_SEGMENTS]
     frameOn         long    0[MAX_SEGMENTS]
     frameOffset     long    0[MAX_SEGMENTS]
+
+PRI colonStateLoad(slot, topV) | pEntry
+' Load one colon dot's slotTable entry: a square box at the colon's level, or nothing (no colon, or level 0).
+
+' Local Variables:
+' @local pEntry - the slot's slotTable entry
+
+    pEntry := @slotTable + slot * SLOT_LONGS * BYTES_PER_LONG
+    if bColon and colonLevel > 0
+        LONG[pEntry][F_MODE] := segments.MODE_LEVEL
+        LONG[pEntry][F_BOX_U0], LONG[pEntry][F_BOX_V0], LONG[pEntry][F_BOX_U1], LONG[pEntry][F_BOX_V1] := colonBox(topV)
+        LONG[pEntry][F_LEVEL] := colonLevel
+    else
+        LONG[pEntry][F_MODE] := segments.MODE_NONE              ' the shared table may hold the last colon digit's dot
+
+PRI colonBox(topV) : leftU, boxTopV, rightU, bottomV
+' One colon dot's box, digit-local: the dot whose top row is topV.
+
+    leftU, boxTopV := colonLeftU, topV
+    rightU, bottomV := colonLeftU + colonDotSize - NEXT_ONE, topV + colonDotSize - NEXT_ONE
 
 PRI segStateLoad(slot) | pEntry
 ' Load one slot's state for this frame into the frame arrays and its slotTable entry, with its bounding box
@@ -401,6 +473,7 @@ PRI segStateLoad(slot) | pEntry
     LONG[pEntry][F_VERTICAL] := segVertical[slot]
     LONG[pEntry][F_OFFSET] := frameOffset[slot]
     LONG[pEntry][F_LIT] := @litTable + slot * MAX_SEGMENT_LENGTH
+    LONG[pEntry][F_LEVEL] := 0
 
 PRI stateBox(slot, mode, offset) : leftU, topV, rightU, bottomV
 ' A slot's box (local, inclusive) in this mode: a slide's column moved sideways by offset (1/256 pixel), any
@@ -525,7 +598,7 @@ PRI drawBlock(pPixel, rightStep, downStep, firstU, firstV, nColumns, nRows) | pS
                 mov     localV, firstV
                 mov     nActive, #0                             ' the slots that can cover this row
                 mov     slotBase, #0
-                mov     slotsLeft, #MAX_SEGMENTS
+                mov     slotsLeft, #MAX_SLOTS
 .scan
                 alts    slotBase, #slots + F_MODE
                 mov     t1, 0-0                 wz
@@ -596,6 +669,10 @@ PRI drawBlock(pPixel, rightStep, downStep, firstU, firstV, nColumns, nRows) | pS
     if_nz       mov     along, dv
                 alts    slotBase, #slots + F_MODE
                 mov     mode, 0-0
+                cmp     mode, #segments.MODE_LEVEL  wz
+    if_z        alts    slotBase, #slots + F_LEVEL              ' a colon dot: its level, uniform over its box
+    if_z        mov     level, 0-0
+    if_z        jmp     #.add
                 cmp     mode, #segments.MODE_SLIDE  wz
     if_z        jmp     #.slide
                 mov     t1, across                              ' full or snake: the mask byte
@@ -680,7 +757,7 @@ stepUx          long    0                                       ' xformTable, lo
 stepVx          long    0
 stepUy          long    0
 stepVy          long    0
-active          long    0[MAX_SEGMENTS]
+active          long    0[MAX_SLOTS]
 nActive         long    0
 slotBase        long    0
 slotsLeft       long    0
@@ -755,12 +832,16 @@ PRI rampIntegral(position) : area
         area := position - SHARE_HALF
 
 PRI turnOnDigit(digit) | toSegments, bitIndex
-' Show a digit from blank: each of its segments turns on at once (the first value a digit shows).
+' Show a digit from blank: each of its segments grows in (spec R-5.6), horizontals left to right, verticals
+' top down, through the normal motion.
 
     toSegments := byte[@segmentsByDigit][digit]
     repeat bitIndex from LAST_SEGMENT to 0
         if toSegments & (NEXT_ONE << bitIndex)
-            segments[bitIndex].commandSegment(segments.CMD_TURN_ON + segments.CMD_IMMEDIATE)
+            if segVertical[bitIndex]
+                segments[bitIndex].commandSegment(segments.CMD_TURN_ON + segments.CMD_TOP_DOWN)
+            else
+                segments[bitIndex].commandSegment(segments.CMD_TURN_ON + segments.CMD_LT_TO_RT)
     bNeedsRender := TRUE
 
 PRI reconfigureForDigit(digitValue) | pLtTable, pRtTable, actionIndex, segmentIndex, nextAction
@@ -768,9 +849,7 @@ PRI reconfigureForDigit(digitValue) | pLtTable, pRtTable, actionIndex, segmentIn
 
     if currValue <> digitValue
         if digitValue == DIGIT_HIDDEN
-            repeat segmentIndex from 0 to LAST_SEGMENT
-                segments[segmentIndex].commandSegment(segments.CMD_TURN_OFF + segments.CMD_IMMEDIATE)
-            bNeedsRender := TRUE
+            morphOut()
         elseif currValue < 0
             turnOnDigit(digitValue)
         else

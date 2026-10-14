@@ -41,7 +41,7 @@ CON ' ---- Values and areas ----
   AREA_FIELDS = AREA_HEIGHT_IDX + 1
   BYTES_PER_LONG = 4
 
-  CLOCK_VALUE = 20 * 60 + 8                                     ' 20:08: its lit pixels fill the group's box (see above)
+  CLOCK_VALUE = 20 * 3600 + 8 * 60                              ' 20:08 (seconds): its lit pixels fill the group's box (see above)
   NUM_SIZES = 4
   BAD_ADAPTER = 99
   BAD_TYPE = 99
@@ -186,9 +186,10 @@ PRI checkRefusals() | beforeSum
     refuse(@"refuse a clock with a digits layout", hub75Bffrs.HUB75_ADAPTER_1, 0, REFUSE_TOP, REFUSE_WIDTH, REFUSE_HEIGHT, groupA.GRP_CLOCK, groupA.LAYOUT_4_DIGITS, 0, morphStatus.E_UNKNOWN_LAYOUT)
     refuse(@"refuse a counter with a clock layout", hub75Bffrs.HUB75_ADAPTER_1, 0, REFUSE_TOP, REFUSE_WIDTH, REFUSE_HEIGHT, groupA.GRP_UP_COUNTER, groupA.LAYOUT_HH_MM, 0, morphStatus.E_UNKNOWN_LAYOUT)
     refuse(@"refuse 10000 on four digits", hub75Bffrs.HUB75_ADAPTER_1, 0, REFUSE_TOP, REFUSE_WIDTH, REFUSE_HEIGHT, groupA.GRP_UP_COUNTER, groupA.LAYOUT_4_DIGITS, FOUR_DIGITS + ONE, morphStatus.E_VALUE_OUT_OF_RANGE)
-    refuse(@"refuse 24:00 on a clock", hub75Bffrs.HUB75_ADAPTER_1, 0, REFUSE_TOP, REFUSE_WIDTH, REFUSE_HEIGHT, groupA.GRP_CLOCK, groupA.LAYOUT_HH_MM, groupA.MAX_CLOCK_MINUTES + ONE, morphStatus.E_VALUE_OUT_OF_RANGE)
-    frame()
+    refuse(@"refuse 24:00:00 on a clock", hub75Bffrs.HUB75_ADAPTER_1, 0, REFUSE_TOP, REFUSE_WIDTH, REFUSE_HEIGHT, groupA.GRP_CLOCK, groupA.LAYOUT_HH_MM, groupA.MAX_DAY_SECONDS + ONE, morphStatus.E_VALUE_OUT_OF_RANGE)
+    redraw()                                                    ' the same time: a real-time clock's colon must not pulse between the sums
     utils.checkEqual(screenSum(), @"  ... the refused calls drew nothing and moved nothing", beforeSum)
+    frame()
     utils.checkEqual(groupA.isPlaced(), @"  ... and the group is still placed", TRUE)
     utils.checkEqual(groupC.removeGroup(), @"removeGroup refuses a group that is not placed", morphStatus.E_NOT_PLACED)
     removeWaitA()
@@ -220,7 +221,7 @@ PRI checkOverlap() | status, sumB, overlapLeft
     status, _, _ := groupC.placeGroup(hub75Bffrs.HUB75_ADAPTER_1, OVERLAP_LEFT, OVERLAP_TOP, OVERLAP_WIDTH, OVERLAP_HEIGHT, groupC.GRP_UP_COUNTER, groupC.LAYOUT_2_DIGITS, groupC.ROT_0, color.cTeal, C_VALUE)
     utils.checkEqual(status, @"group C in A's area while A is placed is refused", morphStatus.E_AREA_OVERLAP)
     utils.checkEqual(groupA.removeGroup(), @"removeGroup starts A's morph-out", morphStatus.SUCCESS)
-    frame()
+    oneFrame()                                                  ' one frame: A is mid morph-out
     status, _, _ := groupC.placeGroup(hub75Bffrs.HUB75_ADAPTER_1, OVERLAP_LEFT, OVERLAP_TOP, OVERLAP_WIDTH, OVERLAP_HEIGHT, groupC.GRP_UP_COUNTER, groupC.LAYOUT_2_DIGITS, groupC.ROT_0, color.cTeal, C_VALUE)
     utils.checkEqual(status, @"  ... C is still refused while A morphs out", morphStatus.E_AREA_OVERLAP)
     waitRemovedA()
@@ -242,29 +243,45 @@ PRI removeWaitB() | steps
     groupB.removeGroup()
     steps := 0
     repeat while groupB.isPlaced() and steps++ < MAX_REMOVE_STEPS
-        frame()
+        oneFrame()
 
 PRI removeWaitC() | steps
 
     groupC.removeGroup()
     steps := 0
     repeat while groupC.isPlaced() and steps++ < MAX_REMOVE_STEPS
-        frame()
+        oneFrame()
 
 PRI waitRemovedA() | steps
 ' Animate until group A's morph-out completes (or MAX_REMOVE_STEPS frames; the check after it reports which).
 
     steps := 0
     repeat while groupA.isPlaced() and steps++ < MAX_REMOVE_STEPS
-        frame()
+        oneFrame()
 
-PRI frame()
+PRI oneFrame()
 ' Draw every group once at the next frame time.
 
     nowMs += STEP_MS
+    redraw()
+
+PRI redraw()
+' Draw every group at the current frame time (time does not advance).
+
     groupA.animate(nowMs)
     groupB.animate(nowMs)
     groupC.animate(nowMs)
+
+PRI frame() | steps
+' Draw every group at the next frame times until every move has ended (placement grows the digits in).
+
+    steps := 0
+    repeat
+        nowMs += STEP_MS
+        groupA.animate(nowMs)
+        groupB.animate(nowMs)
+        groupC.animate(nowMs)
+    until (groupA.isAnimationComplete() and groupB.isAnimationComplete() and groupC.isAnimationComplete()) or ++steps > MAX_REMOVE_STEPS
 
 PRI areaSum(left, top, width, height) : sum
 

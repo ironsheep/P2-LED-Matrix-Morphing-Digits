@@ -108,7 +108,7 @@ CON ' ---- Measurement settings ----
   DOWNCTR_AREA_HEIGHT = 33
   RANDOM_AREA_WIDTH = 50
   RANDOM_AREA_HEIGHT = 21
-  CLOCK_RT_START = 12 * 60
+  CLOCK_RT_START = 12 * 60 * 60                                 ' noon, in seconds
   DOWNCTR_START = 204
   RANDOM_START = 5436
   CLOCK_STEP_INTERVALS = CLOCK_SEG_LENGTH - 1                   ' a snake of N pixels moves in N steps, N - 1 intervals
@@ -283,6 +283,7 @@ PRI placeGroups(maxPhysicalRows, maxPhysicalCols) | ctrIdx
 
     repeat ctrIdx from 0 to LAST_COUNTER
         counters[ctrIdx].setThickness(SEG_THICKNESS)
+        counters[ctrIdx].setClockMode(counters.CLOCK_ACCELERATED)
 
     display.setTextFont(display.TEXT_FONT_5X7)
     display.setCursor(TEXT_ROW, TEXT_COLUMN)
@@ -295,7 +296,7 @@ PRI placeGroups(maxPhysicalRows, maxPhysicalCols) | ctrIdx
     if maxPhysicalRows > FULL_HEIGHT_ROWS
         counters[GRP_DOWNCTR_2DIG].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, DOWNCTR_COLUMN, DOWNCTR_ROW, DOWNCTR_AREA_WIDTH, DOWNCTR_AREA_HEIGHT, counters.GRP_DOWN_COUNTER, counters.LAYOUT_3_DIGITS, counters.ROT_0, color.cTeal, DOWNCTR_START)
     if maxPhysicalCols > FULL_WIDTH_COLUMNS && maxPhysicalRows > FULL_HEIGHT_ROWS
-        counters[GRP_CTR_6DIG_RAND].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, RANDOM_COLUMN, RANDOM_ROW, RANDOM_AREA_WIDTH, RANDOM_AREA_HEIGHT, counters.GRP_DIGITS_RANDOM, counters.LAYOUT_4_DIGITS, counters.ROT_0, color.cRed, RANDOM_START)
+        counters[GRP_CTR_6DIG_RAND].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, RANDOM_COLUMN, RANDOM_ROW, RANDOM_AREA_WIDTH, RANDOM_AREA_HEIGHT, counters.GRP_DIGITS, counters.LAYOUT_4_DIGITS, counters.ROT_0, color.cRed, RANDOM_START)
 
     ' the demo's pacing, so the frame-rate item runs the demo's loop as the demo runs it
     counters[GRP_CLOCK_LT].setMoveDuration(CLOCK_MOVE_MS)

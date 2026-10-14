@@ -13,8 +13,8 @@
 { Task 166: proves the renderer (isp_hub75_morph7seg drawing, isp_hub75_morphSegment motion) on the quad.
 
   The probe is the screen buffer: a checksum of every byte of the digit's area, read back through
-  screenUtils.pixelAddressAtRC(). "At rest" is the digit placed fresh with a value: its segments turn on
-  at once, with no motion. Every transition must end on exactly those pixels (spec R-5.7).
+  screenUtils.pixelAddressAtRC(). "At rest" is the digit placed fresh with a value: its segments snake on
+  as it grows in, then rests. Every transition must end on exactly those pixels (spec R-5.7).
 
   Sections:
     1. per configuration (thin edge profile, thick angled tail profile, thick tube with a tail longer
@@ -310,7 +310,8 @@ PRI placeAt(row, column, value)
     clearArea(row, column)
     digit.placeDigit(row, column, segLength, thickness, value, @mask, @ramp, tailX256)
     digit.setMotion(MOVE_MS, 0)
-    frame(0)
+    frame(0)                                                    ' the digit grows in (spec R-5.6) ...
+    frame(MOVE_MS)                                              ' ... and rests
 
 PRI frame(advanceMs)
 ' Advance the injected time and animate the digit once.

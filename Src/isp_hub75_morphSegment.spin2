@@ -67,7 +67,8 @@ CON ' what the digit draws for this segment this frame (renderState())
   ' MODE_FULL  - the whole mask: the segment is on and still
   ' MODE_SNAKE - the mask times the snake's lit share per column (head, tail, from which end, on or off)
   ' MODE_SLIDE - the whole mask, moved sideways by the slide offset
-  #0, MODE_NONE, MODE_FULL, MODE_SNAKE, MODE_SLIDE
+  ' MODE_LEVEL - a box lit at one level: the digit's colon dots, never a segment's state
+  #0, MODE_NONE, MODE_FULL, MODE_SNAKE, MODE_SLIDE, MODE_LEVEL
 
 CON ' time-based motion: integer fixed point, no floats per frame
 
