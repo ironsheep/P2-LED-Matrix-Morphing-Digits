@@ -48,6 +48,7 @@ CON ' status codes (a new code takes the next unused negative value; a value is 
   E_NOT_PLACED = -20                                            ' a call that needs a placed group, on one that is not placed
   E_UNKNOWN_CLOCK_SETTING = -21                                 ' a clock setting that is not one of isp_hub75_morphCounters' HOURS_ or CLOCK_ values
   E_WRONG_TYPE = -22                                            ' a call that does not apply to the group's type (setTime() on a counter, setValue() on a clock)
+  E_ALREADY_PLACED = -23                                        ' a placeGroup() on a group that is placed (or still morphing out): removeGroup() it first
 
 PUB null()
 '' This is not a top level object

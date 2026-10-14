@@ -198,8 +198,8 @@ PUB versionString() : pVersion
 
 PUB placeGroup(adapter, areaLeft, areaTop, areaWidth, areaHeight, grpType, layout, groupRotation, rgbColor, initialValue) : status, usedWidth, usedHeight | chain, rows, columns, segLength, thickness, groupWidth, groupHeight, slot, digitIdx, colonIdx, maxValue, tail
 '' Place this group in an area of an adapter's display: it takes the largest digits that fit the area (turned),
-'' centres itself in it and starts showing initialValue. Placing a group that is already placed moves it (its
-'' old pixels are not erased: removeGroup() morphs them out). A refused call changes nothing.
+'' centres itself in it and starts showing initialValue. A group that is placed (or still morphing out) is refused:
+'' to move it, removeGroup() it and animate until isPlaced() is FALSE, then place it again. A refused call changes nothing.
 ''
 '' @param adapter - the display: hub75Bffrs.HUB75_ADAPTER_1, _2 or _3 (one started with display.start())
 '' @param areaLeft, areaTop - the area's top-left pixel on that display, as mounted
@@ -210,7 +210,7 @@ PUB placeGroup(adapter, areaLeft, areaTop, areaWidth, areaHeight, grpType, layou
 '' @param rgbColor - the group's color, $RRGGBB
 '' @param initialValue - counters and values: 0 to 10^digits - 1; a clock: seconds, 0 to MAX_DAY_SECONDS (MAX_HOUR_SECONDS for MM_SS)
 '' @returns status - morphStatus.SUCCESS, or E_UNKNOWN_ADAPTER, E_BAD_AREA, E_UNKNOWN_TYPE, E_UNKNOWN_LAYOUT,
-''   E_UNKNOWN_ROTATION, E_VALUE_OUT_OF_RANGE, E_AREA_TOO_SMALL, E_AREA_OVERLAP or E_TOO_MANY_GROUPS
+''   E_UNKNOWN_ROTATION, E_VALUE_OUT_OF_RANGE, E_AREA_TOO_SMALL, E_AREA_OVERLAP, E_TOO_MANY_GROUPS or E_ALREADY_PLACED
 '' @returns usedWidth, usedHeight - the size the group uses on the display (0, 0 when refused)
 
 ' Local Variables:
@@ -249,6 +249,8 @@ PUB placeGroup(adapter, areaLeft, areaTop, areaWidth, areaHeight, grpType, layou
             segLength, thickness, groupWidth, groupHeight := fitDigits(layout, groupRotation, areaWidth, areaHeight)
             if segLength == 0
                 status := morphStatus.E_AREA_TOO_SMALL
+            elseif bPlaced                                          ' after the argument checks, so a bad argument reports its own code
+                status := morphStatus.E_ALREADY_PLACED
             else
                 status, slot := claimArea(chain, areaLeft, areaTop, areaLeft + areaWidth - NEXT_PIXEL, areaTop + areaHeight - NEXT_PIXEL)
 
@@ -268,7 +270,7 @@ PUB placeGroup(adapter, areaLeft, areaTop, areaWidth, areaHeight, grpType, layou
         if not bMaskBuilt or maskThickness <> thickness or maskLength <> segLength or maskEnd <> endStyle or maskSection <> crossSection
             morphMask.buildMask(@mask, MAX_MASK_BYTES, thickness, segLength << digits.SUBPIXEL_SHIFT, endStyle, crossSection)
             maskThickness, maskLength, maskEnd, maskSection := thickness, segLength, endStyle, crossSection
-            bMaskBuilt := TRUE                                      ' a group placed again at the same shape keeps its mask
+            bMaskBuilt := TRUE                                      ' a group placed again (after removeGroup()) at the same shape keeps its mask
         if not bRampBuilt or rampChain <> chain or rampColor <> rgbColor
             morphColor.buildRamp(@ramp, chain, rgbColor)
             rampChain, rampColor := chain, rgbColor
@@ -701,19 +703,19 @@ PRI turnedSize(groupWidth, groupHeight) : width, height
         height := groupWidth
 
 PRI claimArea(chain, left, top, right, bottom) : status, slot | idx, pEntry
-' Find this group a free areaTable entry (its own, when it is already placed) after checking the area against
+' Find this group a free areaTable entry after checking the area against
 ' every other placed area on the same display: sharing a pixel is refused; touching is allowed (spec R-8.5).
 ' Writes the entry only when the claim succeeds.
 
     status := morphStatus.SUCCESS
-    slot := bPlaced ? areaSlot : NO_SLOT
+    slot := NO_SLOT
     repeat idx from 0 to MAX_GROUPS - NEXT_PIXEL
         pEntry := @areaTable + idx * AREA_LONGS * digits.BYTES_PER_LONG
-        if LONG[pEntry][AREA_IN_USE] and not (bPlaced and idx == areaSlot)
+        if LONG[pEntry][AREA_IN_USE]
             if LONG[pEntry][AREA_CHAIN] == chain and left <= LONG[pEntry][AREA_RIGHT] and right >= LONG[pEntry][AREA_LEFT] and top <= LONG[pEntry][AREA_BOTTOM] and bottom >= LONG[pEntry][AREA_TOP]
                 debug("mG: area (", sdec_(left), ",", sdec_(top), ")-(", sdec_(right), ",", sdec_(bottom), ") overlaps placed area (", sdec_(LONG[pEntry][AREA_LEFT]), ",", sdec_(LONG[pEntry][AREA_TOP]), ")-(", sdec_(LONG[pEntry][AREA_RIGHT]), ",", sdec_(LONG[pEntry][AREA_BOTTOM]), ")")
                 status := morphStatus.E_AREA_OVERLAP
-        elseif not LONG[pEntry][AREA_IN_USE] and slot < 0
+        elseif slot < 0
             slot := idx
     if status == morphStatus.SUCCESS and slot < 0
         status := morphStatus.E_TOO_MANY_GROUPS

@@ -257,6 +257,7 @@ PRI checkRealTime() | stampMs, tickMs, frames, settledSum
 ' the same point of their second when the pixels are compared.
 
     groupT.setClockMode(groupT.CLOCK_REAL_TIME)
+    clearT()                                                    ' before the stamp: placeClock() then has nothing to remove
     stampMs := nowMs + FRAME_MS                                 ' the clock stamps its seconds at its first animate: the first frame of placeClock()'s settle
     placeClock(groupT.LAYOUT_MM_SS, groupT.HOURS_24, 0)
     tickMs := stampMs + REAL_SECONDS * MS_PER_SECOND
@@ -282,6 +283,7 @@ PRI checkRealTime() | stampMs, tickMs, frames, settledSum
 
 PRI checkGrowIn() | blankSum, midSum
 
+    clearT()
     display.clearScreen()
     blankSum := tSum()
     groupT.setClockMode(groupT.CLOCK_ACCELERATED)
@@ -297,6 +299,7 @@ PRI checkGrowIn() | blankSum, midSum
 PRI placeClock(layout, hoursMode, seconds)
 ' Place clock T at seconds (accelerated unless set otherwise), and let it grow in and rest.
 
+    clearT()
     display.clearScreen()
     groupT.setClockHours(hoursMode)
     groupT.placeGroup(hub75Bffrs.HUB75_ADAPTER_1, T_LEFT, BAND_TOP, AREA_WIDTH, AREA_HEIGHT, groupT.GRP_CLOCK, layout, groupT.ROT_0, color.cOrange, seconds)
@@ -304,6 +307,7 @@ PRI placeClock(layout, hoursMode, seconds)
 
 PRI placeCounter(grpType, value)
 
+    clearT()
     display.clearScreen()
     groupT.placeGroup(hub75Bffrs.HUB75_ADAPTER_1, T_LEFT, BAND_TOP, AREA_WIDTH, AREA_HEIGHT, grpType, groupT.LAYOUT_4_DIGITS, groupT.ROT_0, color.cOrange, value)
     settle()
@@ -391,6 +395,14 @@ PRI settle() | frames
     repeat
         animateAt(nowMs + FRAME_MS)
     until groupT.isAnimationComplete() or ++frames > MAX_SETTLE_FRAMES
+
+PRI clearT() | frames
+' Remove T and let it morph out: a placed group refuses placeGroup() (E_ALREADY_PLACED).
+
+    if groupT.removeGroup() == morphStatus.SUCCESS
+        frames := 0
+        repeat while groupT.isPlaced() and frames++ < MAX_SETTLE_FRAMES
+            animateAt(nowMs + FRAME_MS)
 
 PRI clearR() | frames
 ' Remove reference R and let it morph out, so a fresh R starts on a dark area (no pixels left from the last R).

@@ -22,9 +22,9 @@
     2. a portrait 48 x 128 area at ROT_270; an odd 100 x 37 area; thickness 1 in the whole display; the
        smallest area that places a one-digit group (reported)
     3. refusals, each drawing nothing and changing nothing: area too small, unknown adapter, an area off the
-       display, an empty area, unknown type, a layout of the wrong kind, a value out of range
+       display, an empty area, unknown type, a layout of the wrong kind, a value out of range, a group already placed
     4. overlap: one pixel of overlap is refused, edge-to-edge is accepted; removeGroup() morphs the group out,
-       and once it has finished its area can be placed again
+       (placing it again meanwhile is refused), and once it has finished its area can be placed again
 
   Falsification: compile with -D MORPH_BREAK_PLACE and the expected sizes are taken one pixel wide and the
   "overlapping" area is moved one pixel to touching; the fit and overlap checks must then FAIL.
@@ -139,6 +139,7 @@ PUB go() | idx, pArea
 PRI checkFit(pName, left, top, width, height, rot) | status, usedW, usedH, litLeft, litTop, litRight, litBottom
 ' Place the 20:08 clock in an area and read back where its pixels landed.
 
+    removeWaitA()                                               ' a placed group refuses placeGroup(): free A first
     display.clearScreen()
     status, usedW, usedH := groupA.placeGroup(hub75Bffrs.HUB75_ADAPTER_1, left, top, width, height, groupA.GRP_CLOCK, groupA.LAYOUT_HH_MM, rot, color.cOrange, CLOCK_VALUE)
     frame()
@@ -187,6 +188,7 @@ PRI checkRefusals() | beforeSum
     refuse(@"refuse a counter with a clock layout", hub75Bffrs.HUB75_ADAPTER_1, 0, REFUSE_TOP, REFUSE_WIDTH, REFUSE_HEIGHT, groupA.GRP_UP_COUNTER, groupA.LAYOUT_HH_MM, 0, morphStatus.E_UNKNOWN_LAYOUT)
     refuse(@"refuse 10000 on four digits", hub75Bffrs.HUB75_ADAPTER_1, 0, REFUSE_TOP, REFUSE_WIDTH, REFUSE_HEIGHT, groupA.GRP_UP_COUNTER, groupA.LAYOUT_4_DIGITS, FOUR_DIGITS + ONE, morphStatus.E_VALUE_OUT_OF_RANGE)
     refuse(@"refuse 24:00:00 on a clock", hub75Bffrs.HUB75_ADAPTER_1, 0, REFUSE_TOP, REFUSE_WIDTH, REFUSE_HEIGHT, groupA.GRP_CLOCK, groupA.LAYOUT_HH_MM, groupA.MAX_DAY_SECONDS + ONE, morphStatus.E_VALUE_OUT_OF_RANGE)
+    refuse(@"refuse placing a placed group in a free area", hub75Bffrs.HUB75_ADAPTER_1, 0, REFUSE_TOP, REFUSE_WIDTH, REFUSE_HEIGHT, groupA.GRP_CLOCK, groupA.LAYOUT_HH_MM, CLOCK_VALUE, morphStatus.E_ALREADY_PLACED)
     redraw()                                                    ' the same time: a real-time clock's colon must not pulse between the sums
     utils.checkEqual(screenSum(), @"  ... the refused calls drew nothing and moved nothing", beforeSum)
     frame()
@@ -224,6 +226,8 @@ PRI checkOverlap() | status, sumB, overlapLeft
     oneFrame()                                                  ' one frame: A is mid morph-out
     status, _, _ := groupC.placeGroup(hub75Bffrs.HUB75_ADAPTER_1, OVERLAP_LEFT, OVERLAP_TOP, OVERLAP_WIDTH, OVERLAP_HEIGHT, groupC.GRP_UP_COUNTER, groupC.LAYOUT_2_DIGITS, groupC.ROT_0, color.cTeal, C_VALUE)
     utils.checkEqual(status, @"  ... C is still refused while A morphs out", morphStatus.E_AREA_OVERLAP)
+    status, _, _ := groupA.placeGroup(hub75Bffrs.HUB75_ADAPTER_1, OVERLAP_LEFT, OVERLAP_TOP, OVERLAP_WIDTH, OVERLAP_HEIGHT, groupA.GRP_UP_COUNTER, groupA.LAYOUT_2_DIGITS, groupA.ROT_0, color.cOrange, A_VALUE)
+    utils.checkEqual(status, @"  ... and so is placing A again while it morphs out", morphStatus.E_ALREADY_PLACED)
     waitRemovedA()
     utils.checkEqual(groupA.isPlaced(), @"  ... A's morph-out completes and frees its area", FALSE)
     utils.checkEqual(areaSum(OVERLAP_LEFT, OVERLAP_TOP, OVERLAP_WIDTH, OVERLAP_HEIGHT), @"  ... and leaves A's area dark", 0)

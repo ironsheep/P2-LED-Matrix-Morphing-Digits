@@ -50,6 +50,7 @@ CON ' ---- Group under test ----
   HALF_MS = MOVE_MS / 2
   START_MS = 10_000
   GAP_MS = 2_000
+  MAX_REMOVE_FRAMES = 10                                        ' a morph-out ends within one GAP_MS step; the cap turns a stuck one into a FAIL, not a hang
   MAX_GROUP_PIXELS = 1024                                       ' room for the group's unturned area (20 x 30 = 600)
   BYTES_PER_PIXEL = 3
   OPEN_ROW = 10                                                 ' open space, away from seams and edges
@@ -177,12 +178,16 @@ PUB go() | rot, mismatches, row, column, placedW, placedH, status
 #ENDIF
     utils.finish()
 
-PRI placeAndRest(grpIdx, rot, row, column, value) : width, height | status, areaW, areaH
+PRI placeAndRest(grpIdx, rot, row, column, value) : width, height | status, areaW, areaH, frames
 ' Place group grpIdx turned rot, in the area that fits its digit exactly (top-left at row, column), showing
 ' value at rest, and draw it.
 
     areaW := (rot == group.ROT_90 or rot == group.ROT_270) ? AREA_HEIGHT : AREA_WIDTH
     areaH := (rot == group.ROT_90 or rot == group.ROT_270) ? AREA_WIDTH : AREA_HEIGHT
+    if group[grpIdx].removeGroup() == morphStatus.SUCCESS       ' a placed group refuses placeGroup(): morph it out first
+        repeat while group[grpIdx].isPlaced() and frames++ < MAX_REMOVE_FRAMES
+            nowMs += GAP_MS
+            group[grpIdx].animate(nowMs)
     group[grpIdx].setMoveDuration(MOVE_MS)
     status, width, height := group[grpIdx].placeGroup(hub75Bffrs.HUB75_ADAPTER_1, column, row, areaW, areaH, group.GRP_UP_COUNTER, group.LAYOUT_1_DIGIT, rot, color.cOrange, value)
     if status <> morphStatus.SUCCESS
