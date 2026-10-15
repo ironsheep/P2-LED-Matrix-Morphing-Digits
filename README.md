@@ -207,7 +207,7 @@ The script needs Python 3 plus the `tzlocal` and `colorama` packages (`pip insta
 ./Generator/pymorph.py -o animationTable.out    # -v verbose, -d debug
 ```
 
-Its output is copied into the `fmN_M` entries of the `DAT` section of **isp_hub75_morph7seg.spin2**. **Docs/transition-table.out** is a copy of the latest output.
+Its output is copied into the `transitionN_M` entries of the `DAT` section of **isp_hub75_morph7seg.spin2**. **Docs/transition-table.out** is a copy of the latest output.
 
 ## Files in this repository
 

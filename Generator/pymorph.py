@@ -249,9 +249,10 @@ digit9 = ("a", "b", "c", "d",      "f", "g")
 # list of all digits (indexable)
 digitTupleSet = [digit0, digit1, digit2, digit3, digit4, digit5, digit6, digit7, digit8, digit9]
 
-tablePrefix = "fm"
+tablePrefix = "transition"
 accessPrefix = "segments."
 linePrefix = "\tbyte\t"
+listEndName = "ACTION_LIST_END"   # morph7seg CON: the byte that ends each command list
 
 # list of segment name with segment enum name
 segment0enum = ("a", "SEG_TOP_A")
@@ -405,7 +406,7 @@ def calcSegDiffs(ltDigit, rtDigit):
             warningCount += 1
             if not segmentName in missingNameSet:
                 missingNameSet.append(segmentName)
-    print_line("{}0\t' terminate entry".format(linePrefix), code=True)
+    print_line("{}{}\t' terminate entry".format(linePrefix, listEndName), code=True)
 
 # -----------------------------------------------------------------------------
 #  main application
